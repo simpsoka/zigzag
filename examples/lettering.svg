@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Auto-satin demo: filled shapes stitched as satin columns (layer "satin"). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="74mm" height="24mm" viewBox="0 0 74 24">
+  <g id="letters_satin">
+    <!-- O: a ring, satin between its outer and inner outline -->
+    <path id="O" fill="#1d3557" fill-rule="evenodd" d="M10,3 a9,9 0 1,0 0.01,0 Z M10,6.2 a5.8,5.8 0 1,0 0.01,0 Z"/>
+    <!-- I: a bar, split at its short ends -->
+    <rect id="I" x="22" y="3" width="3.4" height="18" fill="#1d3557"/>
+    <!-- C: an open band -->
+    <path id="C" transform="translate(9 0)" fill="#1d3557" d="M44,6.5 A7.5,7.5 0 1,0 44,17.5 L41.8,15.2 A4.3,4.3 0 1,1 41.8,8.8 Z"/>
+    <!-- crescent: tapered column, pointed tips -->
+    <path id="moon" transform="translate(13 0)" fill="#e63946" d="M52,3 A9,9 0 0,1 52,21 A6,9 0 0,0 52,3 Z"/>
+  </g>
+  <!-- H branches: can't be one column, falls back to fill with a note -->
+  <path id="H_satin" fill="#457b9d" d="M27.5,3 h2.6 v7.6 h3.4 v-7.6 h2.6 v18 h-2.6 v-7.8 h-3.4 v7.8 h-2.6 Z"/>
+</svg>

@@ -1,0 +1,96 @@
+[package]
+name = "zigzag"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Fast SVG-to-embroidery pipeline (PES, DST, Brother PEN) with direct Brother Skitch (PP1) upload"
+license = "Apache-2.0"
+
+[lib]
+name = "zigzag"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zigzag"
+path = "src/main.rs"
+
+# stdio ↔ HTTP bridge to the studio's MCP server (for clients that launch a command).
+[[bin]]
+name = "zigzag-mcp"
+path = "src/mcp_bridge.rs"
+
+# Visual editor (egui on OpenGL via glow). `cargo run --release --features gui --bin zigzag-studio`
+[[bin]]
+name = "zigzag-studio"
+path = "src/studio/main.rs"
+required-features = ["gui"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+usvg = "0.45"
+svgtypes = "0.15"
+# Glyph advances for the text caret (the version usvg itself uses).
+ttf-parser = "0.25"
+
+# Bluetooth upload to the Brother Skitch (PP1). Optional so the core
+# pipeline builds anywhere without Bluetooth system libraries.
+btleplug = { version = "0.13", optional = true }
+futures = { version = "0.3", optional = true }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "time"] }
+uuid = { version = "1", optional = true, features = ["v4"] }
+
+# Editor UI. Only the glow (OpenGL) renderer is compiled in; no wgpu.
+eframe = { version = "0.37", optional = true, default-features = false, features = [
+    "glow", "default_fonts", "accesskit", "clipboard", "x11", "wayland", "__screenshot",
+] }
+rfd = { version = "0.17", optional = true }
+i_overlay = { version = "9", default-features = false }
+roxmltree = { version = "0.20", default-features = false }
+resvg = { version = "0.45", default-features = false }
+serde_json = "1.0.154"
+base64 = "0.23.1"
+
+# Image Trace (PNG/JPEG/WebP/GIF logos → vector shapes), vendored from
+# VectorCraft. See vendor/README.md.
+vectorcraft-trace = { path = "vendor/vectorcraft-trace" }
+kurbo = "0.13"
+
+tiny_http = { version = "0.12", optional = true }
+
+# The macOS menu bar (studio). Elsewhere the menus are drawn in the window.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSData"] }
+
+[features]
+default = []
+gui = ["dep:eframe", "dep:rfd", "dep:tiny_http", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+menu-check = ["gui", "dep:muda"]
+ble = ["dep:btleplug", "dep:futures", "dep:tokio", "dep:uuid", "dep:libdbus-sys"]
+
+# Tracing is slow unoptimized; keep it fast in debug builds and tests.
+[profile.dev.package.vectorcraft-trace]
+opt-level = 3
+
+[profile.dev.package.vectorcraft-geom]
+opt-level = 3
+
+[profile.dev.package.kurbo]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# On Linux, btleplug talks to BlueZ over D-Bus; vendoring libdbus avoids
+# needing libdbus-1-dev installed to build.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2", optional = true, features = ["vendored"] }
+# Lets the native menu code be compile-checked on Linux (needs GTK 3 dev files).
+muda = { version = "0.21", optional = true }
+
+[dev-dependencies]
+egui_kittest = "0.37"

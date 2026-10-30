@@ -1,0 +1,15 @@
+# Vendored from https://github.com/storytold/vectorcraft (crates/geom) at
+# f05c33cdfc0de6bd3f7d71e2a1628622af9a50f8. MIT OR Apache-2.0; see the
+# license files here. Only the manifest is changed (no workspace inheritance).
+[package]
+name = "vectorcraft-geom"
+version = "0.17.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "VectorCraft geom"
+publish = false
+
+[dependencies]
+kurbo = { version = "0.13", features = ["serde"] }
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "2"

@@ -1,0 +1,22 @@
+# cargo-about configuration: the libraries in the macOS app (both
+# architectures, built with gui,ble). Regenerate THIRD-PARTY-NOTICES.md after
+# changing dependencies:
+#   packaging/licenses/generate.sh
+#
+# Where a library offers a choice of licenses, the first of these it offers
+# is the one used.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Zlib",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+# Only what ships in the app: not the tools that build it, nor the tests.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

@@ -1,0 +1,40 @@
+zigzag
+Licensed under the Apache License, Version 2.0.
+
+This product includes code ported from the following projects.
+
+Respira (https://github.com/jhbruhn/respira)
+  Copyright Jan-Henrik Bruhn
+  Licensed under the Apache License, Version 2.0.
+  Ported: Brother PP1 (Skitch) Bluetooth protocol and sewing flow
+  (src/machine/protocol.rs, src/machine/session.rs, src/machine/skitch.rs),
+  machine error descriptions and thread-break rollback, the Brother
+  Embroidery thread numbers (src/studio/threads.rs), and the PEN stitch
+  encoder (src/formats/pen.rs).
+
+pyembroidery (https://github.com/EmbroidePy/pyembroidery)
+  Copyright (c) 2018 Tatarize
+  Licensed under the MIT License:
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions: The above copyright
+    notice and this permission notice shall be included in all copies or
+    substantial portions of the Software.
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+  Ported: PES/PEC/DST file layouts, PEC thread palette and thumbnail template
+  (src/formats/pes.rs, src/formats/dst.rs, src/formats/pec_data.rs).
+
+VectorCraft (https://github.com/storytold/vectorcraft)
+  Copyright the VectorCraft contributors (the ArtCraft team)
+  Licensed under the MIT License or the Apache License, Version 2.0, at your option.
+  Vendored: Image Trace and its geometry crate (vendor/vectorcraft-trace,
+  vendor/vectorcraft-geom), used to trace PNG/JPEG logos (src/trace.rs).
+  Ported: CIEDE2000 colour difference (src/formats/mod.rs), Schneider curve
+  fitting with corner splitting (src/bezier.rs), live-corner cutting
+  (src/bezier.rs), smart-guide snap targets (src/studio/snap.rs), segment
+  bending (src/studio/path_edit.rs), typed lengths with units and arithmetic
+  and the inch ruler steps (src/studio/units.rs), and the Measure tool
+  (src/studio/view_tools.rs).

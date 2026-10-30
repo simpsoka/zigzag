@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generator: Adobe Illustrator 28.0, SVG Export Plug-In . SVG Version: 1.2.0 Build 149)  -->
+<!-- 2" × 2" hat badge: layer names carry stitch settings, e.g. "fill a=45" -->
+<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px"
+     width="50.8mm" height="50.8mm" viewBox="0 0 144 144">
+  <style type="text/css">
+    .st0{fill:#E8A33C;}
+    .st1{fill:#2F4858;fill-rule:evenodd;}
+    .st2{fill:none;stroke:#C9452E;stroke-width:9;stroke-linecap:round;}
+    .st3{fill:none;stroke:#2F4858;stroke-width:1.2;}
+  </style>
+  <!-- Background disc with a crescent cut out (compound path, even-odd) -->
+  <g id="disc_fill_a_x3D_45_s_x3D_0_x2E_3">
+    <path class="st1" d="M72,8c35.3,0,64,28.7,64,64s-28.7,64-64,64S8,107.3,8,72S36.7,8,72,8z
+      M60,30c-20,6-32,26-26,46s28,30,48,24c-14-4-26-18-26-34S50,36,60,30z"/>
+  </g>
+  <!-- Sun, rotated fill angle -->
+  <g id="sun_fill_a_x3D_-30">
+    <circle class="st0" cx="94" cy="52" r="16"/>
+  </g>
+  <!-- Satin swoosh (stroke width 9px ≈ 3.2 mm) -->
+  <g id="swoosh_satin_pc_x3D_0_x2E_2">
+    <path class="st2" d="M24,104c20,-14,52,-18,96,-6"/>
+  </g>
+  <!-- Triple-run outline ring -->
+  <g id="ring_run_r_x3D_3" transform="translate(72 72) scale(0.95) translate(-72 -72)">
+    <circle class="st3" cx="72" cy="72" r="68"/>
+  </g>
+  <!-- Hidden guides are skipped -->
+  <g id="skip_guides">
+    <rect x="0" y="0" width="144" height="144" fill="#ff00ff"/>
+  </g>
+</svg>

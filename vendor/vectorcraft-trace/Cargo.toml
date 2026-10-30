@@ -1,0 +1,21 @@
+# Vendored from https://github.com/storytold/vectorcraft (crates/trace) at
+# f05c33cdfc0de6bd3f7d71e2a1628622af9a50f8. MIT OR Apache-2.0; see the
+# license files here. Only the manifest is changed (no workspace inheritance)
+# and the image-quality harness (tests/quality) is left out.
+[package]
+name = "vectorcraft-trace"
+version = "0.17.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "VectorCraft Image Trace: raster to vector tracing (quantize, boundary follow, polygon, Bezier fit)"
+publish = false
+
+[dependencies]
+vectorcraft-geom = { path = "../vectorcraft-geom" }
+kurbo = { version = "0.13", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "tiff", "bmp"] }
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
