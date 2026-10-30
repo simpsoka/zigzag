@@ -89,12 +89,15 @@ enum Event {
     Line(String),
     Stderr(String),
     Exit(Option<i32>),
+    StdoutClosed,
 }
 
 struct Run {
     child: Arc<Mutex<Child>>,
     rx: Receiver<Event>,
     stderr: Vec<String>,
+    exit: Option<Option<i32>>,
+    stdout_closed: bool,
 }
 
 #[derive(Default)]
@@ -436,6 +439,7 @@ impl AgentState {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let (tx, rx) = mpsc::channel();
+        let stdout_closed = child.stdout.is_none();
         if let Some(out) = child.stdout.take() {
             let tx = tx.clone();
             let ctx = ctx.clone();
@@ -444,6 +448,10 @@ impl AgentState {
                     let _ = tx.send(Event::Line(line));
                     ctx.request_repaint();
                 }
+                // This sender's EOF follows every stdout line. Process exit
+                // is reported by another thread and may arrive before them.
+                let _ = tx.send(Event::StdoutClosed);
+                ctx.request_repaint();
             });
         }
         let child = Arc::new(Mutex::new(child));
@@ -474,13 +482,14 @@ impl AgentState {
             child,
             rx,
             stderr: Vec::new(),
+            exit: None,
+            stdout_closed,
         });
     }
 
     /// Take in what the agent printed since last frame.
     pub fn poll(&mut self) {
         let Some(run) = &mut self.run else { return };
-        let mut ended = None;
         let mut lines = Vec::new();
         while let Ok(ev) = run.rx.try_recv() {
             match ev {
@@ -491,9 +500,11 @@ impl AgentState {
                         run.stderr.remove(0);
                     }
                 }
-                Event::Exit(code) => ended = Some(code),
+                Event::Exit(code) => run.exit = Some(code),
+                Event::StdoutClosed => run.stdout_closed = true,
             }
         }
+        let ended = if run.stdout_closed { run.exit } else { None };
         for l in lines {
             let Ok(v) = serde_json::from_str::<Value>(&l) else {
                 continue;
@@ -1670,59 +1681,203 @@ mod tests {
     }
 
     #[test]
-    fn runs_an_agent_program_and_streams_its_output() {
-        // A stand-in for `claude`: echoes stream-json and checks its stdin.
-        let dir = std::env::temp_dir().join(format!("tl-agent-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("claude");
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\nread -r p\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\n\
-             printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"you said %s\"}]}}\\n' \"$p\"\n\
-             echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":10}'\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn process_exit_waits_for_unread_stdout() -> anyhow::Result<()> {
+        use anyhow::ensure;
+        let child = Arc::new(Mutex::new(
+            Command::new(std::env::current_exe()?)
+                .args(["--exact", "agent::tests::send_process_fixture"])
+                .env_remove("ZIGZAG_SEND_FIXTURE")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        ));
+        let result = (|| -> anyhow::Result<()> {
+            for exit_first in [true, false] {
+                let (tx, rx) = mpsc::channel();
+                let mut agent = AgentState {
+                    kind: AgentKind::Claude,
+                    run: Some(Run {
+                        child: child.clone(),
+                        rx,
+                        stderr: Vec::new(),
+                        exit: None,
+                        stdout_closed: false,
+                    }),
+                    ..Default::default()
+                };
+                if exit_first {
+                    tx.send(Event::Exit(Some(0)))?;
+                    agent.poll();
+                    ensure!(agent.running(), "process exit discarded unread stdout");
+                }
+                for event in [
+                    serde_json::json!({"type":"system", "subtype":"init", "session_id":"s1"}),
+                    serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":"last output"}]}}),
+                    serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "num_turns":1, "duration_ms":10}),
+                ] {
+                    tx.send(Event::Line(event.to_string()))?;
+                }
+                tx.send(Event::StdoutClosed)?;
+                agent.poll();
+                if !exit_first {
+                    ensure!(agent.running(), "stdout EOF was mistaken for process exit");
+                    tx.send(Event::Exit(Some(0)))?;
+                    agent.poll();
+                }
+                ensure!(!agent.running(), "completed child stayed active");
+                ensure!(
+                    agent.session.as_deref() == Some("s1"),
+                    "late session was lost"
+                );
+                ensure!(
+                    agent.log.contains(&Entry::Said("last output".into())),
+                    "late output was lost"
+                );
+                ensure!(
+                    matches!(agent.log.last(), Some(Entry::Done(summary)) if !summary.is_empty()),
+                    "streamed completion was replaced by a generic exit"
+                );
+            }
+            Ok(())
+        })();
+        let cleanup = child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("child lock poisoned"))?
+            .wait();
+        result?;
+        cleanup?;
+        Ok(())
+    }
+
+    const SEND_FIXTURE_COMPLETED: &[u8] = b"zigzag-send-fixture-completed-v1";
+
+    #[test]
+    fn send_process_fixture() -> anyhow::Result<()> {
+        use anyhow::{Context, ensure};
+        if std::env::var_os("ZIGZAG_SEND_FIXTURE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return Ok(());
         }
-        let mut a = AgentState {
+        let expected =
+            PathBuf::from(std::env::var_os("ZIGZAG_CLAUDE").context("fixture executable")?);
+        let input =
+            PathBuf::from(std::env::var_os("ZIGZAG_AGENT_STDIN").context("fixture stdin record")?);
+        let mut agent = AgentState {
             kind: AgentKind::Claude,
             path: Some(None),
             ..Default::default()
         };
-        // Point find() at the fake through a PATH-less lookup.
-        let program = fake.clone();
-        let mut cmd = a.command(program, "http://127.0.0.1:1/mcp", None, 1);
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().into()).collect();
-        assert!(args.contains(&"--strict-mcp-config".to_string()));
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--tools" && w[1].is_empty())
-        );
-        // Run it the way send() does.
-        let ctx = egui::Context::default();
-        a.prompt = "hello".into();
-        unsafe { std::env::set_var("ZIGZAG_CLAUDE", &fake) };
-        a.send(Some("127.0.0.1:1".parse().unwrap()), &ctx);
-        let _ = &mut cmd;
-        for _ in 0..100 {
-            a.poll();
-            if !a.running() {
-                break;
+        let prompt = "hello\n\"quoted\" \\ path";
+        agent.prompt = prompt.into();
+        agent.send(Some("127.0.0.1:1".parse()?), &egui::Context::default());
+        let started = Instant::now();
+        while agent.running() {
+            agent.poll();
+            if started.elapsed() >= Duration::from_secs(10) {
+                agent.stop();
+                anyhow::bail!("agent fixture did not finish: {:?}", agent.log);
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(!a.running());
-        assert_eq!(a.session.as_deref(), Some("s1"));
-        assert!(
-            a.log.contains(&Entry::Said("you said hello".into())),
-            "{:?}",
-            a.log
+        ensure!(
+            agent.session.as_deref() == Some("s1"),
+            "missing streamed session: {:?}",
+            agent.log
         );
-        assert!(matches!(a.log.last(), Some(Entry::Done(_))));
-        let _ = std::fs::remove_dir_all(&dir);
+        ensure!(
+            agent
+                .log
+                .contains(&Entry::Said("fixture received stdin".into())),
+            "missing output: {:?}",
+            agent.log
+        );
+        ensure!(
+            matches!(agent.log.last(), Some(Entry::Done(_))),
+            "missing completion: {:?}",
+            agent.log
+        );
+        ensure!(agent.prompt.is_empty(), "submitted prompt was not cleared");
+        ensure!(
+            std::fs::read(&input)? == prompt.as_bytes(),
+            "send changed stdin"
+        );
+        let actual = std::fs::read_to_string(input.with_extension("program"))?;
+        ensure!(
+            std::fs::canonicalize(actual)? == std::fs::canonicalize(expected)?,
+            "send launched a different executable"
+        );
+        // A successful libtest exit alone also permits an unmatched filter or
+        // this fixture's intentional no-op path. Witness every assertion above.
+        std::fs::write(input.with_extension("complete"), SEND_FIXTURE_COMPLETED)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runs_an_agent_program_and_streams_its_output() -> anyhow::Result<()> {
+        use anyhow::{Context, ensure};
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("zigzag-agent-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        let result = (|| -> anyhow::Result<()> {
+            let source = dir.join("fixture.rs");
+            std::fs::write(
+                &source,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/agent_process.rs"
+                )),
+            )?;
+            let program = dir.join(format!("selected-agent{}", std::env::consts::EXE_SUFFIX));
+            let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+            let built = Command::new(compiler)
+                .args(["--edition=2024", "--crate-name", "agent_fixture"])
+                .arg(&source)
+                .arg("-o")
+                .arg(&program)
+                .output().context("compiling std-only agent fixture")?;
+            ensure!(
+                built.status.success(),
+                "fixture compile failed: {}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            // Safe lookup fallback: a wrong lookup invokes a decoy, never an installed agent.
+            let decoy = dir.join("decoy");
+            std::fs::create_dir(&decoy)?;
+            std::fs::copy(&program, decoy.join("claude"))?;
+            #[cfg(windows)]
+            std::fs::copy(&program, decoy.join("claude.exe"))?;
+            let input = dir.join("stdin");
+            let output = Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "agent::tests::send_process_fixture",
+                    "--nocapture",
+                ])
+                .env("ZIGZAG_SEND_FIXTURE", "1")
+                .env("ZIGZAG_CLAUDE", &program)
+                .env("ZIGZAG_AGENT_STDIN", &input)
+                .env("PATH", &decoy)
+                .output().context("running isolated send fixture")?;
+            ensure!(
+                output.status.success(),
+                "send process fixture failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let completion = std::fs::read(input.with_extension("complete"))
+                .context("send fixture did not complete its assertions")?;
+            ensure!(
+                completion == SEND_FIXTURE_COMPLETED,
+                "invalid send fixture completion witness"
+            );
+            Ok(())
+        })();
+        let cleanup = std::fs::remove_dir_all(&dir);
+        result?;
+        cleanup?;
+        Ok(())
     }
 
     fn studio() -> egui_kittest::Harness<'static, Studio> {
