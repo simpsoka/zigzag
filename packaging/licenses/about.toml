@@ -7,6 +7,8 @@
 # is the one used.
 accepted = [
     "MIT",
+    # borrow-or-share (the schema validator): MIT without attribution requirement.
+    "MIT-0",
     "Apache-2.0",
     "Zlib",
     "BSD-2-Clause",

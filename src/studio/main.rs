@@ -39,6 +39,7 @@ mod tabs;
 mod taskbar;
 mod theme;
 mod threads;
+mod tool_args;
 mod tools;
 mod trace_ui;
 mod units;

@@ -12,7 +12,7 @@ use eframe::egui::{self, Color32, Key, Pos2, Rect, Stroke, Vec2};
 use zigzag::bezier::{self, AnchorRef, BezPath};
 use zigzag::geom::P;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PathEdit {
     /// Outlines read from the document, by object uid: (the document
     /// revision read at, the path, or None when it can't be edited point by
@@ -29,6 +29,7 @@ pub struct PathEdit {
 }
 
 /// A point, handle or segment drag in progress.
+#[derive(Clone)]
 pub struct PointDrag {
     base_path: BezPath,
     index: usize,
