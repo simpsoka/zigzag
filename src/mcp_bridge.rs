@@ -58,17 +58,48 @@ fn dechunk(mut s: &str) -> String {
 }
 
 fn error_reply(line: &str, message: &str) -> Option<String> {
-    // Only requests (with an id) get a reply.
-    let id_start = line.find("\"id\"")?;
-    let after = line[id_start + 4..]
-        .trim_start()
-        .strip_prefix(':')?
-        .trim_start();
-    let end = after.find([',', '}']).unwrap_or(after.len());
-    let id = after[..end].trim();
-    Some(format!(
-        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32000,\"message\":\"{message}\"}}}}"
-    ))
+    use serde_json::{Value, json};
+    let error = |id: Value, code: i64, message: &str| {
+        Some(
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+                .to_string(),
+        )
+    };
+    let request: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(_) => return error(Value::Null, -32700, "Parse error"),
+    };
+    // MCP 2025-06-18 permits one message, string/integer IDs, object params.
+    // Check the message header before classifying request versus notification.
+    let valid_id = request.get("id").is_none_or(|id| {
+        id.is_string()
+            || id.is_i64()
+            || id.is_u64()
+            || id
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n.fract() == 0.0)
+    });
+    if !request.is_object()
+        || request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || request.get("method").and_then(Value::as_str).is_none()
+        || !valid_id
+    {
+        return error(Value::Null, -32600, "Invalid request for MCP 2025-06-18");
+    }
+    // Notifications never get replies, including parameter-validation errors.
+    // Establish direction before generating parameter-validation replies.
+    let id = request.get("id")?;
+    if request
+        .get("params")
+        .is_some_and(|params| !params.is_object())
+    {
+        return error(
+            id.clone(),
+            -32602,
+            "Invalid params: MCP parameters must be an object",
+        );
+    }
+    error(id.clone(), -32000, message)
 }
 
 fn main() {
@@ -112,10 +143,7 @@ fn main() {
             Ok((202, _)) | Ok((200, _)) => None,
             Ok((code, body)) => error_reply(
                 &line,
-                &format!(
-                    "ZigZag returned HTTP {code}: {}",
-                    body.trim().replace('"', "'")
-                ),
+                &format!("ZigZag returned HTTP {code}: {}", body.trim()),
             ),
             Err(_) => error_reply(
                 &line,
@@ -128,5 +156,102 @@ fn main() {
             let _ = writeln!(stdout, "{r}");
             let _ = stdout.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Context, ensure};
+    use serde_json::{Value, json};
+
+    fn reply(input: &str, message: &str) -> anyhow::Result<Value> {
+        let text = error_reply(input, message).context("missing error reply")?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    #[test]
+    fn bridge_errors_preserve_ids_and_escape_messages() -> anyhow::Result<()> {
+        let message = "ZigZag isn't running: \"quoted\" \\path\nnext line";
+        for id in [
+            json!(0),
+            json!(-17),
+            json!(u64::MAX),
+            json!(17.0),
+            json!("job,part-2}"),
+            json!("quote\"slash\\brace}comma,"),
+        ] {
+            let request = json!({"jsonrpc": "2.0", "params": {"id": "misleading"}, "id": id, "method": "tools/list"});
+            let result = reply(&request.to_string(), message)?;
+            ensure!(result["id"] == id, "ID did not round-trip: {result}");
+            ensure!(
+                result["error"]["message"] == message,
+                "message did not round-trip"
+            );
+            ensure!(result["error"]["code"] == -32000, "wrong connection error");
+        }
+        ensure!(
+            error_reply(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{"id":42}}"#,
+                message
+            )
+            .is_none(),
+            "notification replied"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bridge_errors_reject_envelopes_invalid_in_advertised_mcp_era() -> anyhow::Result<()> {
+        let message = "unavailable";
+        for invalid in [
+            json!([]),
+            json!([{"jsonrpc":"2.0","id":1,"method":"ping"}]),
+            json!(null),
+            json!(3),
+            json!({}),
+            json!({"jsonrpc":"1.0","id":1,"method":"ping"}),
+            json!({"jsonrpc":"2.0","id":1}),
+            json!({"jsonrpc":"2.0","id":1,"method":3}),
+            json!({"jsonrpc":"2.0","id":null,"method":"ping"}),
+            json!({"jsonrpc":"2.0","id":1.5,"method":"ping"}),
+            json!({"jsonrpc":"2.0","id":{},"method":"ping"}),
+        ] {
+            let result = reply(&invalid.to_string(), message)?;
+            ensure!(
+                result["error"]["code"] == -32600 && result["id"].is_null(),
+                "invalid request accepted: {invalid}"
+            );
+        }
+        for invalid in ["{", "not json", ""] {
+            let result = reply(invalid, message)?;
+            ensure!(
+                result["error"]["code"] == -32700 && result["id"].is_null(),
+                "missing parse error"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bridge_parameter_errors_preserve_ids_and_suppress_notifications() -> anyhow::Result<()> {
+        for params in [json!([]), json!(null), json!(3), json!("invalid")] {
+            let notification =
+                json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": params});
+            ensure!(
+                error_reply(&notification.to_string(), "unavailable").is_none(),
+                "invalid-parameter notification received a reply"
+            );
+            for id in [json!(1), json!("job-7")] {
+                let request =
+                    json!({"jsonrpc": "2.0", "id": id, "method": "ping", "params": params});
+                let response = reply(&request.to_string(), "unavailable")?;
+                ensure!(
+                    response["error"]["code"] == -32602 && response["id"] == id,
+                    "parameter error lost its request ID: {response}"
+                );
+            }
+        }
+        Ok(())
     }
 }
