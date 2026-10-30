@@ -857,13 +857,14 @@ mod tests {
     }
 
     #[test]
-    fn decorative_fills_and_satin_styles_from_the_panel() {
+    fn decorative_fills_and_satin_styles_from_the_panel() -> anyhow::Result<()> {
         use egui_kittest::kittest::Queryable;
         let mut h = studio(Some("badge.svg"));
         let disc = h.state().names.iter().position(|n| n == "disc").unwrap();
         let swoosh = h.state().names.iter().position(|n| n == "swoosh").unwrap();
         h.state_mut().set_selection(&[disc]);
         h.run_steps(2);
+        crate::test_support::finish_planning(&mut h)?;
         let tatami = h.state().design.per_shape[disc];
         for (label, kind) in [
             ("Meander", Kind::Meander),
@@ -871,11 +872,13 @@ mod tests {
             ("Cross-stitch", Kind::Cross),
             ("Tartan", Kind::Tartan),
         ] {
+            h.state_mut().planner.slow = true;
             h.get_by_label(label).click();
             h.run_steps(3);
+            crate::test_support::finish_planning(&mut h)?;
             assert_eq!(h.state().doc.shapes[disc].params.kind, Some(kind));
             let n = h.state().design.per_shape[disc];
-            assert!(n > 0 && n != tatami, "{label}: {n}");
+            anyhow::ensure!(n > 0 && n != tatami, "{label}: {n}");
         }
         // Tartan: two threads from one object, shown in the Threads panel.
         let blocks = h.state().design.blocks.len();
@@ -891,6 +894,7 @@ mod tests {
         );
         h.get_by_label("+ Stripe").click();
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert_eq!(
             h.state().doc.shapes[disc]
                 .params
@@ -902,15 +906,15 @@ mod tests {
         // The satin's stitch styles and a second thread.
         h.state_mut().set_selection(&[swoosh]);
         h.run_steps(2);
-        h.state_mut().replan();
+        crate::test_support::finish_planning(&mut h)?;
         let plain = h.state().design.per_shape[swoosh];
         h.get_by_label("Zig-zag").click();
         h.run_steps(2);
-        h.state_mut().replan();
+        crate::test_support::finish_planning(&mut h)?;
         assert!(h.state().design.per_shape[swoosh] < plain);
         h.get_by_label("S-stitch").click();
         h.run_steps(2);
-        h.state_mut().replan();
+        crate::test_support::finish_planning(&mut h)?;
         assert!(h.state().design.per_shape[swoosh] > plain);
         let before = h.state().design.blocks.len();
         h.state_mut().doc.shapes[swoosh].params.colors = Some(vec![[200, 0, 0], [0, 0, 200]]);
@@ -932,6 +936,7 @@ mod tests {
             back.shapes[swoosh].params.style,
             Some(zigzag::stitch::satin::SatinStyle::SStitch)
         );
+        Ok(())
     }
 
     #[test]

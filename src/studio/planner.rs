@@ -56,6 +56,13 @@ pub struct Planner {
 }
 
 impl Planner {
+    /// Requests and synchronous supersession advance this generation even
+    /// when an older worker result is discarded rather than accepted.
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     fn start(&mut self, ctx: &egui::Context) {
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
@@ -171,6 +178,10 @@ impl Studio {
         self.planner.slow = d.ms > SLOW_MS;
         self.planner.pending = false;
         self.replans += 1;
+        #[cfg(test)]
+        {
+            self.accepted_plans += 1;
+        }
         if let Some(p) = self.player {
             self.player = Some(p.min(self.design.stitch_count()));
         }
@@ -205,6 +216,42 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the worker never answered");
+    }
+
+    #[test]
+    fn queued_requests_remain_observable_when_stale_results_are_discarded() -> anyhow::Result<()> {
+        use anyhow::ensure;
+        let mut studio = Studio::with_file(None, None);
+        let (jobs, receive_jobs) = mpsc::channel();
+        let (send_done, done) = mpsc::channel();
+        studio.planner.jobs = Some(jobs);
+        studio.planner.done = Some(done);
+        studio.planner.slow = true;
+        let generation = studio.planner.generation();
+        let accepted = studio.accepted_plans;
+        let ctx = egui::Context::default();
+        studio.plan_changes(&ctx);
+        let first = receive_jobs.recv_timeout(std::time::Duration::from_secs(1))?;
+        studio.plan_changes(&ctx);
+        let second = receive_jobs.recv_timeout(std::time::Duration::from_secs(1))?;
+        ensure!(
+            studio.planner.generation() == generation + 2,
+            "admitted requests were hidden"
+        );
+        for (job, expected) in [(first, accepted), (second, accepted + 1)] {
+            send_done.send(Done {
+                generation: job.generation,
+                result: Ok((Design::default(), Vec::new())),
+                ms: 0.0,
+            })?;
+            studio.take_plan();
+            ensure!(
+                studio.accepted_plans == expected,
+                "stale result counted as accepted"
+            );
+        }
+        ensure!(!studio.planner.pending, "latest result not accepted");
+        Ok(())
     }
 
     #[test]

@@ -114,9 +114,11 @@ pub struct Studio {
     pub(crate) hud_lift: f32,
     /// Open the issues list (Window › Issues) next frame.
     pub(crate) open_issues: bool,
-    /// How many times the stitches were planned (tests check gestures
-    /// don't re-plan every frame).
+    /// Stitch rendering generation, including temporary transformed previews.
     pub(crate) replans: u64,
+    /// Accepted successful plans, excluding stale results and render-only changes.
+    #[cfg(test)]
+    pub(crate) accepted_plans: u64,
     /// What the last plan can lend the next (see `PlanCache`).
     pub(crate) plan_cache: zigzag::design::PlanCache,
     /// An MCP batch is running: edits re-plan once at its end (or before a
@@ -291,6 +293,8 @@ impl Studio {
             hud_lift: 0.0,
             open_issues: false,
             replans: 0,
+            #[cfg(test)]
+            accepted_plans: 0,
             plan_cache: Default::default(),
             batching: false,
             planner: Default::default(),
@@ -429,6 +433,10 @@ impl Studio {
         }
         self.plan_ms = t.elapsed().as_secs_f64() * 1000.0;
         self.replans += 1;
+        #[cfg(test)]
+        {
+            self.accepted_plans += 1;
+        }
         // A slow plan sends the next ones to the worker; one made here
         // supersedes any still out.
         self.planner.slow = self.plan_ms > crate::planner::SLOW_MS;
@@ -1948,16 +1956,19 @@ mod tests {
     }
 
     #[test]
-    fn type_buttons_change_stitch_type_and_undo_restores() {
+    fn type_buttons_change_stitch_type_and_undo_restores() -> anyhow::Result<()> {
         let mut h = studio(None);
         let sun = index_of(&h, "sun");
         h.state_mut().select_index(Some(sun));
         h.run_steps(2);
+        crate::test_support::finish_planning(&mut h)?;
         assert_eq!(kind(&h, sun), Some(Kind::Fill));
         let before = h.state().design.stitch_count();
 
+        h.state_mut().planner.slow = true;
         h.get_by_label("Run").click();
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert_eq!(kind(&h, sun), Some(Kind::Run));
         assert_ne!(
             h.state().design.stitch_count(),
@@ -1968,17 +1979,20 @@ mod tests {
 
         h.key_press_modifiers(egui::Modifiers::COMMAND, Key::Z);
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert_eq!(kind(&h, sun), Some(Kind::Fill));
         assert_eq!(h.state().design.stitch_count(), before);
 
         h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z);
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert_eq!(kind(&h, sun), Some(Kind::Run));
 
         // An 11 mm disc is too wide for a satin column: it's filled, and the
         // checks say why.
         h.get_by_label("Satin").click();
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert_eq!(kind(&h, sun), Some(Kind::Satin));
         assert!(
             h.state()
@@ -1986,6 +2000,7 @@ mod tests {
                 .iter()
                 .any(|x| x.shape == Some(sun) && x.message.contains("filled instead"))
         );
+        Ok(())
     }
 
     #[test]
@@ -2290,11 +2305,13 @@ mod tests {
     }
 
     #[test]
-    fn document_toggles_replan_and_are_undoable() {
+    fn document_toggles_replan_and_are_undoable() -> anyhow::Result<()> {
         let mut h = studio(None);
+        crate::test_support::finish_planning(&mut h)?;
         let before = h.state().design.stitch_count();
         h.get_by_label("Remove overlaps").click();
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert!(!h.state().doc.settings.remove_overlaps);
         assert_ne!(
             h.state().design.stitch_count(),
@@ -2303,7 +2320,9 @@ mod tests {
         );
         h.key_press_modifiers(egui::Modifiers::COMMAND, Key::Z);
         h.run_steps(3);
+        crate::test_support::finish_planning(&mut h)?;
         assert!(h.state().doc.settings.remove_overlaps);
+        Ok(())
     }
 
     #[test]
