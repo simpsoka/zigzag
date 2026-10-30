@@ -10,7 +10,7 @@
 //! Closing a tab with unsaved changes asks first. Quitting doesn't need to:
 //! every tab comes back next time, unsaved changes and all (see `session.rs`).
 
-use crate::app::{Snap, Studio};
+use crate::app::Studio;
 use crate::canvas::View;
 use crate::icons::{self, Icon};
 use crate::theme::pal_ui;
@@ -53,8 +53,8 @@ pub struct Tab {
     redo: Vec<Document>,
     player: Option<usize>,
     plan_cache: PlanCache,
-    /// The document as last written to its recovery file.
-    pub(crate) saved: Option<(u64, Snap)>,
+    /// A known recovery file and whether it needs another write.
+    pub(crate) saved: Option<crate::session::RecoveryState>,
     /// Which recovery file is its (see `session::recovery_file`).
     pub(crate) rec: u32,
 }

@@ -321,19 +321,39 @@ impl Document {
     }
 
     pub fn save(&mut self, path: Option<&Path>) -> Result<PathBuf> {
+        self.save_with(path, |path, bytes| {
+            use std::io::Write;
+            crate::file_replace::replace_file_atomic(path, |file| file.write_all(bytes))
+        })
+    }
+
+    fn save_with(
+        &mut self,
+        path: Option<&Path>,
+        replace: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>,
+    ) -> Result<PathBuf> {
         let path = match path.or(self.path.as_deref()) {
             Some(p) => p.to_path_buf(),
             None => bail!("no file name yet; use Save As"),
         };
-        self.sync()?;
-        std::fs::write(&path, &self.xml).with_context(|| format!("writing {}", path.display()))?;
-        if self.path.as_deref() != Some(path.as_path()) {
-            self.name = path
+        let mut prepared = self.clone();
+        prepared.sync()?;
+        let result = replace(&path, prepared.xml.as_bytes());
+        let committed = result
+            .as_ref()
+            .err()
+            .is_none_or(crate::file_replace::replacement_committed);
+        if committed && prepared.path.as_deref() != Some(path.as_path()) {
+            prepared.name = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            self.path = Some(path.clone());
+            prepared.path = Some(path.clone());
         }
+        if committed {
+            *self = prepared;
+        }
+        result.with_context(|| format!("writing {}", path.display()))?;
         Ok(path)
     }
 
@@ -766,6 +786,79 @@ use crate::geom::{affine_inv as mat_inv, affine_mul as mat_mul};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn committed_save_keeps_identity_when_directory_sync_fails() -> anyhow::Result<()> {
+        use anyhow::ensure;
+        use std::io::{self, Write};
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("committed.svg");
+        let mut document = super::Document::empty();
+        document.settings.fabric = "thin-cap".into();
+        let result = document.save_with(Some(&path), |path, bytes| {
+            crate::file_replace::replace_file_atomic(path, |file| file.write_all(bytes))?;
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                crate::file_replace::DurabilityError {
+                    destination: path.to_path_buf(),
+                    source: io::Error::other("injected directory sync failure"),
+                },
+            ))
+        });
+        let error = result
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("sync failure swallowed"))?;
+        ensure!(
+            error
+                .downcast_ref::<io::Error>()
+                .is_some_and(crate::file_replace::replacement_committed),
+            "commit marker lost"
+        );
+        ensure!(
+            document.path.as_ref() == Some(&path) && document.name == "committed",
+            "committed Save As identity lost"
+        );
+        ensure!(
+            std::fs::read_to_string(&path)? == document.xml,
+            "live normalization differs from committed bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_save_preserves_original_and_identity_on_failure() -> anyhow::Result<()> {
+        use anyhow::ensure;
+        use std::io::{self, Write};
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("new.svg");
+        std::fs::write(&path, b"original")?;
+        let mut document = super::Document::empty();
+        document.settings.fabric = "thin-cap".into();
+        let old_xml = document.xml.clone();
+        let old_revision = document.rev();
+        let old_path = document.path.clone();
+        let old_name = document.name.clone();
+        let result = document.save_with(Some(&path), |path, _| {
+            crate::file_replace::replace_file_atomic(path, |file| {
+                file.write_all(b"partial")?;
+                Err(io::Error::other("injected partial write"))
+            })
+        });
+        ensure!(result.is_err(), "partial write succeeded");
+        ensure!(document.xml == old_xml && document.rev() == old_revision, "failed save normalized the live document");
+        ensure!(document.path == old_path && document.name == old_name, "identity changed on failure");
+        ensure!(std::fs::read(&path)? == b"original", "original truncated");
+        ensure!(std::fs::read_dir(dir.path())?.count() == 1, "temporary leaked");
+        let blocked = dir.path().join("directory.svg");
+        std::fs::create_dir(&blocked)?;
+        ensure!(document.save(Some(&blocked)).is_err(), "replaced directory");
+        ensure!(document.path == old_path && document.name == old_name, "identity changed on rename failure");
+        ensure!(std::fs::read_dir(dir.path())?.count() == 2, "temporary leaked");
+        document.save(Some(&path))?;
+        ensure!(document.path.as_ref() == Some(&path) && document.name == "new", "identity not committed");
+        ensure!(std::fs::read_to_string(&path)? == document.xml, "incomplete save");
+        Ok(())
+    }
+
     use super::*;
 
     const ILLUSTRATOR: &str = r##"<?xml version="1.0" encoding="UTF-8"?>

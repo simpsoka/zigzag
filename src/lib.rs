@@ -9,6 +9,8 @@ pub mod boolean;
 pub mod checks;
 pub mod design;
 pub mod document;
+#[doc(hidden)]
+pub mod file_replace;
 pub mod formats;
 pub mod geom;
 pub mod machine;

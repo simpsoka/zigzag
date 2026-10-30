@@ -57,6 +57,7 @@ vectorcraft-trace = { path = "vendor/vectorcraft-trace" }
 kurbo = "0.13"
 
 tiny_http = { version = "0.12", optional = true }
+tempfile = "3.27.0"
 
 # The macOS menu bar (studio). Elsewhere the menus are drawn in the window.
 [target.'cfg(target_os = "macos")'.dependencies]
