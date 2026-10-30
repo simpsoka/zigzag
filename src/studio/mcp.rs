@@ -63,11 +63,161 @@ impl ToolResult {
     }
 }
 
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    use anyhow::{Context, ensure};
+
+    fn message(result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn queued_expiry_and_deadline_both_prevent_start() -> anyhow::Result<()> {
+        let now = Instant::now();
+        let future = now
+            .checked_add(Duration::from_secs(60))
+            .context("deadline")?;
+        let queued = Execution::new(future);
+        ensure!(
+            message(&queued.no_reply()).contains("before starting"),
+            "no definite queued expiry"
+        );
+        ensure!(!queued.try_start_at(|| now), "expired call started");
+        let overdue = Execution::new(now);
+        ensure!(
+            !overdue.try_start_at(|| now),
+            "deadline did not prevent start"
+        );
+        ensure!(
+            message(&overdue.no_reply()).contains("before starting"),
+            "deadline result ambiguous"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn running_timeout_is_uncertain_and_does_not_cancel_completion() -> anyhow::Result<()> {
+        let now = Instant::now();
+        let future = now
+            .checked_add(Duration::from_secs(60))
+            .context("deadline")?;
+        let execution = Arc::new(Execution::new(future));
+        ensure!(execution.try_start_at(|| now), "live call not admitted");
+        let timeout = execution.no_reply();
+        ensure!(
+            timeout.is_error && message(&timeout).contains("outcome unknown"),
+            "running operation reported cancelled"
+        );
+        ensure!(!execution.try_start_at(|| now), "call admitted twice");
+        let (reply, receive) = mpsc::channel();
+        let call = Call {
+            name: "edit".into(),
+            args: json!({}),
+            reply,
+            execution,
+        };
+        call.complete(ToolResult::text("completed"));
+        let result = receive.recv_timeout(Duration::from_secs(1))?;
+        ensure!(
+            !result.is_error && message(&result) == "completed",
+            "timeout cancelled running operation"
+        );
+        Ok(())
+    }
+}
+
 /// A tool call waiting for the UI thread.
 pub struct Call {
     pub name: String,
     pub args: Value,
-    pub reply: Sender<ToolResult>,
+    reply: Sender<ToolResult>,
+    execution: Arc<Execution>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Queued,
+    Running,
+    Completed,
+    Expired,
+}
+
+/// Start and expiry must arbitrate on the same lock. A failed response wait is
+/// never itself cancellation of an operation that has already started.
+struct Execution {
+    deadline: Instant,
+    phase: Mutex<Phase>,
+}
+
+impl Execution {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            phase: Mutex::new(Phase::Queued),
+        }
+    }
+
+    fn try_start_at(&self, now: impl FnOnce() -> Instant) -> bool {
+        let Ok(mut phase) = self.phase.lock() else {
+            return false;
+        };
+        if *phase != Phase::Queued {
+            return false;
+        }
+        if now() >= self.deadline {
+            *phase = Phase::Expired;
+            return false;
+        }
+        *phase = Phase::Running;
+        true
+    }
+
+    fn no_reply(&self) -> ToolResult {
+        let Ok(mut phase) = self.phase.lock() else {
+            return ToolResult::error(
+                "execution state unavailable; outcome unknown; inspect the design before retrying",
+            );
+        };
+        match *phase {
+            Phase::Queued | Phase::Expired => {
+                *phase = Phase::Expired;
+                ToolResult::error(
+                    "request expired before starting; no operation was executed (is a dialog open?)",
+                )
+            }
+            Phase::Running | Phase::Completed => ToolResult::error(
+                "the operation started but its reply was not received in time; outcome unknown; inspect the design or external destination before retrying",
+            ),
+        }
+    }
+}
+
+impl Call {
+    pub fn try_start(&self) -> bool {
+        self.execution.try_start_at(Instant::now)
+    }
+
+    pub fn complete(self, result: ToolResult) {
+        if let Ok(mut phase) = self.execution.phase.lock() {
+            *phase = Phase::Completed;
+        }
+        let _ = self.reply.send(result);
+    }
+}
+
+#[derive(Clone)]
+struct CallQueue {
+    sender: Sender<Call>,
+    timeout: Duration,
 }
 
 pub struct Server {
@@ -151,12 +301,23 @@ pub fn start(
     instructions: String,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> std::io::Result<Server> {
+    start_with_timeout(port, tools, instructions, wake, Duration::from_secs(120))
+}
+
+pub(crate) fn start_with_timeout(
+    port: u16,
+    tools: Value,
+    instructions: String,
+    wake: impl Fn() + Send + Sync + 'static,
+    timeout: Duration,
+) -> std::io::Result<Server> {
     let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(std::io::Error::other)?;
     let addr = server
         .server_addr()
         .to_ip()
         .ok_or_else(|| std::io::Error::other("no IP address"))?;
     let (tx, rx) = mpsc::channel::<Call>();
+    let tx = CallQueue { sender: tx, timeout };
     let wake = std::sync::Arc::new(wake);
     let activity = Arc::new(Mutex::new(Activity::default()));
     let seen = activity.clone();
@@ -202,7 +363,7 @@ fn handle_http(
     mut req: tiny_http::Request,
     tools: &Value,
     instructions: &str,
-    tx: &Sender<Call>,
+    queue: &CallQueue,
     wake: &(dyn Fn() + Send + Sync),
     seen: &Mutex<Activity>,
 ) {
@@ -283,21 +444,24 @@ fn handle_http(
     // Tool calls go to the UI thread, which answers when it has applied them.
     let mut call = |name: String, args: Value| -> ToolResult {
         let (rtx, rrx) = mpsc::channel();
-        if tx
+        let Some(deadline) = Instant::now().checked_add(queue.timeout) else {
+            return ToolResult::error("request timeout exceeds the supported clock range");
+        };
+        let execution = Arc::new(Execution::new(deadline));
+        if queue.sender
             .send(Call {
                 name,
                 args,
                 reply: rtx,
+                execution: execution.clone(),
             })
             .is_err()
         {
             return ToolResult::error("the studio is shutting down");
         }
         wake();
-        rrx.recv_timeout(Duration::from_secs(120))
-            .unwrap_or_else(|_| {
-                ToolResult::error("the studio didn't answer in time (is a dialog open?)")
-            })
+        rrx.recv_timeout(queue.timeout)
+            .unwrap_or_else(|_| execution.no_reply())
     };
     let out = match &msg {
         Value::Array(batch) => {

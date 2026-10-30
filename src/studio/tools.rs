@@ -1886,6 +1886,102 @@ mod tests {
     use crate::app::Studio;
     use std::io::{Read, Write};
 
+    #[test]
+    fn expired_http_call_never_executes_when_ui_resumes() -> anyhow::Result<()> {
+        use anyhow::{Context, ensure};
+        let server = crate::mcp::start_with_timeout(
+            0,
+            tool_specs(),
+            INSTRUCTIONS.into(),
+            || {},
+            std::time::Duration::ZERO,
+        )?;
+        let port = server.addr.port();
+        let mut s = Studio::with_file(None, None);
+        s.mcp = Some(server);
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_svg","arguments":{"svg":BADGE}}}).to_string();
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", port))?;
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        write!(
+            socket,
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        let mut response = String::new();
+        socket.read_to_string(&mut response)?;
+        // The HTTP timeout has returned, while UI dispatch has been withheld.
+        s.handle_mcp();
+        ensure!(
+            s.doc.shapes.is_empty() && s.undo.is_empty(),
+            "expired queued edit executed after timeout"
+        );
+        let (_, body) = response.split_once("\r\n\r\n").context("HTTP reply")?;
+        let reply: Value = serde_json::from_str(body)?;
+        ensure!(reply["result"]["isError"] == true, "timeout was successful");
+        ensure!(
+            text(&ToolResult::text(
+                reply["result"]["content"][0]["text"].as_str().unwrap_or("")
+            ))
+            .contains("before starting"),
+            "missing no-effect verdict"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn http_timeout_after_commit_reports_unknown_outcome() -> anyhow::Result<()> {
+        use anyhow::{Context, ensure};
+        let mut studio = Studio::with_file(None, None);
+        let server = crate::mcp::start_with_timeout(
+            0,
+            tool_specs(),
+            INSTRUCTIONS.into(),
+            || {},
+            std::time::Duration::from_secs(5),
+        )?;
+        let port = server.addr.port();
+        let client = std::thread::spawn(move || -> anyhow::Result<Value> {
+            let body = json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add_svg","arguments":{"svg":BADGE}}}).to_string();
+            let mut socket = std::net::TcpStream::connect(("127.0.0.1", port))?;
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+            write!(
+                socket,
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            let (_, body) = response.split_once("\r\n\r\n").context("HTTP response")?;
+            Ok(serde_json::from_str(body)?)
+        });
+        let call = server.rx.recv_timeout(std::time::Duration::from_secs(5))?;
+        ensure!(
+            call.try_start(),
+            "call did not enter execution before its deadline"
+        );
+        let result = studio.run_mcp_call(&call.name, &call.args);
+        ensure!(
+            !result.is_error && studio.doc.shapes.len() == 4,
+            "edit did not commit before response timeout"
+        );
+        // Withhold only completion/reply. A timed-out response must not claim
+        // this already-observed edit was cancelled or had no effect.
+        let reply = client
+            .join()
+            .map_err(|_| anyhow::anyhow!("HTTP client thread failed"))??;
+        let message = reply["result"]["content"][0]["text"]
+            .as_str()
+            .context("tool error text")?;
+        ensure!(
+            reply["result"]["isError"] == true
+                && message.contains("outcome unknown")
+                && !message.contains("no operation"),
+            "committed operation reported as cancelled: {message}"
+        );
+        call.complete(result);
+        Ok(())
+    }
+
     const BADGE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
         <circle id="patch" cx="50" cy="50" r="48" fill="#1d3557"/>
         <path id="ring" d="M50,8 a42,42 0 1,0 0.01,0 Z M50,14 a36,36 0 1,0 0.01,0 Z" fill="#f1faee" fill-rule="evenodd"/>

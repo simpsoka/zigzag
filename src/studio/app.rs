@@ -913,10 +913,13 @@ impl Studio {
             None => return,
         };
         for call in calls {
+            if !call.try_start() {
+                continue;
+            }
             let at = Instant::now();
             let result = self.run_mcp_call(&call.name, &call.args);
             self.mcp_ui.note(&call.name, at, &result);
-            let _ = call.reply.send(result);
+            call.complete(result);
         }
     }
 
