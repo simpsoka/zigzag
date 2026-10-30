@@ -38,6 +38,7 @@ struct State {
     error: u8,
     since: Instant,
     last: Instant,
+    manual_time: Option<Instant>,
     connected: bool,
     /// The pattern: decoded records.
     records: Vec<(i32, i32, u16, u16)>,
@@ -65,7 +66,17 @@ pub struct Sim(Arc<Mutex<State>>);
 
 impl Sim {
     pub fn new(cfg: SimConfig) -> Sim {
-        let now = Instant::now();
+        Self::with_clock(cfg, None)
+    }
+
+    /// A simulator whose time advances only through [`Sim::advance`].
+    /// Useful when an observer must inspect a stage before it can finish.
+    pub fn manual(cfg: SimConfig) -> Sim {
+        Self::with_clock(cfg, Some(Instant::now()))
+    }
+
+    fn with_clock(cfg: SimConfig, manual_time: Option<Instant>) -> Sim {
+        let now = manual_time.unwrap_or_else(Instant::now);
         Sim(Arc::new(Mutex::new(State {
             cfg,
             status: if cfg.needs_homing {
@@ -76,6 +87,7 @@ impl Sim {
             error: protocol::NO_ERROR,
             since: now,
             last: now,
+            manual_time,
             connected: true,
             records: Vec::new(),
             incoming: Vec::new(),
@@ -91,6 +103,25 @@ impl Sim {
             reply: Vec::new(),
             short: Vec::new(),
         })))
+    }
+
+    /// Advance a manual simulator and process the current stage once.
+    /// Automatic simulators reject this operation; real time remains their clock.
+    /// Returns an error for the wrong mode, clock overflow, or poisoned state.
+    pub fn advance(&self, by: Duration) -> Result<()> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("simulator lock poisoned"))?;
+        let now = state
+            .manual_time
+            .ok_or_else(|| anyhow::anyhow!("simulator uses real time"))?;
+        state.manual_time = Some(
+            now.checked_add(by)
+                .ok_or_else(|| anyhow::anyhow!("simulator time overflow"))?,
+        );
+        state.tick();
+        Ok(())
     }
 
     pub fn status(&self) -> Status {
@@ -145,14 +176,18 @@ impl Sim {
 }
 
 impl State {
+    fn now(&self) -> Instant {
+        self.manual_time.unwrap_or_else(Instant::now)
+    }
+
     fn set(&mut self, st: Status) {
         self.status = st;
-        self.since = Instant::now();
+        self.since = self.now();
     }
 
     /// Move the simulation on to now.
     fn tick(&mut self) {
-        let now = Instant::now();
+        let now = self.now();
         let dt = now.duration_since(self.last).as_secs_f64();
         self.last = now;
         let waited = now.duration_since(self.since).as_secs_f64();
@@ -386,6 +421,93 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("never got to {st:?} (at {:?})", sim.status());
+    }
+
+    #[test]
+    fn manual_time_drives_the_session_without_skipping_observed_stages() -> Result<()> {
+        use anyhow::ensure;
+        let sim = Sim::manual(SimConfig {
+            stitches_per_s: 4000.0,
+            person_s: 5.0,
+            needs_homing: true,
+        });
+        let mut session = Session::open(Box::new(sim.clone()))?;
+        ensure!(
+            sim.advance(Duration::MAX).is_err(),
+            "overflowing manual time accepted"
+        );
+        ensure!(
+            session.state()?.0 == Status::Initial,
+            "initial stage skipped"
+        );
+        sim.advance(Duration::from_secs(10))?;
+        ensure!(
+            session.state()?.0 == Status::Idle,
+            "homing did not complete"
+        );
+        let input: Vec<_> = (0..300)
+            .map(|k| pen::InStitch {
+                x: (k % 50) as f64 * 10.0,
+                y: (k / 50) as f64 * 10.0,
+                cmd: 0,
+                color: usize::from(k >= 150),
+            })
+            .collect();
+        let data = pen::encode_stitches(&input);
+        session.upload(&data, Layout::centered(data.bounds), [7; 16], |_| {})?;
+        session.mask_trace()?;
+        ensure!(
+            session.state()?.0 == Status::WaitingForMaskTrace,
+            "trace started without advancement"
+        );
+        sim.advance(Duration::from_secs(5))?;
+        ensure!(
+            session.state()?.0 == Status::MaskTracing,
+            "trace stage skipped"
+        );
+        sim.advance(Duration::from_secs(5))?;
+        ensure!(
+            session.state()?.0 == Status::MaskTraceComplete,
+            "trace did not complete"
+        );
+        session.start_sewing()?;
+        ensure!(
+            session.state()?.0 == Status::ReadyToSew,
+            "start stage skipped"
+        );
+        sim.advance(Duration::from_secs(5))?;
+        ensure!(session.state()?.0 == Status::Sewing, "sewing did not start");
+        sim.advance(Duration::from_secs(1))?;
+        ensure!(
+            session.state()?.0 == Status::WaitingForColorChange,
+            "thread change skipped"
+        );
+        let at = session.progress()?.current_stitch as usize;
+        ensure!(
+            data.thread_at(at, true) == Some(1),
+            "wrong thread at change"
+        );
+        sim.advance(Duration::from_millis(7500))?;
+        ensure!(
+            session.state()?.0 == Status::Sewing,
+            "thread change did not resume"
+        );
+        sim.advance(Duration::from_secs(1))?;
+        ensure!(
+            session.state()?.0 == Status::Complete,
+            "job did not complete"
+        );
+        ensure!(
+            session.progress()?.current_stitch as usize == data.stitches,
+            "final progress differs"
+        );
+        ensure!(
+            Sim::new(SimConfig::default())
+                .advance(Duration::ZERO)
+                .is_err(),
+            "real-time clock accepted manual advancement"
+        );
+        Ok(())
     }
 
     #[test]
