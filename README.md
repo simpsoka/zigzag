@@ -7,7 +7,8 @@ built-in **MCP (Model Context Protocol)** support so AI agents can create and
 edit designs alongside you. Turn SVG artwork into stitches, fine-tune it in
 the editor, and export **PES, DST, EXP, JEF, or VP3** for broad compatibility
 with embroidery machines—or send designs directly to a **Brother Skitch
-(PP1) over Bluetooth**.
+(PP1) over Bluetooth**. Skitch upload is experimental: it has not yet been
+tested against a real machine.
 
 Draw in Illustrator, draw in ZigZag, or let an agent draw. The Rust engine
 and `zigzag` command-line tool power the same workflow outside the editor.
@@ -256,6 +257,11 @@ escapes are decoded, and group settings apply to everything inside the group.
 Example layer names: `logo fill a=45 s=0.35`, `title satin`, `outline stroke.satin stroke.w=1.5`.
 
 ## Skitch over Bluetooth
+
+**Physical-device compatibility is not yet validated.** The simulated machine
+exercises the application workflow; it does not establish real pairing, upload,
+outline tracing, or stitch-out quality. The steps below describe the implemented
+workflow, pending testing with a real Skitch.
 
 The **Skitch window** (the toolbar's Send button or File › Send to Skitch…)
 runs the whole job, like a slicer's device page follows a print: the design
