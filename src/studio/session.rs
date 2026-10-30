@@ -557,8 +557,13 @@ impl Studio {
     /// can be picked up if the app quits or crashes. Written off the UI
     /// thread: a big design is a few megabytes of JSON.
     pub(crate) fn keep_sent(&self) {
+        let _ = self.keep_sent_task();
+    }
+
+    // Tests can join the real writer; dropping its handle keeps the UI asynchronous.
+    fn keep_sent_task(&self) -> Option<std::thread::JoinHandle<()>> {
         let (Some(file), Some(sent)) = (self.session.file("sent.json"), &self.machine.sent) else {
-            return;
+            return None;
         };
         let (design, uuid, centered) = (sent.design.clone(), sent.uuid, sent.centered);
         let write = move || {
@@ -571,12 +576,15 @@ impl Studio {
                 let _ = write_atomic(&file, &text);
             }
         };
-        if std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("keep-sent".into())
             .spawn(write.clone())
-            .is_err()
         {
-            write();
+            Ok(task) => Some(task),
+            Err(_) => {
+                write();
+                None
+            }
         }
     }
 
@@ -741,7 +749,7 @@ mod tests {
     /// recognized as the machine's (same id, same stitches) so its
     /// progress can show on it again.
     #[test]
-    fn the_design_on_the_machine_comes_back() {
+    fn the_design_on_the_machine_comes_back() -> anyhow::Result<()> {
         let dir = temp_dir("sent");
         let file = dir.join("logo.svg");
         std::fs::write(&file, SVG).unwrap();
@@ -752,13 +760,9 @@ mod tests {
         a.machine
             .send(&a.design, pen, &eframe::egui::Context::default());
         let sent = a.machine.sent.clone().unwrap();
-        a.keep_sent();
-        // (Written on a thread.)
-        for _ in 0..200 {
-            if dir.join("sent.json").exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        if let Some(task) = a.keep_sent_task() {
+            task.join()
+                .map_err(|_| anyhow::anyhow!("sent-design writer panicked"))?;
         }
         drop(a);
 
@@ -780,6 +784,7 @@ mod tests {
         b.forget_sent();
         let mut c = studio_in(&dir);
         assert!(!c.restore_sent());
+        Ok(())
     }
 
     #[test]
