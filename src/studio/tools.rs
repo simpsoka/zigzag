@@ -1038,11 +1038,9 @@ impl Studio {
                         "this document has never been saved; pass an absolute path ending in .svg",
                     );
                 }
-                self.save(path.as_deref());
-                if self.modified {
-                    Err(self.status.clone())
-                } else {
-                    Ok(ToolResult::text(self.status.clone()))
+                match self.save(path.as_deref()) {
+                    Ok(path) => Ok(ToolResult::text(format!("Saved {}.", path.display()))),
+                    Err(error) => Err(format!("{error:#}")),
                 }
             }
             "export" => {
@@ -1892,6 +1890,78 @@ mod tests {
         <rect id="bar" x="20" y="46" width="60" height="8" fill="#e63946"/>
         <path id="stitchline" d="M25,70 L75,70" stroke="#f1faee" stroke-width="1" fill="none"/>
     </svg>"##;
+
+    #[test]
+    fn unmodified_failed_save_as_is_an_mcp_error() -> anyhow::Result<()> {
+        use anyhow::ensure;
+        let blocker = std::env::temp_dir().join(format!("zigzag-save-blocker-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&blocker)?;
+        drop(file);
+        let mut s = Studio::with_file(None, None);
+        ensure!(!s.modified, "fixture is already modified");
+        let result = s.run_tool("save", &json!({"path": blocker.join("save-as.svg")}));
+        std::fs::remove_file(&blocker)?;
+        ensure!(result.is_error, "filesystem failure was reported as MCP success");
+        ensure!(!s.modified && s.doc.path.is_none(), "failure changed saved state");
+        Ok(())
+    }
+
+    #[test]
+    fn save_reports_filesystem_result_independently_of_modified() -> anyhow::Result<()> {
+        use anyhow::ensure;
+        let dir = std::env::temp_dir().join(format!("zigzag-save-result-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let outcome = (|| -> anyhow::Result<()> {
+            let mut s = Studio::with_file(None, None);
+            let edit = s.run_tool("add_svg", &json!({"svg": BADGE, "replace": true}));
+            ensure!(!edit.is_error && s.modified, "fixture must modify the document");
+            let path = dir.join("saved.svg");
+            let saved = s.run_tool("save", &json!({"path": path}));
+            ensure!(!saved.is_error && !s.modified, "successful save: {}", text(&saved));
+            ensure!(std::fs::read_to_string(&path)? == s.doc.xml, "saved content differs");
+            ensure!(s.status.starts_with("Saved "), "missing UI success status");
+
+            let blocker = dir.join("regular-file");
+            std::fs::write(&blocker, b"not a directory")?;
+            let invalid = blocker.join("failed.svg");
+            for modified in [false, true] {
+                if modified {
+                    let edit = s.run_tool("set_object", &json!({"object": 0, "angle": 43}));
+                    ensure!(
+                        !edit.is_error && s.modified,
+                        "fixture needs a real unsaved edit"
+                    );
+                }
+                let live_svg = s.doc.to_svg()?;
+                let history = s.undo.len();
+                let saved_bytes = std::fs::read(&path)?;
+                let old_path = s.doc.path.clone();
+                let old_name = s.doc.name.clone();
+                let stable_xml = s.stable.xml.clone();
+                s.dirty = false;
+                let failed = s.run_tool("save", &json!({"path": invalid}));
+                ensure!(failed.is_error, "failed save reported success");
+                ensure!(s.modified == modified, "failure changed modified state");
+                ensure!(s.doc.path == old_path && s.doc.name == old_name, "failure changed identity");
+                ensure!(s.stable.xml == stable_xml, "failure changed stable document");
+                ensure!(
+                    s.doc.to_svg()? == live_svg && s.undo.len() == history,
+                    "failed save lost design work or history"
+                );
+                ensure!(
+                    std::fs::read(&path)? == saved_bytes,
+                    "failed Save As changed the original file"
+                );
+                ensure!(!s.dirty, "failure changed dirty state");
+                ensure!(s.status.starts_with("Couldn't save:"), "missing UI failure status");
+            }
+            ensure!(s.save(Some(&invalid)).is_err(), "native save must return its error");
+            ensure!(s.status.starts_with("Couldn't save:"), "native failure status");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&dir)?;
+        outcome
+    }
 
     fn text(r: &ToolResult) -> String {
         r.content

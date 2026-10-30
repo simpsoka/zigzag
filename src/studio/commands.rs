@@ -560,7 +560,7 @@ impl Studio {
             }
             Action::Save => {
                 if self.doc.path.is_some() {
-                    self.save(None)
+                    let _ = self.save(None);
                 } else {
                     self.save_as_dialog()
                 }

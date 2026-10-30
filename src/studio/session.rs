@@ -820,7 +820,7 @@ mod tests {
         a.structural(|d| d.delete(1)).unwrap();
         a.write_session();
         assert!(dir.join("recovery.svg").exists());
-        a.save(None);
+        let _ = a.save(None);
         a.write_session();
         assert!(
             !dir.join("recovery.svg").exists(),
