@@ -13,3 +13,6 @@ publish = false
 kurbo = { version = "0.13", features = ["serde"] }
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1.0.154"
