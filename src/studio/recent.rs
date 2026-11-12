@@ -316,6 +316,10 @@ mod tests {
         assert!(!s.action_enabled(Action::ClearRecent));
     }
 
+    // (The menus are drawn in the window everywhere but on a Mac, where
+    // they're the real menu bar: nothing to click in a test there. The
+    // list behind them is covered above on every platform.)
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn open_recent_is_in_the_file_menu() {
         use eframe::egui::Vec2;
