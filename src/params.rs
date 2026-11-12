@@ -29,6 +29,8 @@
 //!   en=T       end sewing at this point of the outline
 //!   trim       cut the thread after this object
 //!   stop       pause the machine after this object (add foam, trim appliqué)
+//!   note=TEXT  what to do at that pause (`+` for a space, `%XX` for other
+//!              characters; see [`encode_note`])
 //! A `stroke.` prefix (e.g. `stroke.run`) applies a token only to the stroke of
 //! an element that has both a fill and a stroke.
 
@@ -164,6 +166,9 @@ pub struct Params {
     pub trim: Option<bool>,
     /// Pause the machine after this object (same thread, new color block).
     pub stop: Option<bool>,
+    /// What to do at that pause ("lay the foam"): shown in the Stops panel
+    /// and printed on the worksheet.
+    pub stop_note: Option<String>,
 }
 
 /// Fabric presets: the defaults every stitch setting falls back to. Picking the
@@ -406,6 +411,7 @@ impl Params {
             cell: child.cell.or(self.cell),
             trim: child.trim.or(self.trim),
             stop: child.stop.or(self.stop),
+            stop_note: child.stop_note.clone().or_else(|| self.stop_note.clone()),
         }
     }
 
@@ -420,9 +426,15 @@ impl Params {
             .filter(|t| !t.is_empty())
         {
             let lower = tok.to_ascii_lowercase();
-            match lower.strip_prefix("stroke.") {
-                Some(rest) => stroke.apply_token(rest),
-                None => base.apply_token(&lower),
+            // (`stroke.` is ASCII, so it's as long in `tok` as in `lower`.)
+            let (target, rest, original) = match lower.strip_prefix("stroke.") {
+                Some(rest) => (&mut stroke, rest, &tok[tok.len() - rest.len()..]),
+                None => (&mut base, lower.as_str(), tok),
+            };
+            match rest.strip_prefix("note=") {
+                // A note keeps its capitals: read from the token as written.
+                Some(_) => target.stop_note = decode_note(&original["note=".len()..]),
+                None => target.apply_token(rest),
             }
         }
         if stroke_part {
@@ -527,6 +539,9 @@ impl Params {
         if self.stop == Some(true) {
             t.push("stop".into());
         }
+        if let Some(n) = self.stop_note.as_deref().filter(|n| !n.trim().is_empty()) {
+            t.push(format!("note={}", encode_note(n)));
+        }
         let mut num = |k: &str, v: Option<f64>| {
             if let Some(v) = v {
                 t.push(format!("{k}={}", fmt_num(v)));
@@ -586,6 +601,51 @@ pub fn fmt_num(v: f64) -> String {
     let s = format!("{:.3}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.to_string() }
+}
+
+/// A stop's note as one token: letters, digits and `-.!'()*` as they are,
+/// a space as `+`, anything else as `%XX` per UTF-8 byte (so it holds none
+/// of the characters that separate tokens, or that XML and Illustrator
+/// treat specially).
+pub fn encode_note(note: &str) -> String {
+    let mut out = String::with_capacity(note.len());
+    for b in note.trim().bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => out.push(b as char),
+            b'-' | b'.' | b'!' | b'\'' | b'(' | b')' | b'*' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The inverse of [`encode_note`]. `None` for an empty note.
+pub fn decode_note(v: &str) -> Option<String> {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex = v
+                    .get(i + 1..i + 3)
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match hex {
+                    Some(x) => {
+                        out.push(x);
+                        i += 2;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    let s = String::from_utf8_lossy(&out).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 pub fn parse_hex(v: &str) -> Option<[u8; 3]> {
@@ -681,10 +741,40 @@ mod tests {
             colors: Some(vec![[255, 0, 0], [0, 0, 255]]),
             sett: Some(vec![([10, 20, 30], 4.0), ([200, 200, 0], 1.5)]),
             cell: Some(3.0),
+            stop_note: Some("Lay 3 mm foam, then press Start (50% speed)".into()),
             ..Params::default()
         };
         assert_eq!(Params::parse(&p.tokens().join(" ")), p);
         assert_eq!(Params::parse(&p.tokens().join("_")), p);
+    }
+
+    #[test]
+    fn stop_notes_are_one_token_and_keep_their_text() {
+        for note in [
+            "Trim the fabric",
+            "naïve café — 2×",
+            "a_b,c;d+e%f=g",
+            "<&\"'>",
+        ] {
+            let enc = encode_note(note);
+            assert!(
+                !enc.contains([' ', '_', ',', ';', '<', '>', '&', '"', '=']),
+                "{enc}"
+            );
+            assert_eq!(decode_note(&enc).as_deref(), Some(note));
+            let p = Params::parse(&format!("patch fill stop note={enc}"));
+            assert_eq!(p.stop_note.as_deref(), Some(note));
+            assert!(is_param_token(&format!("note={enc}")));
+        }
+        assert_eq!(decode_note(""), None);
+        assert_eq!(Params::parse("fill stop").stop_note, None);
+        // Only the stroke's, when prefixed.
+        let id = "badge fill stroke.stop stroke.note=Change+needle";
+        assert_eq!(Params::parse_part(id, false).stop_note, None);
+        assert_eq!(
+            Params::parse_part(id, true).stop_note.as_deref(),
+            Some("Change needle")
+        );
     }
 
     #[test]

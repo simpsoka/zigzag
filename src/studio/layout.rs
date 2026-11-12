@@ -101,6 +101,13 @@ pub struct LayoutState {
     pub last: Option<LastTransform>,
     /// The Offset Path window, when open: the distance (mm).
     pub offset_dialog: Option<f64>,
+    /// The Add Outline window, when open.
+    pub outline_dialog: Option<crate::layers::OutlineDialog>,
+    /// The settings Add Outline was last used with (the window opens with them).
+    pub outline_last: Option<crate::layers::OutlineDialog>,
+    /// A stop's note being typed in the Stops panel: (the object's uid, the
+    /// text so far), saved when the field is left.
+    pub stop_note_edit: Option<(usize, String)>,
     /// The Round Corners window, when open.
     pub corner_dialog: Option<CornerDialog>,
     /// The Simplify window, when open.

@@ -98,7 +98,32 @@ pub fn html(d: &Design, info: &WorksheetInfo) -> Result<String> {
                     .collect()
             })
             .unwrap_or_default();
-        let stop = k > 0 && d.blocks[k - 1].color == blk.color;
+        // Why the machine halts before this block: a pause (with what to do
+        // at it, when the design says) and/or a change of thread.
+        let start = d.block_start(k);
+        let name_of = |i: usize| info.names.get(i).map(|s| esc(s)).unwrap_or_default();
+        let halt = if k == 0 {
+            String::new()
+        } else if let Some((i, step)) = start.applique {
+            format!(
+                "<b>Stop</b> ({}: {}) · ",
+                name_of(i),
+                if step == 1 {
+                    "lay the fabric"
+                } else {
+                    "trim the fabric"
+                }
+            )
+        } else if start.stop_after.is_some() || !start.thread_change {
+            let what = match &start.note {
+                Some(n) => esc(n),
+                None if start.thread_change => "before changing thread".to_string(),
+                None => "same thread".to_string(),
+            };
+            format!("<b>Stop</b> ({what}) · ")
+        } else {
+            String::new()
+        };
         let _ = write!(
             rows,
             "<tr><td class=n>{}</td><td><span class=sw style=\"background:{hex}\"></span>{hex}</td><td>{}</td><td>{} {}</td><td class=r>{}</td><td>{}{}</td></tr>",
@@ -107,11 +132,7 @@ pub fn html(d: &Design, info: &WorksheetInfo) -> Result<String> {
             esc(&jk),
             esc(&jn),
             n,
-            if stop {
-                "<b>Stop</b> (same thread) · "
-            } else {
-                ""
-            },
+            halt,
             objects.join(", ")
         );
     }
@@ -219,5 +240,59 @@ mod tests {
         assert!(h.contains("heart"));
         assert_eq!(brother_name([14, 31, 124]), "Prussian Blue");
         assert_eq!(janome_thread([0, 0, 0]).1, "002");
+        assert!(
+            !h.contains("<b>Stop</b>"),
+            "a change of thread isn't a stop"
+        );
+    }
+
+    #[test]
+    fn worksheet_says_what_to_do_at_each_stop() {
+        use crate::design::{PlanOptions, plan};
+        use crate::params::{Kind, Params};
+        use crate::svg::{Geometry, Part, Shape};
+        let square = |x: f64, kind: Kind, color: [u8; 3], uid: usize| Shape {
+            id: format!("s{uid}"),
+            part: Part::Fill,
+            label: format!("s{uid}"),
+            color,
+            paint: color,
+            geometry: Geometry::Fill {
+                rings: vec![vec![
+                    P::new(x, 0.0),
+                    P::new(x + 200.0, 0.0),
+                    P::new(x + 200.0, 200.0),
+                    P::new(x, 200.0),
+                ]],
+                rule: crate::geom::FillRule::NonZero,
+            },
+            params: Params {
+                kind: Some(kind),
+                ..Params::default()
+            },
+            uid,
+            groups: Vec::new(),
+        };
+        let mut a = square(0.0, Kind::Fill, [0, 0, 0], 0);
+        a.params.stop = Some(true);
+        a.params.stop_note = Some("Lay 3 mm foam <puffy>".into());
+        let mut b = square(250.0, Kind::Fill, [0, 0, 0], 1);
+        b.params.stop = Some(true);
+        let c = square(500.0, Kind::Fill, [0, 0, 0], 2);
+        let patch = square(750.0, Kind::Applique, [237, 23, 31], 3);
+        let d = plan("t", &[a, b, c, patch], &PlanOptions::default());
+        let info = WorksheetInfo {
+            names: vec!["base".into(), "middle".into(), "top".into(), "patch".into()],
+            ..Default::default()
+        };
+        let h = html(&d, &info).unwrap();
+        assert!(
+            h.contains("<b>Stop</b> (Lay 3 mm foam &lt;puffy&gt;) · middle"),
+            "{h}"
+        );
+        assert!(h.contains("<b>Stop</b> (same thread) · top"));
+        assert!(h.contains("<b>Stop</b> (patch: lay the fabric)"));
+        assert!(h.contains("<b>Stop</b> (patch: trim the fabric)"));
+        assert_eq!(h.matches("<b>Stop</b>").count(), 4);
     }
 }

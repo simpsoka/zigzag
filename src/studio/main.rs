@@ -17,6 +17,7 @@ mod flyout;
 mod gpu;
 mod icons;
 mod kits;
+mod layers;
 mod layout;
 mod lettering;
 mod machine;

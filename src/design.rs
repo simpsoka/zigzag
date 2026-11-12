@@ -29,6 +29,26 @@ pub struct Block {
     pub runs: Vec<Run>,
 }
 
+/// Why the machine halts before a color block (see [`Design::block_start`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockStart {
+    /// The thread differs from the block before (true for the first block).
+    pub thread_change: bool,
+    /// The input shape whose "stop after" asked for a pause here.
+    pub stop_after: Option<usize>,
+    /// A pause inside an appliqué: (input shape, 1: lay the fabric, 2: trim it).
+    pub applique: Option<(usize, u8)>,
+    /// What to do at the pause, when the object says (`note=`).
+    pub note: Option<String>,
+}
+
+impl BlockStart {
+    /// A pause someone has to act on, not just a change of thread.
+    pub fn is_pause(&self) -> bool {
+        self.stop_after.is_some() || self.applique.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Design {
     pub name: String,
@@ -41,6 +61,10 @@ pub struct Design {
     pub notes: Vec<(usize, String)>,
     /// Input shapes sewn in each color block (same order as `blocks`).
     pub block_shapes: Vec<Vec<usize>>,
+    /// Why each color block starts (same order as `blocks`; empty for a
+    /// design that wasn't planned from shapes, such as an opened machine
+    /// file). Read it with [`Design::block_start`].
+    pub starts: Vec<BlockStart>,
     /// Input shapes left with nothing to fill: covered by what's sewn on
     /// top (so the checks needn't work the overlaps out again).
     pub covered: Vec<bool>,
@@ -1373,6 +1397,7 @@ pub fn plan_cached(
         sew_order: order.clone(),
         notes: Vec::new(),
         block_shapes: Vec::new(),
+        starts: Vec::new(),
         covered: shapes
             .iter()
             .zip(&geometry)
@@ -1390,6 +1415,10 @@ pub fn plan_cached(
     // the next object.
     let mut force_trim = false;
     let mut stop_next = false;
+    // Which object asked for that pause, and why every block (the empty
+    // ones too, until they're dropped below) was started.
+    let mut stop_from: Option<usize> = None;
+    let mut starts: Vec<BlockStart> = Vec::new();
     // The last run sewn belongs to the object being sewn (gaps inside an
     // object are never connected by the document's `connect`).
     let mut same_shape = false;
@@ -1444,6 +1473,13 @@ pub fn plan_cached(
                 runs: Vec::new(),
             });
             design.block_shapes.push(Vec::new());
+            starts.push(BlockStart::default());
+        }
+        if stop_next
+            && design.blocks.last().is_some_and(|b| b.runs.is_empty())
+            && let Some(s) = starts.last_mut()
+        {
+            s.stop_after = stop_from;
         }
         let last_group = sr.groups.iter().rposition(|g| !g.is_empty()).unwrap_or(0);
         for (gi, mut group) in sr.groups.into_iter().enumerate() {
@@ -1460,11 +1496,25 @@ pub fn plan_cached(
                 || design.blocks.last().is_none_or(|b| b.color != group_color)
             {
                 // A machine stop (same thread, new block) or a change of thread.
+                // A block left empty (a pause before an object whose first
+                // group is in another thread) hands its pause on.
+                let carried = match (design.blocks.last(), starts.last()) {
+                    (Some(b), Some(s)) if b.runs.is_empty() => s.stop_after,
+                    _ => None,
+                };
                 design.blocks.push(Block {
                     color: group_color,
                     runs: Vec::new(),
                 });
                 design.block_shapes.push(Vec::new());
+                starts.push(BlockStart {
+                    stop_after: carried,
+                    applique: (stop_here && last_nonempty)
+                        .then(|| sr.stops.iter().position(|&g| g == gi))
+                        .flatten()
+                        .map(|k| (si, k as u8 + 1)),
+                    ..BlockStart::default()
+                });
             }
             let bs = design.block_shapes.last_mut().unwrap();
             if !bs.contains(&si) {
@@ -1641,6 +1691,7 @@ pub fn plan_cached(
         }
         force_trim = shape.params.trim == Some(true);
         stop_next = shape.params.stop == Some(true);
+        stop_from = stop_next.then_some(si);
         same_shape = false;
     }
     // Forget shapes no longer there (or no longer like that).
@@ -1648,7 +1699,21 @@ pub fn plan_cached(
     let keep: Vec<bool> = design.blocks.iter().map(|b| !b.runs.is_empty()).collect();
     let mut k = keep.iter();
     design.block_shapes.retain(|_| *k.next().unwrap());
+    let mut k = keep.iter();
+    starts.retain(|_| *k.next().unwrap());
     design.blocks.retain(|b| !b.runs.is_empty());
+    for (k, s) in starts.iter_mut().enumerate() {
+        s.thread_change = k == 0 || design.blocks[k - 1].color != design.blocks[k].color;
+        // (A pause asked for before anything was sewn isn't one.)
+        if k == 0 {
+            s.stop_after = None;
+        }
+        s.note = s
+            .stop_after
+            .and_then(|i| shapes[i].params.stop_note.clone())
+            .filter(|n| !n.trim().is_empty());
+    }
+    design.starts = starts;
     design
 }
 
@@ -1693,6 +1758,24 @@ pub fn default_satin_width(shape: &Shape) -> f64 {
 }
 
 impl Design {
+    /// Why the machine halts before block `k`: a change of thread, a pause
+    /// an object asked for, an appliqué step, or (same thread twice running
+    /// in a design that doesn't say) a plain stop.
+    pub fn block_start(&self, k: usize) -> BlockStart {
+        match self.starts.get(k) {
+            Some(s) => s.clone(),
+            None => BlockStart {
+                thread_change: k == 0
+                    || self
+                        .blocks
+                        .get(k)
+                        .zip(self.blocks.get(k - 1))
+                        .is_none_or(|(b, a)| a.color != b.color),
+                ..BlockStart::default()
+            },
+        }
+    }
+
     pub fn bounds(&self) -> Bounds {
         let mut b = Bounds::empty();
         for blk in &self.blocks {
@@ -2233,6 +2316,56 @@ mod tests {
         assert_eq!(d.blocks.len(), 2);
         assert_eq!(d.blocks[0].color, d.blocks[1].color);
         assert_eq!(d.block_shapes, vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn every_block_says_why_the_machine_halts_before_it() {
+        let red = [200, 0, 0];
+        let mut a = shape(fill(sq(0.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        a.params.stop = Some(true);
+        a.params.stop_note = Some("Lay the foam".into());
+        let b = shape(fill(sq(130.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let mut c = shape(fill(sq(260.0, 0.0, 100.0)), Kind::Fill, red);
+        c.params.stop = Some(true);
+        let e = shape(fill(sq(390.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let d = plan("p", &[a, b, c, e], &PlanOptions::default());
+        assert_eq!(d.blocks.len(), 4);
+        assert_eq!(d.starts.len(), 4);
+        // The first block: the first thread, nothing to do before it.
+        assert_eq!(
+            d.block_start(0),
+            BlockStart {
+                thread_change: true,
+                ..BlockStart::default()
+            }
+        );
+        // After A: a pause in the same thread, with its note.
+        let s = d.block_start(1);
+        assert!(!s.thread_change && s.is_pause());
+        assert_eq!(s.stop_after, Some(0));
+        assert_eq!(s.note.as_deref(), Some("Lay the foam"));
+        // Before C: only a change of thread.
+        let s = d.block_start(2);
+        assert!(s.thread_change && !s.is_pause());
+        // After C: a pause that is also a change of thread (no note).
+        let s = d.block_start(3);
+        assert!(s.thread_change);
+        assert_eq!((s.stop_after, s.note.clone()), (Some(2), None));
+
+        // An appliqué's two pauses name their steps.
+        let ap = shape(fill(sq(0.0, 0.0, 300.0)), Kind::Applique, [0; 3]);
+        let d = plan("p", &[ap], &PlanOptions::default());
+        assert_eq!(d.blocks.len(), 3);
+        assert_eq!(d.block_start(1).applique, Some((0, 1)));
+        assert_eq!(d.block_start(2).applique, Some((0, 2)));
+
+        // A design that wasn't planned (an opened machine file) still says
+        // where the thread changes.
+        let mut bare = d.clone();
+        bare.starts.clear();
+        assert!(bare.block_start(0).thread_change);
+        assert!(!bare.block_start(1).thread_change);
+        assert!(!bare.block_start(1).is_pause());
     }
 
     #[test]

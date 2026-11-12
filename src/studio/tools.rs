@@ -20,7 +20,8 @@ contour (rows following the outline inward), blanket (E-stitch edge), applique (
 Settings can also be preset in SVG element ids, e.g. id=\"logo_fill_a=45\" or id=\"border_satin_w=2\". \
 Hat designs are small (about 50 × 50 mm on the front of a cap): keep satin columns under 7 mm wide, letters at least 5 mm tall, and details at least 1.5 mm. \
 open_file also opens machine files (pes, dst, exp, jef) as manual stitches. \
-trace_image turns a PNG/JPEG logo into shapes (snap colors to Brother or Janome threads with `threads`). round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
+trace_image turns a PNG/JPEG logo into shapes (snap colors to Brother or Janome threads with `threads`). add_outline puts an outline layer (satin border or running stitch) on top of a filled object, and merge_objects makes several objects one. The machine halts at every change of thread and wherever an object has `stop` (set_object; say what to do there with `stop_note`): get_design lists them all under `stops`. \
+round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
 Use batch to make several changes in one call: it is all or nothing and one undo step, and later steps can use earlier results (\"$0.added.0.name\").";
 
 fn obj_schema() -> Value {
@@ -205,7 +206,8 @@ pub fn tool_specs() -> Value {
                     "start": { "type": ["number", "null"], "description": "Where sewing starts: 0–1 along the object's outline (fills: the outer ring from its first point; lines: from their start). Null: the planner chooses." },
                     "end": { "type": ["number", "null"], "description": "Where sewing ends, 0–1 along the outline (the thread goes on from there to the next object)." },
                     "trim": { "type": ["boolean", "null"], "description": "Cut the thread after this object even if the next one is close." },
-                    "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." }
+                    "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." },
+                    "stop_note": { "type": ["string", "null"], "description": "What to do at that pause (\"Lay the 3 mm foam\"): shown in the Stops panel and printed on the worksheet. Null or empty removes it." }
                 },
                 "required": ["object"]
             }
@@ -398,6 +400,33 @@ pub fn tool_specs() -> Value {
                 },
                 "required": ["objects"]
             }
+        }),
+        json!({
+            "name": "add_outline",
+            "description": "Add an outline layer on top of filled objects: a new object following each one's edge, sewn straight after it (the fill itself isn't changed). Returns the new objects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": obj_schema(), "description": "Filled objects to outline." },
+                    "stitch": { "type": "string", "enum": ["satin", "run", "triple"], "description": "satin: a satin border centered on the edge (default). run: one pass of running stitch. triple: bean stitch, three passes." },
+                    "width_mm": { "type": "number", "description": "Satin border width, 0.5–12. Default 2." },
+                    "offset_mm": { "type": "number", "description": "How far outside the fill's edge the outline runs (negative: inside), up to 20 either way. Default 0: on the edge, half over the fill." },
+                    "color": { "type": "string", "description": "Thread color #rrggbb. Default: the fill's own thread." }
+                },
+                "required": ["objects"]
+            }
+        }),
+        json!({
+            "name": "merge_objects",
+            "description": "Merge two or more objects (layers) into one, in the thread and with the stitch settings of the one sewn last (on top), in its place in the sewing order. Filled shapes are united, so overlaps are sewn once; lines stay lines. Returns the merged object.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": obj_schema(), "description": "Two or more objects." }
+                },
+                "required": ["objects"]
+            },
+            "annotations": { "destructiveHint": true }
         }),
         json!({
             "name": "simplify",
@@ -767,6 +796,9 @@ impl Studio {
                     settings.insert(k.into(), json!(true));
                 }
             }
+            if let Some(n) = &p.stop_note {
+                settings.insert("stop_note".into(), json!(n));
+            }
         }
         json!({
             "index": i,
@@ -825,8 +857,42 @@ impl Studio {
                 "minutes": (total as f64 / SPM).ceil(),
             },
             "objects": (0..self.doc.shapes.len()).map(|i| self.object_json(i)).collect::<Vec<_>>(),
+            "stops": self.stops_json(),
             "design_problems": self.issues.iter().filter(|x| x.shape.is_none()).map(|x| issue_json(x, &self.names)).collect::<Vec<_>>(),
         })
+    }
+
+    /// Every halt in sewing order (the Stops panel's list), for get_design.
+    fn stops_json(&self) -> Value {
+        let name = |i: usize| self.names.get(i).cloned();
+        (1..self.design.blocks.len())
+            .map(|k| {
+                let s = self.design.block_start(k);
+                let mut v = serde_json::Map::new();
+                v.insert("before_color_block".into(), json!(k + 1));
+                v.insert(
+                    "kind".into(),
+                    json!(if s.applique.is_some() {
+                        "applique step"
+                    } else if s.stop_after.is_some() || !s.thread_change {
+                        "pause"
+                    } else {
+                        "thread change"
+                    }),
+                );
+                v.insert("what".into(), json!(self.halt_label(k, &s)));
+                if s.thread_change {
+                    v.insert("thread".into(), json!(hex(self.design.blocks[k].color)));
+                }
+                if let Some(n) = s.stop_after.or(s.applique.map(|a| a.0)).and_then(name) {
+                    v.insert("after_object".into(), json!(n));
+                }
+                if let Some(n) = &s.note {
+                    v.insert("note".into(), json!(n));
+                }
+                Value::Object(v)
+            })
+            .collect()
     }
 
     /// Run one MCP tool against the live document.
@@ -849,6 +915,8 @@ impl Studio {
             "batch" => return self.tool_batch(args),
             "trace_image" => self.tool_trace_image(args),
             "round_corners" => self.tool_round_corners(args),
+            "add_outline" => self.tool_add_outline(args),
+            "merge_objects" => self.tool_merge_objects(args),
             "simplify" => self.tool_simplify(args),
             "clean_up" => self.tool_clean_up(args),
             "get_design" => Ok(ToolResult::json(&self.design_json())),
@@ -1356,6 +1424,88 @@ impl Studio {
         Ok(ToolResult::text(crate::path_tools::cleanup_summary(&r)))
     }
 
+    fn tool_add_outline(&mut self, args: &Value) -> Result<ToolResult, String> {
+        use zigzag::document::{OutlineSpec, OutlineStitch};
+        let idx = self.resolve_many(args.get("objects"))?;
+        let mut spec = OutlineSpec::default();
+        if let Some(v) = args.get("stitch") {
+            spec.stitch = v
+                .as_str()
+                .and_then(OutlineStitch::by_id)
+                .ok_or("`stitch` must be satin, run or triple")?;
+        }
+        for (k, to, lo, hi) in [
+            (
+                "width_mm",
+                &mut spec.width_mm,
+                OutlineSpec::MIN_WIDTH,
+                OutlineSpec::MAX_WIDTH,
+            ),
+            (
+                "offset_mm",
+                &mut spec.offset_mm,
+                -OutlineSpec::MAX_OFFSET,
+                OutlineSpec::MAX_OFFSET,
+            ),
+        ] {
+            if let Some(v) = args.get(k) {
+                let x = v
+                    .as_f64()
+                    .filter(|x| x.is_finite())
+                    .ok_or(format!("`{k}` must be a number"))?;
+                if !(lo..=hi).contains(&x) {
+                    return Err(format!("`{k}` must be between {lo} and {hi}"));
+                }
+                *to = x;
+            }
+        }
+        if let Some(v) = args.get("color") {
+            spec.color = Some(
+                v.as_str()
+                    .and_then(parse_hex)
+                    .ok_or("`color` must be #rrggbb")?,
+            );
+        }
+        if let Some(&i) = idx
+            .iter()
+            .find(|&&i| !matches!(self.doc.shapes[i].geometry, Geometry::Fill { .. }))
+        {
+            return Err(format!(
+                "{} is a line, not a filled shape: only fills take an outline",
+                self.names[i]
+            ));
+        }
+        let mut new = Vec::new();
+        self.structural(|d| {
+            new = d.add_outline(&idx, &spec)?;
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        self.replan_soon();
+        self.set_selection(&new);
+        Ok(ToolResult::json(
+            &json!({ "added": new.iter().map(|&i| self.object_json(i)).collect::<Vec<_>>() }),
+        ))
+    }
+
+    fn tool_merge_objects(&mut self, args: &Value) -> Result<ToolResult, String> {
+        let idx = self.resolve_many(args.get("objects"))?;
+        if idx.len() < 2 {
+            return Err("`objects` must name two or more different objects".into());
+        }
+        let mut new = 0;
+        self.structural(|d| {
+            new = d.merge(&idx)?;
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        self.replan_soon();
+        self.set_selection(&[new]);
+        Ok(ToolResult::json(
+            &json!({ "merged": self.object_json(new), "from": idx.len() }),
+        ))
+    }
+
     fn tool_round_corners(&mut self, args: &Value) -> Result<ToolResult, String> {
         let list = args
             .get("objects")
@@ -1557,6 +1707,23 @@ impl Studio {
         }
         if let Some(v) = flag("stop")? {
             p.stop = v.filter(|&x| x);
+            if p.stop.is_none() {
+                p.stop_note = None;
+            }
+        }
+        match args.get("stop_note") {
+            None => {}
+            Some(Value::Null) => p.stop_note = None,
+            Some(Value::String(s)) => {
+                if !s.trim().is_empty() && p.stop != Some(true) {
+                    return Err(
+                        "`stop_note` is for an object with `stop`: pass \"stop\": true as well"
+                            .into(),
+                    );
+                }
+                p.stop_note = Some(s.trim().to_string()).filter(|n| !n.is_empty());
+            }
+            Some(_) => return Err("`stop_note` must be a string or null".into()),
         }
         match args.get("satin_underlay") {
             None => {}
@@ -1945,6 +2112,99 @@ mod tests {
             assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
             assert!(t["description"].as_str().unwrap().len() > 10);
         }
+    }
+
+    #[test]
+    fn agents_add_outlines_merge_layers_and_edit_stops() {
+        // (For tools that answer in a sentence rather than JSON.)
+        fn ok_text(r: ToolResult) {
+            assert!(!r.is_error, "tool failed: {}", text(&r));
+        }
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool(
+            "add_svg",
+            &json!({ "svg": BADGE, "width_mm": 50.0, "replace": true }),
+        ));
+        let n = s.doc.shapes.len();
+        // An outline on the bar: a satin border straight after it.
+        let r = ok(s.run_tool(
+            "add_outline",
+            &json!({ "objects": ["bar"], "width_mm": 1.5, "color": "#102030" }),
+        ));
+        let o = &r["added"][0];
+        assert_eq!(o["name"], "bar outline");
+        assert_eq!(o["kind"], "satin");
+        assert_eq!(o["color"], "#102030");
+        assert_eq!(o["settings"]["border"], true);
+        let w = o["settings"]["mean_width_mm"].as_f64().unwrap();
+        assert!((w - 1.5).abs() < 0.2, "{w}");
+        assert!(o["stitches"].as_u64().unwrap() > 20);
+        let bar = s.names.iter().position(|x| x == "bar").unwrap();
+        assert_eq!(o["index"], bar + 1);
+        assert_eq!(s.doc.shapes.len(), n + 1);
+        // Lines and bad values are refused, with nothing changed.
+        for bad in [
+            json!({ "objects": ["stitchline"] }),
+            json!({ "objects": ["bar"], "stitch": "zigzag" }),
+            json!({ "objects": ["bar"], "width_mm": 40 }),
+            json!({ "objects": ["bar"], "colour": "#000000" }),
+        ] {
+            assert!(s.run_tool("add_outline", &bad).is_error, "{bad}");
+        }
+        assert_eq!(s.doc.shapes.len(), n + 1);
+        // A triple run, 1 mm outside the patch, in the patch's own thread.
+        let r = ok(s.run_tool(
+            "add_outline",
+            &json!({ "objects": ["patch"], "stitch": "triple", "offset_mm": 1 }),
+        ));
+        assert_eq!(r["added"][0]["kind"], "run");
+        let patch = s.names.iter().position(|x| x == "patch").unwrap();
+        assert_eq!(r["added"][0]["color"], hex(s.doc.shapes[patch].color));
+
+        // A pause after the patch, with a note: listed with the thread changes.
+        assert!(
+            s.run_tool("set_object", &json!({ "object": "bar", "stop_note": "x" }))
+                .is_error,
+            "a note needs a stop"
+        );
+        ok_text(s.run_tool(
+            "set_object",
+            &json!({ "object": "patch", "stop": true, "stop_note": "Lay the foam" }),
+        ));
+        let d = ok(s.run_tool("get_design", &json!({})));
+        let stops = d["stops"].as_array().unwrap();
+        assert_eq!(stops.len(), s.design.blocks.len() - 1);
+        let pause = stops.iter().find(|x| x["note"] == "Lay the foam").unwrap();
+        assert_eq!(pause["after_object"], "patch");
+        assert_eq!(pause["kind"], "pause");
+        assert!(stops.iter().any(|x| x["kind"] == "thread change"));
+        let patch_json = d["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == "patch")
+            .unwrap();
+        assert_eq!(patch_json["settings"]["stop_note"], "Lay the foam");
+        // Taking the stop off takes its note with it.
+        ok_text(s.run_tool("set_object", &json!({ "object": "patch", "stop": false })));
+        assert_eq!(s.doc.shapes[patch].params.stop_note, None);
+
+        // Merge the bar and its outline: one object, the outline's thread.
+        let before = s.doc.shapes.len();
+        let r = ok(s.run_tool(
+            "merge_objects",
+            &json!({ "objects": ["bar", "bar outline"] }),
+        ));
+        assert_eq!(r["from"], 2);
+        assert_eq!(r["merged"]["color"], "#102030");
+        assert_eq!(s.doc.shapes.len(), before - 1);
+        assert!(
+            s.run_tool("merge_objects", &json!({ "objects": ["patch"] }))
+                .is_error
+        );
+        // Each call was one undo step.
+        ok_text(s.run_tool("undo", &json!({})));
+        assert_eq!(s.doc.shapes.len(), before);
     }
 
     #[test]

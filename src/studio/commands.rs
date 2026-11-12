@@ -62,6 +62,12 @@ pub enum Action {
     Pathfinder(zigzag::boolean::PathOp),
     OffsetPath,
     OutlineStroke,
+    /// Object › Path › Add Outline…: an outline layer on top of a fill.
+    AddOutline,
+    /// Object › Merge Layers: the selected objects into one.
+    MergeLayers,
+    /// Object › Add Stop After: pause the machine after the selection.
+    AddStop,
     /// Object › Path › Release Compound Path: one object per separate shape.
     ReleaseCompound,
     SimplifyPath,
@@ -236,6 +242,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                     vec![
                         Item(Action::OffsetPath, "Offset Path…", None),
                         Item(Action::OutlineStroke, "Outline Stroke", None),
+                        Item(Action::AddOutline, "Add Outline…", None),
                         Item(Action::ReleaseCompound, "Release Compound Path", None),
                         Item(Action::SimplifyPath, "Simplify…", None),
                         Item(Action::RoundCorners, "Round Corners…", None),
@@ -253,7 +260,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                         Item(Action::Pathfinder(PathOp::Exclude), "Exclude", None),
                     ],
                 ),
+                Item(Action::MergeLayers, "Merge Layers", cmd(Key::E)),
                 Sep,
+                Item(Action::AddStop, "Add Stop After", None),
                 Sub(
                     "Sewing Order",
                     vec![
@@ -375,6 +384,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::Panel(PanelId::Transform), "Transform", None),
                 Item(Action::Panel(PanelId::Lettering), "Lettering", None),
                 Item(Action::Panel(PanelId::Threads), "Threads", None),
+                Item(Action::Panel(PanelId::Stops), "Stops", None),
                 Item(Action::Panel(PanelId::Document), "Document", None),
                 Item(Action::Panel(PanelId::Agent), "Agent", None),
             ],
@@ -461,7 +471,9 @@ impl Studio {
             | Action::BringForward
             | Action::SendBackward
             | Action::SendToBack => has_sel,
-            Action::Pathfinder(_) => self.sel_indices().len() >= 2,
+            Action::AddStop => has_sel,
+            Action::AddOutline => !self.outlinable_selection().is_empty(),
+            Action::Pathfinder(_) | Action::MergeLayers => self.sel_indices().len() >= 2,
             Action::NextTab | Action::PreviousTab => self.tab_count() > 1,
             Action::Kind(k) => self
                 .sel_indices()
@@ -628,6 +640,12 @@ impl Studio {
             Action::Pathfinder(op) => self.pathfinder_selected(op),
             Action::OffsetPath => self.layout.offset_dialog = Some(1.0),
             Action::OutlineStroke => self.outline_stroke_selected(),
+            Action::AddOutline => self.open_outline_dialog(),
+            Action::MergeLayers => self.merge_selected(),
+            Action::AddStop => {
+                self.add_stop_after_selection();
+                self.dock.reveal(PanelId::Stops);
+            }
             Action::ReleaseCompound => self.release_compound_selected(),
             Action::SimplifyPath => self.open_simplify_dialog(),
             Action::CleanUp => self.open_cleanup_dialog(),

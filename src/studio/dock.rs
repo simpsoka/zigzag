@@ -25,10 +25,12 @@ pub enum PanelId {
     Document,
     /// The in-app agent (Claude Code or Codex): its conversation and prompt.
     Agent,
+    /// Every halt in sewing order: thread changes and pauses (the stop editor).
+    Stops,
 }
 
 /// How many panels there are.
-pub const N: usize = 7;
+pub const N: usize = 8;
 
 enum ObjRow {
     Group {
@@ -50,6 +52,7 @@ pub const ALL: [PanelId; N] = [
     PanelId::Threads,
     PanelId::Document,
     PanelId::Agent,
+    PanelId::Stops,
 ];
 
 /// Where a panel lives.
@@ -140,6 +143,7 @@ impl PanelId {
             PanelId::Threads => Icon::Swatches,
             PanelId::Document => Icon::Page,
             PanelId::Agent => Icon::Sparkle,
+            PanelId::Stops => Icon::Pause,
         }
     }
 
@@ -152,6 +156,7 @@ impl PanelId {
             PanelId::Threads => "Threads",
             PanelId::Document => "Document",
             PanelId::Agent => "Agent",
+            PanelId::Stops => "Stops",
         }
     }
     pub(crate) fn index(self) -> usize {
@@ -217,7 +222,8 @@ impl Default for DockState {
                 Pos2::new(360.0 + 24.0 * k as f32, 120.0 + 24.0 * k as f32)
             }),
             iconic: [false, false],
-            tab_of: [None; N],
+            // Stops shares the Threads panel's header, as a tab behind it.
+            tab_of: std::array::from_fn(|k| (ALL[k] == PanelId::Stops).then_some(PanelId::Threads)),
             active: [None; N],
             task_bar: true,
             agent_share: 0.55,
@@ -331,6 +337,12 @@ impl DockState {
             let e = &v["panels"][id.title()];
             d.tab_of[k] = by_title(e["tab_of"].as_str()).filter(|l| l != id);
             d.active[k] = by_title(e["active"].as_str());
+        }
+        // A layout saved before the Stops panel: it joins Threads as a tab
+        // (or whatever Threads is a tab of), shown.
+        if v["panels"].get("Stops").is_none() {
+            let lead = d.tab_of[PanelId::Threads.index()].unwrap_or(PanelId::Threads);
+            d.tab_of[PanelId::Stops.index()] = Some(lead);
         }
         // A lead can't itself be a tab of another: flatten.
         for k in 0..ALL.len() {
@@ -1142,6 +1154,10 @@ impl Studio {
                 self.panel(ui, id, |s, ui| s.agent_body(ui));
                 crate::profile::mark("d:agent");
             }
+            PanelId::Stops => {
+                self.panel(ui, id, |s, ui| s.stops_body(ui));
+                crate::profile::mark("d:stops");
+            }
         }
         self.dock_ui.tabs = None;
         let r = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
@@ -1649,6 +1665,8 @@ impl Studio {
             .collect();
         let toggle = ui.input(|i| i.modifiers.shift || i.modifiers.command);
         let mut clicked = None;
+        // A click on a layer's thread swatch: (the layer, where the picker goes).
+        let mut thread_click: Option<(usize, Pos2)> = None;
         let mut group_click: Option<Vec<usize>> = None;
         // Only the rows in view are laid out and painted (a traced design
         // has hundreds; each row is text, an icon and a hover check).
@@ -1788,6 +1806,20 @@ impl Studio {
                     resp.widget_info(|| {
                         egui::WidgetInfo::selected(egui::Role::ListItem, true, selected, &label)
                     });
+                    // The layer's thread: click its swatch for the picker.
+                    let dot = Pos2::new(rect.left() + indent + 12.0, rect.center().y);
+                    let dot_resp = ui.interact(
+                        Rect::from_center_size(dot, Vec2::splat(16.0)),
+                        ui.make_persistent_id(("layer-thread", self.doc.shapes[i].uid)),
+                        Sense::click(),
+                    );
+                    dot_resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Button,
+                            true,
+                            format!("Thread of {label}"),
+                        )
+                    });
                     let painter = ui.painter();
                     if selected {
                         let c = if Some(i) == sel {
@@ -1805,13 +1837,15 @@ impl Studio {
                     } else {
                         p.secondary
                     };
-                    let dot = Pos2::new(rect.left() + indent + 12.0, rect.center().y);
                     painter.circle_filled(dot, 5.5, crate::canvas::color32(color));
                     painter.circle_stroke(
                         dot,
                         5.5,
                         Stroke::new(1.0, Color32::from_black_alpha(50)),
                     );
+                    if dot_resp.hovered() {
+                        painter.circle_stroke(dot, 7.0, Stroke::new(1.5, fg));
+                    }
                     let icon = Rect::from_center_size(
                         Pos2::new(rect.left() + indent + 30.0, rect.center().y),
                         Vec2::splat(13.0),
@@ -1858,15 +1892,38 @@ impl Studio {
                         egui::FontId::proportional(13.0),
                         name_color,
                     );
-                    if resp.clicked() {
+                    if dot_resp.clicked() {
+                        // Beside the dock, like the Threads panel's picker
+                        // (to the row's right when there's no room on the left).
+                        let w = crate::threads::PICKER_W + 2.0 * theme::space::M;
+                        let left = rect.left() - theme::space::M - theme::space::S - w;
+                        let x = if left >= 8.0 {
+                            left
+                        } else {
+                            rect.right() + theme::space::M
+                        };
+                        thread_click = Some((i, Pos2::new(x, rect.top() - theme::space::M)));
+                    } else if resp.clicked() {
                         clicked = Some(i);
                     }
                     if resp.secondary_clicked() && !selected {
                         clicked = Some(i);
                     }
+                    dot_resp.on_hover_text(format!(
+                        "Thread: {} · click to change this layer's thread",
+                        crate::threads::nearest(self.view_tools.brand, color).1
+                    ));
                     resp.context_menu(|ui| self.object_menu_items(ui));
                 }
             });
+        if let Some((i, at)) = thread_click {
+            // The picker edits the selection: this layer, or (when it's one
+            // of several selected) all of them.
+            if !all_sel.contains(&i) {
+                self.set_selection(&[i]);
+            }
+            self.picker = Some(at);
+        }
         if let Some(i) = clicked {
             if toggle {
                 self.toggle_selected(i);
@@ -1916,6 +1973,21 @@ impl Studio {
                     self.move_selected(1);
                 }
             });
+            ui.add_enabled_ui(
+                self.action_enabled(crate::commands::Action::MergeLayers),
+                |ui| {
+                    ui.add_space(theme::space::S);
+                    if icon_button(ui, Icon::PathUnite, "Merge Layers", false, 24.0)
+                        .on_hover_text(
+                            "Merge the selected layers into one, in the top one's thread",
+                        )
+                        .on_disabled_hover_text("Select two or more layers to merge them")
+                        .clicked()
+                    {
+                        self.merge_selected();
+                    }
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 caption(ui, format!("{} objects", self.doc.shapes.len()));
             });
@@ -1960,6 +2032,15 @@ impl Studio {
             RowIcon::Icon(Icon::ArrowDown),
         );
         self.action_row(ui, A::SendToBack, "Sew First", RowIcon::Icon(Icon::ArrowUp));
+        menu_separator(ui);
+        self.action_row(ui, A::AddOutline, "Add Outline…", RowIcon::None);
+        self.action_row(
+            ui,
+            A::MergeLayers,
+            "Merge Layers",
+            RowIcon::Icon(Icon::PathUnite),
+        );
+        self.action_row(ui, A::AddStop, "Add Stop After", RowIcon::Icon(Icon::Pause));
         // One path drawing several shapes: offer to split it up.
         let compound = match &self.doc.shapes[i].geometry {
             zigzag::svg::Geometry::Fill { rings, .. } => rings.len() > 1,
@@ -2701,6 +2782,10 @@ impl Studio {
                     .changed()
                 {
                     pr.stop = stop.then_some(true);
+                    if !stop {
+                        // Its note goes with it.
+                        pr.stop_note = None;
+                    }
                 }
             });
         });
@@ -3068,6 +3153,11 @@ mod tests {
     #[test]
     fn panels_combine_into_tabs_and_come_apart() {
         let mut h = harness();
+        // (Stops starts as a tab behind Threads; this is about making a
+        // group from single panels, so it sits this one out.)
+        h.state_mut().dock.separate(PanelId::Stops);
+        h.state_mut().dock.toggle(PanelId::Stops);
+        h.run_steps(2);
         // Threads dropped on the Stitch panel's header joins it as a tab.
         let threads = h.get_by_label("Threads panel").rect();
         let stitch = h.get_by_label("Stitch panel").rect();
