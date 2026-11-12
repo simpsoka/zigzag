@@ -269,14 +269,20 @@ fn summary(d: &Design) {
     for (i, blk) in d.blocks.iter().enumerate() {
         let n: usize = blk.runs.iter().map(|r| r.pts.len()).sum();
         eprintln!(
-            "  color {}: #{:02x}{:02x}{:02x}, {} stitches",
+            "  color {}: #{:02x}{:02x}{:02x}, {} stitches, {} of thread",
             i + 1,
             blk.color[0],
             blk.color[1],
             blk.color[2],
-            n
+            n,
+            zigzag::design::fmt_thread(d.block_thread_mm(i))
         );
     }
+    eprintln!(
+        "thread (estimate): {} top, {} bobbin",
+        zigzag::design::fmt_thread(d.thread_mm()),
+        zigzag::design::fmt_thread(d.bobbin_mm())
+    );
 }
 
 #[cfg(not(feature = "ble"))]

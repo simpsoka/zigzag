@@ -7,7 +7,7 @@ use super::{Document, xml_escape};
 use crate::bezier::{self, Anchor, BezPath, SubPath};
 use crate::boolean::{self, PathOp};
 use crate::geom::{Affine, FillRule, P, Polyline, affine_inv, affine_mul};
-use crate::params::Kind;
+use crate::params::{Kind, Params};
 use crate::svg::{self, PX_TO_UNITS};
 use crate::svg::{Geometry, Part};
 use anyhow::{Context, Result, anyhow, bail};
@@ -297,6 +297,117 @@ impl Document {
     }
 }
 
+/// How an outline added to a filled object is sewn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutlineStitch {
+    /// A satin column centered on the edge.
+    #[default]
+    Satin,
+    /// One pass of running stitch.
+    Run,
+    /// Three passes (bean stitch): a bolder line.
+    TripleRun,
+}
+
+impl OutlineStitch {
+    pub const ALL: [OutlineStitch; 3] = [
+        OutlineStitch::Satin,
+        OutlineStitch::Run,
+        OutlineStitch::TripleRun,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            OutlineStitch::Satin => "Satin Border",
+            OutlineStitch::Run => "Running Stitch",
+            OutlineStitch::TripleRun => "Triple Run (Bean)",
+        }
+    }
+    /// The name agents and files use.
+    pub fn id(self) -> &'static str {
+        match self {
+            OutlineStitch::Satin => "satin",
+            OutlineStitch::Run => "run",
+            OutlineStitch::TripleRun => "triple",
+        }
+    }
+    pub fn by_id(id: &str) -> Option<OutlineStitch> {
+        OutlineStitch::ALL.into_iter().find(|s| s.id() == id)
+    }
+}
+
+/// What [`Document::add_outline`] makes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutlineSpec {
+    pub stitch: OutlineStitch,
+    /// A satin border's width, mm (running stitches have none).
+    pub width_mm: f64,
+    /// How far outside the fill's edge the outline runs, mm (negative:
+    /// inside it). 0 puts it on the edge, half over the fill.
+    pub offset_mm: f64,
+    /// The outline's thread; `None` for the fill's own.
+    pub color: Option<[u8; 3]>,
+}
+
+impl OutlineSpec {
+    pub const MIN_WIDTH: f64 = 0.5;
+    pub const MAX_WIDTH: f64 = 12.0;
+    pub const MAX_OFFSET: f64 = 20.0;
+}
+
+impl Default for OutlineSpec {
+    fn default() -> Self {
+        OutlineSpec {
+            stitch: OutlineStitch::Satin,
+            width_mm: crate::params::defaults::OUTLINE_SATIN_WIDTH,
+            offset_mm: 0.0,
+            color: None,
+        }
+    }
+}
+
+/// What [`Document::add_knockdown`] makes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnockdownSpec {
+    /// How far past the objects the knockdown reaches, mm.
+    pub margin_mm: f64,
+    /// The lattice's row spacing, mm.
+    pub spacing_mm: f64,
+    /// Its thread: usually the fabric's color, so it disappears.
+    pub color: [u8; 3],
+}
+
+impl KnockdownSpec {
+    pub const MAX_MARGIN: f64 = 20.0;
+    pub const MIN_SPACING: f64 = 0.8;
+    pub const MAX_SPACING: f64 = 5.0;
+}
+
+impl Default for KnockdownSpec {
+    fn default() -> Self {
+        KnockdownSpec {
+            margin_mm: crate::params::defaults::KNOCKDOWN_MARGIN,
+            spacing_mm: crate::params::defaults::KNOCKDOWN_SPACING,
+            color: super::DEFAULT_CLOTH,
+        }
+    }
+}
+
+/// A path's subpaths as open lines (a closed one ends where it began), so
+/// merged lines stay lines rather than becoming a filled shape.
+fn open_ended(path: BezPath) -> BezPath {
+    path.into_iter()
+        .map(|mut sp| {
+            if sp.closed
+                && let Some(first) = sp.anchors.first().cloned()
+            {
+                sp.closed = false;
+                sp.anchors.push(first);
+            }
+            sp
+        })
+        .collect()
+}
+
 /// How closely the curves fitted to path operations' results follow them
 /// (design units: 0.06 mm, twice the 0.03 mm curves are flattened to).
 const RESULT_TOL: f64 = 0.6;
@@ -532,6 +643,263 @@ impl Document {
             made.push(self.shapes[n].uid);
         }
         Ok(self.uid_indices(&made))
+    }
+
+    /// Add Outline: a new object on top of each filled object, following its
+    /// edge (or a line `offset_mm` outside or inside it) as a satin border
+    /// or a running stitch, sewn straight after the object it outlines.
+    /// The fill itself is left as it is. Returns the new indices.
+    pub fn add_outline(&mut self, indices: &[usize], spec: &OutlineSpec) -> Result<Vec<usize>> {
+        let uids: Vec<usize> = indices
+            .iter()
+            .filter_map(|&i| self.shapes.get(i))
+            .filter(|s| matches!(s.geometry, Geometry::Fill { .. }))
+            .map(|s| s.uid)
+            .collect();
+        if uids.is_empty() {
+            bail!("select a filled object to outline");
+        }
+        if !spec.width_mm.is_finite() || !spec.offset_mm.is_finite() {
+            bail!("the outline's width and offset must be numbers");
+        }
+        let width = spec
+            .width_mm
+            .clamp(OutlineSpec::MIN_WIDTH, OutlineSpec::MAX_WIDTH);
+        let offset = spec
+            .offset_mm
+            .clamp(-OutlineSpec::MAX_OFFSET, OutlineSpec::MAX_OFFSET);
+        self.sync()?;
+        let mut made = Vec::new();
+        for uid in uids {
+            let Some(i) = self.shapes.iter().position(|s| s.uid == uid) else {
+                continue;
+            };
+            let (rings, rule) = self.area(i);
+            let path =
+                bezier::from_rings(&boolean::offset(&rings, rule, offset * 10.0), RESULT_TOL);
+            if path.is_empty() {
+                continue;
+            }
+            let color = spec.color.unwrap_or(self.shapes[i].color);
+            let params = match spec.stitch {
+                OutlineStitch::Satin => Params {
+                    kind: Some(Kind::Satin),
+                    border: Some(true),
+                    width: Some(width),
+                    ..Params::default()
+                },
+                OutlineStitch::Run => Params {
+                    kind: Some(Kind::Run),
+                    ..Params::default()
+                },
+                OutlineStitch::TripleRun => Params {
+                    kind: Some(Kind::Run),
+                    repeats: Some(3),
+                    ..Params::default()
+                },
+            };
+            let name = format!("{}_outline", self.name_of(i));
+            let id = self.insert_shape(&path, None, &name)?;
+            let n = self.finish_new(&id, color, params)?;
+            // Sewn straight after the object it outlines (and that object's
+            // own stroke, when its element has one).
+            let source = self.shapes.iter().position(|s| s.uid == uid);
+            let new_uid = self.shapes[n].uid;
+            if let Some(src) = source {
+                let src_id = self.shapes[src].id.clone();
+                let last = self
+                    .shapes
+                    .iter()
+                    .rposition(|s| s.id == src_id)
+                    .unwrap_or(src);
+                self.move_shape(n, if n > last { last + 1 } else { last });
+                // (Written into the SVG, so the next outline's re-read keeps it.)
+                self.sync()?;
+            }
+            made.push(new_uid);
+        }
+        if made.is_empty() {
+            bail!("nothing left to outline at that offset");
+        }
+        Ok(self.uid_indices(&made))
+    }
+
+    /// Merge Layers: two or more objects become one, in the thread and with
+    /// the stitch settings of the one sewn last (the one on top), in its
+    /// place in the sewing order. Filled shapes are united, so where they
+    /// overlapped is sewn once; lines stay lines, as one object. Returns
+    /// the merged object's index.
+    pub fn merge(&mut self, indices: &[usize]) -> Result<usize> {
+        let mut uids: Vec<usize> = Vec::new();
+        for &i in indices {
+            if let Some(s) = self.shapes.get(i)
+                && !uids.contains(&s.uid)
+            {
+                uids.push(s.uid);
+            }
+        }
+        if uids.len() < 2 {
+            bail!("select two or more layers to merge");
+        }
+        self.sync()?;
+        let idx = self.uid_indices(&uids);
+        let top = *idx.last().unwrap();
+        // Where the top object ends up once the others are gone.
+        let slot = top + 1 - idx.len();
+        let (color, name) = (self.shapes[top].color, self.name_of(top));
+        let lines_only = idx
+            .iter()
+            .all(|&i| matches!(self.shapes[i].geometry, Geometry::Stroke { .. }));
+        let n = if lines_only {
+            // Lines: one path with every line in it, as wide as the top one.
+            let mut path = BezPath::new();
+            for &i in &idx {
+                path.extend(self.edit_path(i)?);
+            }
+            if path.is_empty() {
+                bail!("nothing would be left");
+            }
+            let Geometry::Stroke { width, .. } = self.shapes[top].geometry else {
+                unreachable!("every object is a line");
+            };
+            let mut params = self.shapes[top].params.clone();
+            params.order = None;
+            let id = self.insert_stroke(&open_ended(path), color, width / 10.0, &name)?;
+            self.delete_many(&idx)?;
+            self.finish_new(&id, color, params)?
+        } else {
+            let parts: Vec<(Vec<Polyline>, FillRule)> = idx.iter().map(|&i| self.area(i)).collect();
+            let path = bezier::from_rings(&boolean::pathfinder(&parts, PathOp::Unite), RESULT_TOL);
+            if path.is_empty() {
+                bail!("nothing would be left");
+            }
+            let mut params = self.fill_params(top);
+            params.order = None;
+            let id = self.insert_shape(&path, None, &name)?;
+            self.delete_many(&idx)?;
+            self.finish_new(&id, color, params)?
+        };
+        let uid = self.shapes[n].uid;
+        self.move_shape(n, slot.min(self.shapes.len() - 1));
+        self.shapes
+            .iter()
+            .position(|s| s.uid == uid)
+            .ok_or_else(|| anyhow!("the merged layer went missing"))
+    }
+
+    /// Add a stroked line (design units, `width_mm` wide) at the end of the
+    /// document, named `name`. Returns its id; call `finish_new` afterwards.
+    fn insert_stroke(
+        &mut self,
+        path: &BezPath,
+        color: [u8; 3],
+        width_mm: f64,
+        name: &str,
+    ) -> Result<String> {
+        let m = self.mm_to_user()?;
+        let d = bezier::to_svg_d(&bezier::transform(path, [0.1, 0.0, 0.0, 0.1, 0.0, 0.0]));
+        let used: std::collections::HashSet<String> = {
+            let doc = roxmltree::Document::parse(&self.xml).context("parsing document")?;
+            doc.descendants()
+                .filter_map(|n| n.attribute("id").map(str::to_string))
+                .collect()
+        };
+        let mut k = 2;
+        let mut id = format!("{name}_#{k}");
+        while used.contains(&id) {
+            k += 1;
+            id = format!("{name}_#{k}");
+        }
+        self.next_group += 1;
+        let el = format!(
+            "<g id=\"tl-drawing-{}\" transform=\"{}\"><path id=\"{}\" d=\"{d}\" fill=\"none\" stroke=\"#{:02x}{:02x}{:02x}\" stroke-width=\"{:.2}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/></g>\n",
+            self.next_group,
+            super::edit::fmt_matrix(m),
+            xml_escape(&id),
+            color[0],
+            color[1],
+            color[2],
+            width_mm.clamp(0.1, 20.0),
+        );
+        let at = self
+            .xml
+            .rfind("</svg>")
+            .ok_or_else(|| anyhow!("document has no closing </svg>"))?;
+        self.xml.insert_str(at, &el);
+        Ok(id)
+    }
+
+    /// Add Knockdown: a light lattice under objects (all of them, if
+    /// `indices` is empty), reaching `margin_mm` past them, sewn before the
+    /// first of them, to flatten a towel's or fleece's pile so their
+    /// stitches don't sink into it. It follows their combined outline with
+    /// the holes filled in. Returns the new object's index.
+    pub fn add_knockdown(&mut self, indices: &[usize], spec: &KnockdownSpec) -> Result<usize> {
+        if !spec.margin_mm.is_finite() || !spec.spacing_mm.is_finite() {
+            bail!("the knockdown's margin and spacing must be numbers");
+        }
+        let margin = spec.margin_mm.clamp(0.0, KnockdownSpec::MAX_MARGIN);
+        let spacing = spec
+            .spacing_mm
+            .clamp(KnockdownSpec::MIN_SPACING, KnockdownSpec::MAX_SPACING);
+        let all: Vec<usize> = (0..self.shapes.len()).collect();
+        let uids: Vec<usize> = if indices.is_empty() { &all } else { indices }
+            .iter()
+            .filter_map(|&i| self.shapes.get(i))
+            // Not what isn't sewn, and not another knockdown.
+            .filter(|s| !matches!(s.params.kind, Some(Kind::Skip | Kind::Knockdown)))
+            .map(|s| s.uid)
+            .collect();
+        if uids.is_empty() {
+            bail!("nothing to put a knockdown under");
+        }
+        self.sync()?;
+        let idx = self.uid_indices(&uids);
+        let first = idx[0];
+        let parts: Vec<(Vec<Polyline>, FillRule)> = idx.iter().map(|&i| self.area(i)).collect();
+        // Everything as one shape, then each of its rings on its own as a
+        // solid: the holes (a letter's counters, a ring's middle) fill in.
+        let united = boolean::pathfinder(&parts, PathOp::Unite);
+        let solids: Vec<(Vec<Polyline>, FillRule)> = united
+            .into_iter()
+            .map(|r| (vec![r], FillRule::NonZero))
+            .collect();
+        let solid = boolean::pathfinder(&solids, PathOp::Unite);
+        let path = bezier::from_rings(
+            &boolean::offset(&solid, FillRule::EvenOdd, margin * 10.0),
+            RESULT_TOL,
+        );
+        if path.is_empty() {
+            bail!("those objects cover no area");
+        }
+        let params = Params {
+            kind: Some(Kind::Knockdown),
+            spacing: Some(spacing),
+            ..Params::default()
+        };
+        // (Not "knockdown": that word in an id is the stitch type.)
+        let id = self.insert_shape(&path, None, "base_layer")?;
+        let n = self.finish_new(&id, spec.color, params)?;
+        let uid = self.shapes[n].uid;
+        // Sewn before the first object it lies under.
+        self.move_shape(n, first.min(n));
+        self.sync()?;
+        self.shapes
+            .iter()
+            .position(|s| s.uid == uid)
+            .ok_or_else(|| anyhow!("the knockdown went missing"))
+    }
+
+    /// Move shape `from` to position `to` in the sewing order (both indices
+    /// into `shapes` as they are now; `to` is where it sits afterwards).
+    fn move_shape(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.shapes.len() {
+            return;
+        }
+        let s = self.shapes.remove(from);
+        let to = to.min(self.shapes.len());
+        self.shapes.insert(to, s);
+        self.rev = super::next_rev();
     }
 
     /// Illustrator's Release Compound Path: a `<path>` made of several
@@ -946,6 +1314,324 @@ mod tests {
             .unwrap();
         let removed = d.simplify_paths(&[dot], 1.5).unwrap();
         assert!(removed > 20, "{removed}");
+    }
+
+    const BADGE: &str = include_str!("../../examples/badge.svg");
+
+    #[test]
+    fn add_outline_puts_a_satin_border_on_top_of_the_fill() {
+        let mut d = Document::from_svg(BADGE, "badge", None).unwrap();
+        let n = d.shapes.len();
+        let disc = d
+            .shapes
+            .iter()
+            .position(|s| s.label.contains("disc"))
+            .unwrap();
+        let disc_uid = d.shapes[disc].uid;
+        let (disc_color, disc_params) = (d.shapes[disc].color, d.shapes[disc].params.clone());
+        let new = d
+            .add_outline(
+                &[disc],
+                &OutlineSpec {
+                    width_mm: 2.5,
+                    color: Some([20, 30, 40]),
+                    ..OutlineSpec::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((d.shapes.len(), new.len()), (n + 1, 1));
+        let o = &d.shapes[new[0]];
+        // Sewn straight after the fill, which is untouched.
+        assert_eq!(new[0], disc + 1);
+        assert_eq!(d.shapes[disc].uid, disc_uid);
+        assert_eq!(d.shapes[disc].color, disc_color);
+        // (Its place in the sewing order is written down now; nothing else.)
+        assert_eq!(
+            Params {
+                order: None,
+                ..d.shapes[disc].params.clone()
+            },
+            disc_params
+        );
+        assert_eq!(o.params.kind, Some(Kind::Satin));
+        assert!(o.params.is_border());
+        assert_eq!(o.params.width, Some(2.5));
+        assert_eq!(o.color, [20, 30, 40]);
+        assert!(svg::name_words(&o.label).contains(&"outline".to_string()));
+        // On the fill's own edge: the same size.
+        let (a, b) = (bounds(&d, disc), bounds(&d, new[0]));
+        assert!((a.width() - b.width()).abs() < 1.0, "{a:?} {b:?}");
+        // It sews, as a column about as wide as asked, after the fill.
+        let plan = d.plan();
+        assert!(plan.per_shape[new[0]] > 50, "{:?}", plan.per_shape);
+        let at = |i| plan.sew_order.iter().position(|&k| k == i).unwrap();
+        assert!(at(new[0]) > at(disc));
+        // It all survives a save and reopen, order included.
+        let back = Document::from_svg(&d.to_svg().unwrap(), "badge", None).unwrap();
+        assert_eq!(back.shapes.len(), n + 1);
+        let o = &back.shapes[disc + 1];
+        assert_eq!(
+            (o.params.kind, o.params.is_border(), o.params.width, o.color),
+            (Some(Kind::Satin), true, Some(2.5), [20, 30, 40])
+        );
+    }
+
+    #[test]
+    fn add_outline_offsets_runs_and_takes_several_fills() {
+        let mut d = Document::from_svg(BADGE, "badge", None).unwrap();
+        let n = d.shapes.len();
+        let fills: Vec<usize> = (0..n)
+            .filter(|&i| matches!(d.shapes[i].geometry, Geometry::Fill { .. }))
+            .collect();
+        assert!(fills.len() >= 2);
+        let uids: Vec<usize> = fills.iter().map(|&i| d.shapes[i].uid).collect();
+        let sizes: Vec<f64> = fills.iter().map(|&i| bounds(&d, i).width()).collect();
+        // Every object selected: the fills get an outline each, lines none.
+        let all: Vec<usize> = (0..n).collect();
+        let new = d
+            .add_outline(
+                &all,
+                &OutlineSpec {
+                    stitch: OutlineStitch::TripleRun,
+                    offset_mm: 1.0,
+                    ..OutlineSpec::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(new.len(), fills.len());
+        assert_eq!(d.shapes.len(), n + fills.len());
+        for (k, uid) in uids.iter().enumerate() {
+            let src = d.shapes.iter().position(|s| s.uid == *uid).unwrap();
+            let o = &d.shapes[src + 1];
+            assert!(new.contains(&(src + 1)), "outline follows its fill");
+            assert_eq!(
+                (o.params.kind, o.params.repeats),
+                (Some(Kind::Run), Some(3))
+            );
+            // The fill's own thread when none is given.
+            assert_eq!(o.color, d.shapes[src].color);
+            // 1 mm outside all round: 2 mm (20 units) wider.
+            let w = bounds(&d, src + 1).width();
+            assert!((w - sizes[k] - 20.0).abs() < 1.5, "{w} vs {}", sizes[k]);
+        }
+        // A single run, inside the edge.
+        let mut d = Document::from_svg(BADGE, "badge", None).unwrap();
+        let disc = d
+            .shapes
+            .iter()
+            .position(|s| s.label.contains("disc"))
+            .unwrap();
+        let w = bounds(&d, disc).width();
+        let new = d
+            .add_outline(
+                &[disc],
+                &OutlineSpec {
+                    stitch: OutlineStitch::Run,
+                    offset_mm: -2.0,
+                    ..OutlineSpec::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(d.shapes[new[0]].params.repeats, None);
+        assert!((bounds(&d, new[0]).width() - (w - 40.0)).abs() < 1.5);
+        // Nothing to outline: a line alone, or an offset that eats the shape.
+        let line = d
+            .add_drawing(
+                &[P::new(0.0, 0.0), P::new(100.0, 0.0)],
+                false,
+                [0, 0, 0],
+                Kind::Run,
+            )
+            .unwrap();
+        assert!(d.add_outline(&[line], &OutlineSpec::default()).is_err());
+        let disc = d
+            .shapes
+            .iter()
+            .position(|s| s.label.contains("disc"))
+            .unwrap();
+        let gone = OutlineSpec {
+            offset_mm: -20.0,
+            ..OutlineSpec::default()
+        };
+        let before = d.shapes.len();
+        assert!(d.add_outline(&[disc], &gone).is_err());
+        assert_eq!(d.shapes.len(), before);
+    }
+
+    #[test]
+    fn add_knockdown_goes_under_the_design_with_a_margin() {
+        let mut d = Document::from_svg(BADGE, "badge", None).unwrap();
+        let n = d.shapes.len();
+        let all = svg::shapes_bounds(&d.shapes);
+        let first_uid = d.shapes[0].uid;
+        let k = d.add_knockdown(&[], &KnockdownSpec::default()).unwrap();
+        assert_eq!(d.shapes.len(), n + 1);
+        // First in the sewing order, a Knockdown in the fabric's color.
+        assert_eq!(k, 0);
+        assert_eq!(d.shapes[1].uid, first_uid);
+        let s = &d.shapes[k];
+        assert_eq!(s.params.kind, Some(Kind::Knockdown));
+        assert_eq!(s.params.spacing, Some(2.0));
+        assert_eq!(s.color, crate::document::DEFAULT_CLOTH);
+        assert_eq!(svg::display_names(&d.shapes)[k], "base layer");
+        // About 2 mm past the artwork all round (the ring is a 1.2 px line,
+        // so its own width adds a little), and one solid piece: the
+        // crescent cut out of the disc is filled in.
+        let b = bounds(&d, k);
+        let grow = (b.width() - all.width()) / 2.0;
+        assert!((18.0..=26.0).contains(&grow), "{grow}");
+        match &s.geometry {
+            Geometry::Fill { rings, .. } => assert_eq!(rings.len(), 1, "no holes"),
+            g => panic!("{g:?}"),
+        }
+        // It sews, lightly, before everything else; nothing is lost on top.
+        let plan = d.plan();
+        assert!(plan.per_shape[k] > 100);
+        assert_eq!(plan.sew_order[0], k);
+        let without = Document::from_svg(BADGE, "badge", None).unwrap().plan();
+        assert_eq!(&plan.per_shape[1..], &without.per_shape[..]);
+        // Saved and reopened: still a knockdown, still first.
+        let back = Document::from_svg(&d.to_svg().unwrap(), "badge", None).unwrap();
+        assert_eq!(back.shapes[0].params.kind, Some(Kind::Knockdown));
+        assert_eq!(back.shapes.len(), n + 1);
+        // A second one doesn't go under the first; one for a single object
+        // sits just before that object.
+        let sun = d
+            .shapes
+            .iter()
+            .position(|s| s.label.contains("sun"))
+            .unwrap();
+        let spec = KnockdownSpec {
+            margin_mm: 1.0,
+            spacing_mm: 3.0,
+            color: [1, 2, 3],
+        };
+        let k2 = d.add_knockdown(&[sun], &spec).unwrap();
+        assert_eq!(k2, sun);
+        assert_eq!(d.shapes[k2 + 1].label, d.shapes[sun + 1].label);
+        assert_eq!(d.shapes[k2].color, [1, 2, 3]);
+        assert!(bounds(&d, k2).width() < b.width() / 2.0);
+        // Nothing but knockdowns selected: nothing to go under.
+        assert!(d.add_knockdown(&[0], &spec).is_err());
+        assert!(Document::empty().add_knockdown(&[], &spec).is_err());
+    }
+
+    #[test]
+    fn merge_unites_fills_into_the_top_ones_layer() {
+        let mut d = Document::empty();
+        let sq = |x: f64, y: f64| {
+            vec![
+                P::new(x, y),
+                P::new(x + 100.0, y),
+                P::new(x + 100.0, y + 100.0),
+                P::new(x, y + 100.0),
+            ]
+        };
+        let a = d
+            .add_drawing(&sq(0.0, 0.0), true, [200, 0, 0], Kind::Fill)
+            .unwrap();
+        let b = d
+            .add_drawing(&sq(300.0, 0.0), true, [0, 200, 0], Kind::Fill)
+            .unwrap();
+        let c = d
+            .add_drawing(&sq(50.0, 0.0), true, [0, 0, 200], Kind::Fill)
+            .unwrap();
+        let e = d
+            .add_drawing(&sq(600.0, 0.0), true, [9, 9, 9], Kind::Fill)
+            .unwrap();
+        d.shapes[c].params.angle = Some(45.0);
+        let (b_uid, e_uid) = (d.shapes[b].uid, d.shapes[e].uid);
+        // A and C overlap by half: one 150 x 100 shape, in C's thread, with
+        // C's settings, where C was in the order (between B and E).
+        let m = d.merge(&[c, a]).unwrap();
+        assert_eq!(d.shapes.len(), 3);
+        assert_eq!(d.shapes[m].color, [0, 0, 200]);
+        assert_eq!(d.shapes[m].params.angle, Some(45.0));
+        assert_eq!(d.shapes[m].params.kind, Some(Kind::Fill));
+        assert!((area_mm2(&d, m) - 150.0).abs() < 1.0, "{}", area_mm2(&d, m));
+        let order: Vec<usize> = d.shapes.iter().map(|s| s.uid).collect();
+        assert_eq!(order, vec![b_uid, d.shapes[m].uid, e_uid]);
+        // Saved and reopened: still three, in that order.
+        let back = Document::from_svg(&d.to_svg().unwrap(), "m", None).unwrap();
+        assert_eq!(back.shapes.len(), 3);
+        assert_eq!(back.shapes[1].color, [0, 0, 200]);
+        assert_eq!(back.shapes[1].params.angle, Some(45.0));
+        // Shapes that don't touch merge into one object with both in it.
+        let m = d.merge(&[0, 2]).unwrap();
+        assert_eq!(d.shapes.len(), 2);
+        assert_eq!(d.shapes[m].color, [9, 9, 9]);
+        match &d.shapes[m].geometry {
+            Geometry::Fill { rings, .. } => {
+                assert_eq!(rings.len(), 2);
+                let total: f64 = rings.iter().map(|r| boolean::ring_area(r).abs()).sum();
+                assert!((total / 100.0 - 200.0).abs() < 1.0, "{total}");
+            }
+            g => panic!("{g:?}"),
+        }
+        // One object (or the same one twice) is nothing to merge.
+        assert!(d.merge(&[0]).is_err());
+        assert!(d.merge(&[0, 0]).is_err());
+        assert_eq!(d.shapes.len(), 2);
+    }
+
+    #[test]
+    fn merging_lines_keeps_them_lines() {
+        let mut d = Document::empty();
+        let a = d
+            .add_drawing(
+                &[P::new(0.0, 0.0), P::new(100.0, 0.0)],
+                false,
+                [1, 2, 3],
+                Kind::Run,
+            )
+            .unwrap();
+        let b = d
+            .add_drawing(
+                &[P::new(0.0, 50.0), P::new(100.0, 50.0), P::new(100.0, 90.0)],
+                false,
+                [200, 0, 0],
+                Kind::Run,
+            )
+            .unwrap();
+        d.shapes[b].params.repeats = Some(3);
+        let m = d.merge(&[a, b]).unwrap();
+        assert_eq!(d.shapes.len(), 1);
+        let s = &d.shapes[m];
+        assert_eq!(
+            svg::display_names(&d.shapes)[m],
+            "drawing 2",
+            "the top line's name"
+        );
+        assert_eq!(s.color, [200, 0, 0]);
+        assert_eq!(
+            (s.params.kind, s.params.repeats),
+            (Some(Kind::Run), Some(3))
+        );
+        match &s.geometry {
+            Geometry::Stroke { lines, .. } => {
+                assert_eq!(lines.len(), 2);
+                assert!(lines.iter().all(|(_, closed)| !closed));
+            }
+            g => panic!("{g:?}"),
+        }
+        // A line and a fill: the line's area joins the shape.
+        let f = d
+            .add_drawing(
+                &[
+                    P::new(0.0, 200.0),
+                    P::new(100.0, 200.0),
+                    P::new(100.0, 300.0),
+                    P::new(0.0, 300.0),
+                ],
+                true,
+                [5, 5, 5],
+                Kind::Fill,
+            )
+            .unwrap();
+        let m = d.merge(&[0, f]).unwrap();
+        assert_eq!(d.shapes.len(), 1);
+        assert!(matches!(d.shapes[m].geometry, Geometry::Fill { .. }));
+        assert_eq!(d.shapes[m].color, [5, 5, 5]);
     }
 
     #[test]

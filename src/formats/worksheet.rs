@@ -98,20 +98,42 @@ pub fn html(d: &Design, info: &WorksheetInfo) -> Result<String> {
                     .collect()
             })
             .unwrap_or_default();
-        let stop = k > 0 && d.blocks[k - 1].color == blk.color;
+        // Why the machine halts before this block: a pause (with what to do
+        // at it, when the design says) and/or a change of thread.
+        let start = d.block_start(k);
+        let name_of = |i: usize| info.names.get(i).map(|s| esc(s)).unwrap_or_default();
+        let halt = if k == 0 {
+            String::new()
+        } else if let Some((i, step)) = start.applique {
+            format!(
+                "<b>Stop</b> ({}: {}) · ",
+                name_of(i),
+                if step == 1 {
+                    "lay the fabric"
+                } else {
+                    "trim the fabric"
+                }
+            )
+        } else if start.stop_after.is_some() || !start.thread_change {
+            let what = match &start.note {
+                Some(n) => esc(n),
+                None if start.thread_change => "before changing thread".to_string(),
+                None => "same thread".to_string(),
+            };
+            format!("<b>Stop</b> ({what}) · ")
+        } else {
+            String::new()
+        };
         let _ = write!(
             rows,
-            "<tr><td class=n>{}</td><td><span class=sw style=\"background:{hex}\"></span>{hex}</td><td>{}</td><td>{} {}</td><td class=r>{}</td><td>{}{}</td></tr>",
+            "<tr><td class=n>{}</td><td><span class=sw style=\"background:{hex}\"></span>{hex}</td><td>{}</td><td>{} {}</td><td class=r>{}</td><td class=r>{}</td><td>{}{}</td></tr>",
             k + 1,
             esc(&brother_name(blk.color)),
             esc(&jk),
             esc(&jn),
             n,
-            if stop {
-                "<b>Stop</b> (same thread) · "
-            } else {
-                ""
-            },
+            crate::design::fmt_thread(d.block_thread_mm(k)),
+            halt,
             objects.join(", ")
         );
     }
@@ -156,22 +178,25 @@ td.n, td.r {{ font-variant-numeric: tabular-nums; }} td.r {{ text-align: right; 
 <dt>Stitches</dt><dd>{stitches}</dd>
 <dt>Colors</dt><dd>{colors}</dd>
 <dt>Trims</dt><dd>{trims}</dd>
+<dt>Thread</dt><dd>about {thread} top, {bobbin} bobbin</dd>
 <dt>Sewing time</dt><dd>about {minutes:.0} min at {spm:.0} spm</dd>
 <dt>Fabric</dt><dd>{fabric}</dd>
 <dt>Hoop</dt><dd>{hoop}</dd>
 </dl>
 </div>
 <table>
-<thead><tr><th>#</th><th>Color</th><th>Brother</th><th>Janome</th><th class=r>Stitches</th><th>Sews</th></tr></thead>
+<thead><tr><th>#</th><th>Color</th><th>Brother</th><th>Janome</th><th class=r>Stitches</th><th class=r>Thread</th><th>Sews</th></tr></thead>
 <tbody>{rows}</tbody>
 </table>
-<p class="note">Thread names are the nearest match in each brand's standard palette; check against your spools. Center the hoop on the design's center mark.</p>
+<p class="note">Thread names are the nearest match in each brand's standard palette; check against your spools. Thread lengths are estimates from the stitches (tension and fabric thickness change them): allow some extra. Center the hoop on the design's center mark.</p>
 </body></html>
 "#,
         w = b.width() / 10.0,
         h = b.height() / 10.0,
         colors = d.blocks.len(),
         trims = d.trim_count(),
+        thread = crate::design::fmt_thread(d.thread_mm()),
+        bobbin = crate::design::fmt_thread(d.bobbin_mm()),
         fabric = esc(&info.fabric),
     ))
 }
@@ -219,5 +244,65 @@ mod tests {
         assert!(h.contains("heart"));
         assert_eq!(brother_name([14, 31, 124]), "Prussian Blue");
         assert_eq!(janome_thread([0, 0, 0]).1, "002");
+        assert!(
+            !h.contains("<b>Stop</b>"),
+            "a change of thread isn't a stop"
+        );
+    }
+
+    #[test]
+    fn worksheet_says_what_to_do_at_each_stop() {
+        use crate::design::{PlanOptions, plan};
+        use crate::params::{Kind, Params};
+        use crate::svg::{Geometry, Part, Shape};
+        let square = |x: f64, kind: Kind, color: [u8; 3], uid: usize| Shape {
+            id: format!("s{uid}"),
+            part: Part::Fill,
+            label: format!("s{uid}"),
+            color,
+            paint: color,
+            geometry: Geometry::Fill {
+                rings: vec![vec![
+                    P::new(x, 0.0),
+                    P::new(x + 200.0, 0.0),
+                    P::new(x + 200.0, 200.0),
+                    P::new(x, 200.0),
+                ]],
+                rule: crate::geom::FillRule::NonZero,
+            },
+            params: Params {
+                kind: Some(kind),
+                ..Params::default()
+            },
+            uid,
+            groups: Vec::new(),
+        };
+        let mut a = square(0.0, Kind::Fill, [0, 0, 0], 0);
+        a.params.stop = Some(true);
+        a.params.stop_note = Some("Lay 3 mm foam <puffy>".into());
+        let mut b = square(250.0, Kind::Fill, [0, 0, 0], 1);
+        b.params.stop = Some(true);
+        let c = square(500.0, Kind::Fill, [0, 0, 0], 2);
+        let patch = square(750.0, Kind::Applique, [237, 23, 31], 3);
+        let d = plan("t", &[a, b, c, patch], &PlanOptions::default());
+        let info = WorksheetInfo {
+            names: vec!["base".into(), "middle".into(), "top".into(), "patch".into()],
+            ..Default::default()
+        };
+        let h = html(&d, &info).unwrap();
+        assert!(
+            h.contains("<b>Stop</b> (Lay 3 mm foam &lt;puffy&gt;) · middle"),
+            "{h}"
+        );
+        assert!(h.contains("<b>Stop</b> (same thread) · top"));
+        assert!(h.contains("<b>Stop</b> (patch: lay the fabric)"));
+        assert!(h.contains("<b>Stop</b> (patch: trim the fabric)"));
+        assert_eq!(h.matches("<b>Stop</b>").count(), 4);
+        // Thread: a total for the top and the bobbin, and a figure per block.
+        let total = crate::design::fmt_thread(d.thread_mm());
+        assert!(h.contains(&format!("about {total} top, ")), "{total}");
+        assert!(h.contains(">Thread</th>"));
+        let first = crate::design::fmt_thread(d.block_thread_mm(0));
+        assert!(h.contains(&format!("<td class=r>{first}</td>")), "{first}");
     }
 }

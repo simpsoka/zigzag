@@ -20,7 +20,9 @@ contour (rows following the outline inward), blanket (E-stitch edge), applique (
 Settings can also be preset in SVG element ids, e.g. id=\"logo_fill_a=45\" or id=\"border_satin_w=2\". \
 Hat designs are small (about 50 × 50 mm on the front of a cap): keep satin columns under 7 mm wide, letters at least 5 mm tall, and details at least 1.5 mm. \
 open_file also opens machine files (pes, dst, exp, jef) as manual stitches. \
-trace_image turns a PNG/JPEG logo into shapes (snap colors to Brother or Janome threads with `threads`). round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
+trace_image turns a PNG/JPEG logo into shapes (snap colors to Brother or Janome threads with `threads`). For towels, fleece and plush, add_knockdown puts a light lattice under the design so it doesn't sink into the pile, and set_document's basting_mm sews a box of long stitches round the design first to hold the fabric. align_objects lines objects up or spaces them evenly. get_design's stats include an estimate of the thread the design takes. \
+add_outline puts an outline layer (satin border or running stitch) on top of a filled object, and merge_objects makes several objects one. The machine halts at every change of thread and wherever an object has `stop` (set_object; say what to do there with `stop_note`): get_design lists them all under `stops`. \
+round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
 Use batch to make several changes in one call: it is all or nothing and one undo step, and later steps can use earlier results (\"$0.added.0.name\").";
 
 fn obj_schema() -> Value {
@@ -188,7 +190,7 @@ pub fn tool_specs() -> Value {
                 "type": "object",
                 "properties": {
                     "object": obj_schema(),
-                    "kind": { "type": "string", "enum": ["fill", "satin", "run", "contour", "blanket", "applique", "meander", "ripple", "cross", "tartan", "manual", "skip"] },
+                    "kind": { "type": "string", "enum": ["fill", "satin", "run", "contour", "blanket", "applique", "meander", "ripple", "cross", "tartan", "knockdown", "manual", "skip"] },
                     "angle": { "type": ["number", "null"], "description": "Fill row direction in degrees (0 = horizontal, 90 = vertical)." },
                     "spacing_mm": { "type": ["number", "null"], "description": "Fill/contour row spacing, satin zigzag spacing, or blanket prong spacing." },
                     "length_mm": { "type": ["number", "null"], "description": "Max stitch length for fill and run." },
@@ -205,7 +207,8 @@ pub fn tool_specs() -> Value {
                     "start": { "type": ["number", "null"], "description": "Where sewing starts: 0–1 along the object's outline (fills: the outer ring from its first point; lines: from their start). Null: the planner chooses." },
                     "end": { "type": ["number", "null"], "description": "Where sewing ends, 0–1 along the outline (the thread goes on from there to the next object)." },
                     "trim": { "type": ["boolean", "null"], "description": "Cut the thread after this object even if the next one is close." },
-                    "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." }
+                    "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." },
+                    "stop_note": { "type": ["string", "null"], "description": "What to do at that pause (\"Lay the 3 mm foam\"): shown in the Stops panel and printed on the worksheet. Null or empty removes it." }
                 },
                 "required": ["object"]
             }
@@ -315,6 +318,7 @@ pub fn tool_specs() -> Value {
                     "remove_overlaps": { "type": "boolean", "description": "Skip fill hidden under later objects." },
                     "hat_order": { "type": "boolean", "description": "Sew center-out and bottom-up (for caps)." },
                     "connect_mm": { "type": "number", "description": "Sew across gaps between objects up to this long (mm) with running stitches instead of cutting the thread; 0 always cuts." },
+                    "basting_mm": { "type": "number", "description": "Basting box: sew a box of long stitches round the whole design first, this far outside it (mm, up to 30), to hold the fabric to the stabilizer; 0 for none." },
                     "preview_color": { "type": "string", "description": "Fabric color for previews, #rrggbb (e.g. the hat's color)." }
                 }
             }
@@ -398,6 +402,60 @@ pub fn tool_specs() -> Value {
                 },
                 "required": ["objects"]
             }
+        }),
+        json!({
+            "name": "add_outline",
+            "description": "Add an outline layer on top of filled objects: a new object following each one's edge, sewn straight after it (the fill itself isn't changed). Returns the new objects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": obj_schema(), "description": "Filled objects to outline." },
+                    "stitch": { "type": "string", "enum": ["satin", "run", "triple"], "description": "satin: a satin border centered on the edge (default). run: one pass of running stitch. triple: bean stitch, three passes." },
+                    "width_mm": { "type": "number", "description": "Satin border width, 0.5–12. Default 2." },
+                    "offset_mm": { "type": "number", "description": "How far outside the fill's edge the outline runs (negative: inside), up to 20 either way. Default 0: on the edge, half over the fill." },
+                    "color": { "type": "string", "description": "Thread color #rrggbb. Default: the fill's own thread." }
+                },
+                "required": ["objects"]
+            }
+        }),
+        json!({
+            "name": "add_knockdown",
+            "description": "Add a knockdown layer: a light open lattice of stitches under objects (the whole design by default), following their combined outline with a margin, sewn first. It flattens the pile of towels, fleece and plush so the stitches on top don't sink in. Returns the new object.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": obj_schema(), "description": "Objects to put it under. Default: every object." },
+                    "margin_mm": { "type": "number", "description": "How far past the objects it reaches, 0–20. Default 2." },
+                    "spacing_mm": { "type": "number", "description": "Lattice row spacing, 0.8–5 (wider is lighter). Default 2." },
+                    "color": { "type": "string", "description": "Thread color #rrggbb. Default: the fabric's color (the document's preview_color), so it disappears." }
+                }
+            }
+        }),
+        json!({
+            "name": "align_objects",
+            "description": "Line objects up by an edge or a center (`align`), or space three or more evenly with equal gaps (`distribute`). Give one of the two. A group named whole moves as one object.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": obj_schema(), "description": "Objects to arrange." },
+                    "align": { "type": "string", "enum": ["left", "hcenter", "right", "top", "vcenter", "bottom"], "description": "The edge or center to line up." },
+                    "distribute": { "type": "string", "enum": ["horizontal", "vertical"], "description": "Space evenly across or down; the two at the ends stay put." },
+                    "to": { "type": "string", "enum": ["selection", "hoop"], "description": "With `align`: line up with each other (default for two or more objects) or with the hoop (default for one)." }
+                },
+                "required": ["objects"]
+            }
+        }),
+        json!({
+            "name": "merge_objects",
+            "description": "Merge two or more objects (layers) into one, in the thread and with the stitch settings of the one sewn last (on top), in its place in the sewing order. Filled shapes are united, so overlaps are sewn once; lines stay lines. Returns the merged object.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": obj_schema(), "description": "Two or more objects." }
+                },
+                "required": ["objects"]
+            },
+            "annotations": { "destructiveHint": true }
         }),
         json!({
             "name": "simplify",
@@ -736,6 +794,11 @@ impl Studio {
             Kind::Meander => {
                 settings.insert("spacing_mm".into(), json!(p.meander_spacing()));
             }
+            Kind::Knockdown => {
+                settings.insert("angle".into(), json!(p.knockdown_angle()));
+                settings.insert("spacing_mm".into(), json!(p.knockdown_spacing()));
+                settings.insert("length_mm".into(), json!(p.fill_len(&f)));
+            }
             Kind::Ripple => {
                 settings.insert("spacing_mm".into(), json!(p.ripple_spacing()));
                 settings.insert("spiral".into(), json!(p.spiral == Some(true)));
@@ -766,6 +829,9 @@ impl Studio {
                 if v == Some(true) {
                     settings.insert(k.into(), json!(true));
                 }
+            }
+            if let Some(n) = &p.stop_note {
+                settings.insert("stop_note".into(), json!(n));
             }
         }
         json!({
@@ -815,6 +881,7 @@ impl Studio {
                 "remove_overlaps": self.doc.settings.remove_overlaps,
                 "hat_order": self.doc.settings.hat_order,
                 "preview_color": hex(self.doc.settings.cloth),
+                "basting_mm": self.doc.settings.baste_mm,
             },
             "stats": {
                 "width_mm": mm(b.width() / 10.0),
@@ -823,10 +890,47 @@ impl Studio {
                 "colors": self.design.blocks.len(),
                 "trims": self.design.trim_count(),
                 "minutes": (total as f64 / SPM).ceil(),
+                "thread_m": mm(self.design.thread_mm() / 1000.0),
+                "bobbin_m": mm(self.design.bobbin_mm() / 1000.0),
+                "thread_by_color": self.design.thread_by_color().iter().map(|(c, len)| json!({ "color": hex(*c), "thread_m": mm(len / 1000.0) })).collect::<Vec<_>>(),
             },
             "objects": (0..self.doc.shapes.len()).map(|i| self.object_json(i)).collect::<Vec<_>>(),
+            "stops": self.stops_json(),
             "design_problems": self.issues.iter().filter(|x| x.shape.is_none()).map(|x| issue_json(x, &self.names)).collect::<Vec<_>>(),
         })
+    }
+
+    /// Every halt in sewing order (the Stops panel's list), for get_design.
+    fn stops_json(&self) -> Value {
+        let name = |i: usize| self.names.get(i).cloned();
+        (1..self.design.blocks.len())
+            .map(|k| {
+                let s = self.design.block_start(k);
+                let mut v = serde_json::Map::new();
+                v.insert("before_color_block".into(), json!(k + 1));
+                v.insert(
+                    "kind".into(),
+                    json!(if s.applique.is_some() {
+                        "applique step"
+                    } else if s.stop_after.is_some() || !s.thread_change {
+                        "pause"
+                    } else {
+                        "thread change"
+                    }),
+                );
+                v.insert("what".into(), json!(self.halt_label(k, &s)));
+                if s.thread_change {
+                    v.insert("thread".into(), json!(hex(self.design.blocks[k].color)));
+                }
+                if let Some(n) = s.stop_after.or(s.applique.map(|a| a.0)).and_then(name) {
+                    v.insert("after_object".into(), json!(n));
+                }
+                if let Some(n) = &s.note {
+                    v.insert("note".into(), json!(n));
+                }
+                Value::Object(v)
+            })
+            .collect()
     }
 
     /// Run one MCP tool against the live document.
@@ -849,6 +953,10 @@ impl Studio {
             "batch" => return self.tool_batch(args),
             "trace_image" => self.tool_trace_image(args),
             "round_corners" => self.tool_round_corners(args),
+            "add_outline" => self.tool_add_outline(args),
+            "merge_objects" => self.tool_merge_objects(args),
+            "add_knockdown" => self.tool_add_knockdown(args),
+            "align_objects" => self.tool_align_objects(args),
             "simplify" => self.tool_simplify(args),
             "clean_up" => self.tool_clean_up(args),
             "get_design" => Ok(ToolResult::json(&self.design_json())),
@@ -931,6 +1039,8 @@ impl Studio {
                     let doc = Document::open(&p).map_err(|e| format!("{e:#}"));
                     doc.map(|d| {
                         self.open_document(d);
+                        // (In File › Open Recent, like any file opened.)
+                        self.recent.add(&p);
                         self.replan_soon();
                         ToolResult::json(&self.design_json())
                     })
@@ -1356,6 +1466,198 @@ impl Studio {
         Ok(ToolResult::text(crate::path_tools::cleanup_summary(&r)))
     }
 
+    fn tool_add_outline(&mut self, args: &Value) -> Result<ToolResult, String> {
+        use zigzag::document::{OutlineSpec, OutlineStitch};
+        let idx = self.resolve_many(args.get("objects"))?;
+        let mut spec = OutlineSpec::default();
+        if let Some(v) = args.get("stitch") {
+            spec.stitch = v
+                .as_str()
+                .and_then(OutlineStitch::by_id)
+                .ok_or("`stitch` must be satin, run or triple")?;
+        }
+        for (k, to, lo, hi) in [
+            (
+                "width_mm",
+                &mut spec.width_mm,
+                OutlineSpec::MIN_WIDTH,
+                OutlineSpec::MAX_WIDTH,
+            ),
+            (
+                "offset_mm",
+                &mut spec.offset_mm,
+                -OutlineSpec::MAX_OFFSET,
+                OutlineSpec::MAX_OFFSET,
+            ),
+        ] {
+            if let Some(v) = args.get(k) {
+                let x = v
+                    .as_f64()
+                    .filter(|x| x.is_finite())
+                    .ok_or(format!("`{k}` must be a number"))?;
+                if !(lo..=hi).contains(&x) {
+                    return Err(format!("`{k}` must be between {lo} and {hi}"));
+                }
+                *to = x;
+            }
+        }
+        if let Some(v) = args.get("color") {
+            spec.color = Some(
+                v.as_str()
+                    .and_then(parse_hex)
+                    .ok_or("`color` must be #rrggbb")?,
+            );
+        }
+        if let Some(&i) = idx
+            .iter()
+            .find(|&&i| !matches!(self.doc.shapes[i].geometry, Geometry::Fill { .. }))
+        {
+            return Err(format!(
+                "{} is a line, not a filled shape: only fills take an outline",
+                self.names[i]
+            ));
+        }
+        let mut new = Vec::new();
+        self.structural(|d| {
+            new = d.add_outline(&idx, &spec)?;
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        self.replan_soon();
+        self.set_selection(&new);
+        Ok(ToolResult::json(
+            &json!({ "added": new.iter().map(|&i| self.object_json(i)).collect::<Vec<_>>() }),
+        ))
+    }
+
+    fn tool_add_knockdown(&mut self, args: &Value) -> Result<ToolResult, String> {
+        use zigzag::document::KnockdownSpec;
+        let idx = match args.get("objects") {
+            None | Some(Value::Null) => Vec::new(),
+            v => self.resolve_many(v)?,
+        };
+        let mut spec = KnockdownSpec {
+            color: self.doc.settings.cloth,
+            ..KnockdownSpec::default()
+        };
+        for (k, to, lo, hi) in [
+            (
+                "margin_mm",
+                &mut spec.margin_mm,
+                0.0,
+                KnockdownSpec::MAX_MARGIN,
+            ),
+            (
+                "spacing_mm",
+                &mut spec.spacing_mm,
+                KnockdownSpec::MIN_SPACING,
+                KnockdownSpec::MAX_SPACING,
+            ),
+        ] {
+            if let Some(v) = args.get(k) {
+                let x = v
+                    .as_f64()
+                    .filter(|x| x.is_finite())
+                    .ok_or(format!("`{k}` must be a number"))?;
+                if !(lo..=hi).contains(&x) {
+                    return Err(format!("`{k}` must be between {lo} and {hi}"));
+                }
+                *to = x;
+            }
+        }
+        if let Some(v) = args.get("color") {
+            spec.color = v
+                .as_str()
+                .and_then(parse_hex)
+                .ok_or("`color` must be #rrggbb")?;
+        }
+        let mut new = 0;
+        self.structural(|d| {
+            new = d.add_knockdown(&idx, &spec)?;
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        self.replan_soon();
+        self.set_selection(&[new]);
+        Ok(ToolResult::json(&json!({ "added": self.object_json(new) })))
+    }
+
+    fn tool_align_objects(&mut self, args: &Value) -> Result<ToolResult, String> {
+        use zigzag::document::{AlignEdge, DistributeAxis};
+        let idx = self.resolve_many(args.get("objects"))?;
+        let edge = match args.get("align") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(AlignEdge::by_id)
+                    .ok_or("`align` must be left, hcenter, right, top, vcenter or bottom")?,
+            ),
+        };
+        let axis = match args.get("distribute") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(DistributeAxis::by_id)
+                    .ok_or("`distribute` must be horizontal or vertical")?,
+            ),
+        };
+        let units = self.doc.arrange_count(&idx);
+        let to_hoop = match args.get("to").and_then(Value::as_str) {
+            None => units == 1,
+            Some("hoop") => true,
+            Some("selection") => false,
+            Some(_) => return Err("`to` must be selection or hoop".into()),
+        };
+        let frame = to_hoop.then(|| self.hoop_bounds());
+        let uids: Vec<usize> = idx.iter().map(|&i| self.doc.shapes[i].uid).collect();
+        let redo = self.redo.clone();
+        let mut moved = 0;
+        self.structural(|d| {
+            moved = match (edge, axis) {
+                (Some(e), None) => d.align(&idx, e, frame)?,
+                (None, Some(a)) => d.distribute(&idx, a)?,
+                _ => anyhow::bail!("give either `align` or `distribute`"),
+            };
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        if moved == 0 {
+            self.undo.pop();
+            self.redo = redo;
+            return Ok(ToolResult::text(
+                "Already arranged that way: nothing moved.",
+            ));
+        }
+        self.replan_soon();
+        self.restore_selection(&uids);
+        let now: Vec<usize> = uids
+            .iter()
+            .filter_map(|u| self.doc.shapes.iter().position(|s| s.uid == *u))
+            .collect();
+        Ok(ToolResult::json(&json!({
+            "moved": moved,
+            "objects": now.iter().map(|&i| self.object_json(i)).collect::<Vec<_>>(),
+        })))
+    }
+
+    fn tool_merge_objects(&mut self, args: &Value) -> Result<ToolResult, String> {
+        let idx = self.resolve_many(args.get("objects"))?;
+        if idx.len() < 2 {
+            return Err("`objects` must name two or more different objects".into());
+        }
+        let mut new = 0;
+        self.structural(|d| {
+            new = d.merge(&idx)?;
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        self.replan_soon();
+        self.set_selection(&[new]);
+        Ok(ToolResult::json(
+            &json!({ "merged": self.object_json(new), "from": idx.len() }),
+        ))
+    }
+
     fn tool_round_corners(&mut self, args: &Value) -> Result<ToolResult, String> {
         let list = args
             .get("objects")
@@ -1497,7 +1799,7 @@ impl Studio {
         };
         if let Some(k) = args.get("kind") {
             let k = k.as_str().and_then(Kind::parse).ok_or(
-                "`kind` must be fill, satin, run, contour, blanket, applique, meander, ripple, cross, tartan, manual or skip",
+                "`kind` must be fill, satin, run, contour, blanket, applique, meander, ripple, cross, tartan, knockdown, manual or skip",
             )?;
             if !allowed.contains(&k) {
                 return Err(format!(
@@ -1557,6 +1859,23 @@ impl Studio {
         }
         if let Some(v) = flag("stop")? {
             p.stop = v.filter(|&x| x);
+            if p.stop.is_none() {
+                p.stop_note = None;
+            }
+        }
+        match args.get("stop_note") {
+            None => {}
+            Some(Value::Null) => p.stop_note = None,
+            Some(Value::String(s)) => {
+                if !s.trim().is_empty() && p.stop != Some(true) {
+                    return Err(
+                        "`stop_note` is for an object with `stop`: pass \"stop\": true as well"
+                            .into(),
+                    );
+                }
+                p.stop_note = Some(s.trim().to_string()).filter(|n| !n.is_empty());
+            }
+            Some(_) => return Err("`stop_note` must be a string or null".into()),
         }
         match args.get("satin_underlay") {
             None => {}
@@ -1742,6 +2061,13 @@ impl Studio {
                 .filter(|x| x.is_finite() && *x >= 0.0)
                 .ok_or("connect_mm must be a number of millimeters")?
                 .min(50.0);
+        }
+        if let Some(v) = args.get("basting_mm") {
+            let m = v
+                .as_f64()
+                .filter(|m| m.is_finite() && *m >= 0.0)
+                .ok_or("basting_mm must be a number of millimeters (0 for none)")?;
+            s.baste_mm = m.min(zigzag::document::MAX_BASTE_MM);
         }
         if let Some(v) = args.get("preview_color") {
             s.cloth = v
@@ -1944,6 +2270,208 @@ mod tests {
         for t in tools.as_array().unwrap() {
             assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
             assert!(t["description"].as_str().unwrap().len() > 10);
+        }
+    }
+
+    #[test]
+    fn agents_add_outlines_merge_layers_and_edit_stops() {
+        // (For tools that answer in a sentence rather than JSON.)
+        fn ok_text(r: ToolResult) {
+            assert!(!r.is_error, "tool failed: {}", text(&r));
+        }
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool(
+            "add_svg",
+            &json!({ "svg": BADGE, "width_mm": 50.0, "replace": true }),
+        ));
+        let n = s.doc.shapes.len();
+        // An outline on the bar: a satin border straight after it.
+        let r = ok(s.run_tool(
+            "add_outline",
+            &json!({ "objects": ["bar"], "width_mm": 1.5, "color": "#102030" }),
+        ));
+        let o = &r["added"][0];
+        assert_eq!(o["name"], "bar outline");
+        assert_eq!(o["kind"], "satin");
+        assert_eq!(o["color"], "#102030");
+        assert_eq!(o["settings"]["border"], true);
+        let w = o["settings"]["mean_width_mm"].as_f64().unwrap();
+        assert!((w - 1.5).abs() < 0.2, "{w}");
+        assert!(o["stitches"].as_u64().unwrap() > 20);
+        let bar = s.names.iter().position(|x| x == "bar").unwrap();
+        assert_eq!(o["index"], bar + 1);
+        assert_eq!(s.doc.shapes.len(), n + 1);
+        // Lines and bad values are refused, with nothing changed.
+        for bad in [
+            json!({ "objects": ["stitchline"] }),
+            json!({ "objects": ["bar"], "stitch": "zigzag" }),
+            json!({ "objects": ["bar"], "width_mm": 40 }),
+            json!({ "objects": ["bar"], "colour": "#000000" }),
+        ] {
+            assert!(s.run_tool("add_outline", &bad).is_error, "{bad}");
+        }
+        assert_eq!(s.doc.shapes.len(), n + 1);
+        // A triple run, 1 mm outside the patch, in the patch's own thread.
+        let r = ok(s.run_tool(
+            "add_outline",
+            &json!({ "objects": ["patch"], "stitch": "triple", "offset_mm": 1 }),
+        ));
+        assert_eq!(r["added"][0]["kind"], "run");
+        let patch = s.names.iter().position(|x| x == "patch").unwrap();
+        assert_eq!(r["added"][0]["color"], hex(s.doc.shapes[patch].color));
+
+        // A pause after the patch, with a note: listed with the thread changes.
+        assert!(
+            s.run_tool("set_object", &json!({ "object": "bar", "stop_note": "x" }))
+                .is_error,
+            "a note needs a stop"
+        );
+        ok_text(s.run_tool(
+            "set_object",
+            &json!({ "object": "patch", "stop": true, "stop_note": "Lay the foam" }),
+        ));
+        let d = ok(s.run_tool("get_design", &json!({})));
+        let stops = d["stops"].as_array().unwrap();
+        assert_eq!(stops.len(), s.design.blocks.len() - 1);
+        let pause = stops.iter().find(|x| x["note"] == "Lay the foam").unwrap();
+        assert_eq!(pause["after_object"], "patch");
+        assert_eq!(pause["kind"], "pause");
+        assert!(stops.iter().any(|x| x["kind"] == "thread change"));
+        let patch_json = d["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == "patch")
+            .unwrap();
+        assert_eq!(patch_json["settings"]["stop_note"], "Lay the foam");
+        // Taking the stop off takes its note with it.
+        ok_text(s.run_tool("set_object", &json!({ "object": "patch", "stop": false })));
+        assert_eq!(s.doc.shapes[patch].params.stop_note, None);
+
+        // Merge the bar and its outline: one object, the outline's thread.
+        let before = s.doc.shapes.len();
+        let r = ok(s.run_tool(
+            "merge_objects",
+            &json!({ "objects": ["bar", "bar outline"] }),
+        ));
+        assert_eq!(r["from"], 2);
+        assert_eq!(r["merged"]["color"], "#102030");
+        assert_eq!(s.doc.shapes.len(), before - 1);
+        assert!(
+            s.run_tool("merge_objects", &json!({ "objects": ["patch"] }))
+                .is_error
+        );
+        // Each call was one undo step.
+        ok_text(s.run_tool("undo", &json!({})));
+        assert_eq!(s.doc.shapes.len(), before);
+    }
+
+    #[test]
+    fn agents_add_knockdown_basting_and_align() {
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool(
+            "add_svg",
+            &json!({ "svg": BADGE, "width_mm": 50.0, "replace": true }),
+        ));
+        let n = s.doc.shapes.len();
+        let d = ok(s.run_tool("get_design", &json!({})));
+        // Thread estimates come with the stats.
+        let thread = d["stats"]["thread_m"].as_f64().unwrap();
+        let bobbin = d["stats"]["bobbin_m"].as_f64().unwrap();
+        assert!(
+            thread > 1.0 && bobbin > 0.3 && bobbin < thread,
+            "{thread} {bobbin}"
+        );
+        let by_color = d["stats"]["thread_by_color"].as_array().unwrap();
+        let sum: f64 = by_color
+            .iter()
+            .map(|c| c["thread_m"].as_f64().unwrap())
+            .sum();
+        assert!((sum - thread).abs() < 0.05, "{sum} vs {thread}");
+        assert_eq!(d["document"]["basting_mm"], 0.0);
+        let stitches = d["stats"]["stitches"].as_u64().unwrap();
+
+        // A towel: the terry preset, a knockdown under everything, basting.
+        let r = s.run_tool(
+            "set_document",
+            &json!({ "fabric": "towel", "basting_mm": 5 }),
+        );
+        assert!(!r.is_error, "{}", text(&r));
+        assert_eq!(s.doc.settings.fabric, "towel");
+        assert_eq!(s.doc.settings.baste_mm, 5.0);
+        assert!(
+            s.run_tool("set_document", &json!({ "basting_mm": -1 }))
+                .is_error
+        );
+        // The check says a pile wants a knockdown...
+        let checks = ok(s.run_tool("check_design", &json!({})));
+        assert!(checks.to_string().contains("knockdown"), "{checks}");
+        let r = ok(s.run_tool("add_knockdown", &json!({ "margin_mm": 3 })));
+        assert_eq!(r["added"]["kind"], "knockdown");
+        assert_eq!(r["added"]["index"], 0);
+        assert_eq!(r["added"]["color"], hex(s.doc.settings.cloth));
+        assert_eq!(r["added"]["settings"]["spacing_mm"], 2.0);
+        assert_eq!(s.doc.shapes.len(), n + 1);
+        // ...and stops saying so once there is one.
+        let r = s.run_tool("check_design", &json!({}));
+        assert!(!text(&r).contains("knockdown"), "{}", text(&r));
+        let d = ok(s.run_tool("get_design", &json!({})));
+        assert!(d["stats"]["stitches"].as_u64().unwrap() > stitches);
+        assert_eq!(d["document"]["basting_mm"], 5.0);
+        for bad in [
+            json!({ "margin_mm": 99 }),
+            json!({ "spacing_mm": 0.1 }),
+            json!({ "color": "blue" }),
+            json!({ "objects": ["base layer"] }),
+        ] {
+            assert!(s.run_tool("add_knockdown", &bad).is_error, "{bad}");
+        }
+        // Any fill can be made a knockdown by hand, too.
+        let r = s.run_tool(
+            "set_object",
+            &json!({ "object": "bar", "kind": "knockdown" }),
+        );
+        assert!(!r.is_error, "{}", text(&r));
+        ok(s.run_tool("undo", &json!({})));
+
+        // Align the bar and the ring to their left edges; then nothing moves.
+        let left = |s: &Studio, name: &str| {
+            let i = s.names.iter().position(|x| x == name).unwrap();
+            crate::app::shape_bounds(&s.doc.shapes[i]).min.x
+        };
+        let r = ok(s.run_tool(
+            "align_objects",
+            &json!({ "objects": ["bar", "ring"], "align": "left" }),
+        ));
+        assert_eq!(r["moved"], 1);
+        assert!((left(&s, "bar") - left(&s, "ring")).abs() < 0.1);
+        let again = s.run_tool(
+            "align_objects",
+            &json!({ "objects": ["bar", "ring"], "align": "left" }),
+        );
+        assert!(text(&again).contains("nothing moved"));
+        // One object lines up with the hoop.
+        ok(s.run_tool(
+            "align_objects",
+            &json!({ "objects": ["bar"], "align": "top" }),
+        ));
+        let i = s.names.iter().position(|x| x == "bar").unwrap();
+        let top = crate::app::shape_bounds(&s.doc.shapes[i]).min.y;
+        assert!((top - s.hoop_bounds().min.y).abs() < 0.1);
+        // Three, spaced evenly; and the ways to get it wrong.
+        let r = s.run_tool(
+            "align_objects",
+            &json!({ "objects": ["patch", "ring", "bar"], "distribute": "vertical" }),
+        );
+        assert!(!r.is_error, "{}", text(&r));
+        for bad in [
+            json!({ "objects": ["bar", "ring"] }),
+            json!({ "objects": ["bar", "ring"], "align": "left", "distribute": "vertical" }),
+            json!({ "objects": ["bar", "ring"], "align": "middle" }),
+            json!({ "objects": ["bar", "ring"], "distribute": "horizontal" }),
+            json!({ "objects": ["bar"], "align": "left", "to": "page" }),
+        ] {
+            assert!(s.run_tool("align_objects", &bad).is_error, "{bad}");
         }
     }
 

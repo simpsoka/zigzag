@@ -29,6 +29,26 @@ pub struct Block {
     pub runs: Vec<Run>,
 }
 
+/// Why the machine halts before a color block (see [`Design::block_start`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockStart {
+    /// The thread differs from the block before (true for the first block).
+    pub thread_change: bool,
+    /// The input shape whose "stop after" asked for a pause here.
+    pub stop_after: Option<usize>,
+    /// A pause inside an appliqué: (input shape, 1: lay the fabric, 2: trim it).
+    pub applique: Option<(usize, u8)>,
+    /// What to do at the pause, when the object says (`note=`).
+    pub note: Option<String>,
+}
+
+impl BlockStart {
+    /// A pause someone has to act on, not just a change of thread.
+    pub fn is_pause(&self) -> bool {
+        self.stop_after.is_some() || self.applique.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Design {
     pub name: String,
@@ -41,6 +61,13 @@ pub struct Design {
     pub notes: Vec<(usize, String)>,
     /// Input shapes sewn in each color block (same order as `blocks`).
     pub block_shapes: Vec<Vec<usize>>,
+    /// Stitches in the basting box (the first run of the first block), 0
+    /// when the design has none. They belong to no object.
+    pub basting_stitches: usize,
+    /// Why each color block starts (same order as `blocks`; empty for a
+    /// design that wasn't planned from shapes, such as an opened machine
+    /// file). Read it with [`Design::block_start`].
+    pub starts: Vec<BlockStart>,
     /// Input shapes left with nothing to fill: covered by what's sewn on
     /// top (so the checks needn't work the overlaps out again).
     pub covered: Vec<bool>,
@@ -70,6 +97,10 @@ pub struct PlanOptions {
     /// travel stitches follow the inside of its outline instead, up to
     /// this far (units); further than that, the thread is cut.
     pub travel_route: f64,
+    /// A basting box: one line of long running stitches round the whole
+    /// design, this far outside it (units), sewn before anything else to
+    /// hold the fabric to the stabilizer. `None`: no basting.
+    pub basting: Option<f64>,
 }
 
 impl Default for PlanOptions {
@@ -84,7 +115,35 @@ impl Default for PlanOptions {
             hat_order: false,
             connect: 0.0,
             travel_route: 500.0,
+            basting: None,
         }
+    }
+}
+
+/// Top thread a stitch takes beyond its own length, mm: down through the
+/// fabric and back up. With stitches around 4 mm this comes to about 5 m
+/// per 1,000 stitches, in the range thread makers quote (4.6 to 6 m).
+pub const THREAD_PER_STITCH_MM: f64 = 1.0;
+
+/// Bobbin thread as a share of the top thread: thread makers' figures put
+/// it between a third and a half (about 2.3 m per 1,000 stitches).
+pub const BOBBIN_SHARE: f64 = 0.45;
+
+/// The top thread a run of stitches takes, mm: an estimate from its length
+/// and its stitch count. Tension, fabric thickness and thread weight all
+/// move the real figure, so treat it as "about".
+pub fn thread_mm(pts: &[P]) -> f64 {
+    let len: f64 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
+    len / 10.0 + pts.len().saturating_sub(1) as f64 * THREAD_PER_STITCH_MM
+}
+
+/// A thread length for people: metres to one decimal ("12.4 m"), or
+/// centimetres under a metre ("85 cm").
+pub fn fmt_thread(mm: f64) -> String {
+    if mm < 995.0 {
+        format!("{:.0} cm", (mm / 10.0).max(0.0))
+    } else {
+        format!("{:.1} m", mm / 1000.0)
     }
 }
 
@@ -505,6 +564,38 @@ fn fill_runs(
             .collect(),
     );
     groups
+}
+
+/// Knockdown: an open lattice, rows one way and then rows across them, with
+/// no underlay and no pull compensation (it's there to hold the pile down,
+/// not to cover).
+fn knockdown_runs(
+    rings: &[Polyline],
+    rule: FillRule,
+    shape: &Shape,
+    opt: &PlanOptions,
+) -> Vec<Vec<Piece>> {
+    let p = &shape.params;
+    let angle = p.knockdown_angle().to_radians();
+    [angle, angle + std::f64::consts::FRAC_PI_2]
+        .into_iter()
+        .map(|a| {
+            let rows = FillParams {
+                angle: a,
+                spacing: mm(p.knockdown_spacing()).max(5.0),
+                len: mm(p.fill_len(&opt.fabric)),
+                inset: 0.0,
+                pull: 0.0,
+                stagger: 1,
+                bottom_up: opt.hat_order,
+            };
+            tatami(rings, rule, &rows)
+                .into_iter()
+                .map(Piece::reversible)
+                .collect::<Vec<Piece>>()
+        })
+        .filter(|g| !g.is_empty())
+        .collect()
 }
 
 fn satin_pieces(
@@ -957,6 +1048,10 @@ fn shape_runs(
             Some((rings.clone(), *rule)),
         ),
         (Geometry::Fill { rings, .. }, Kind::Applique) => applique_runs(rings, shape, opt),
+        (Geometry::Fill { rings, rule }, Kind::Knockdown) => ShapeRuns::new(
+            knockdown_runs(rings, *rule, shape, opt),
+            Some((rings.clone(), *rule)),
+        ),
         (
             Geometry::Fill { rings, rule },
             Kind::Meander | Kind::Ripple | Kind::Cross | Kind::Tartan,
@@ -1373,6 +1468,8 @@ pub fn plan_cached(
         sew_order: order.clone(),
         notes: Vec::new(),
         block_shapes: Vec::new(),
+        basting_stitches: 0,
+        starts: Vec::new(),
         covered: shapes
             .iter()
             .zip(&geometry)
@@ -1390,6 +1487,10 @@ pub fn plan_cached(
     // the next object.
     let mut force_trim = false;
     let mut stop_next = false;
+    // Which object asked for that pause, and why every block (the empty
+    // ones too, until they're dropped below) was started.
+    let mut stop_from: Option<usize> = None;
+    let mut starts: Vec<BlockStart> = Vec::new();
     // The last run sewn belongs to the object being sewn (gaps inside an
     // object are never connected by the document's `connect`).
     let mut same_shape = false;
@@ -1444,6 +1545,13 @@ pub fn plan_cached(
                 runs: Vec::new(),
             });
             design.block_shapes.push(Vec::new());
+            starts.push(BlockStart::default());
+        }
+        if stop_next
+            && design.blocks.last().is_some_and(|b| b.runs.is_empty())
+            && let Some(s) = starts.last_mut()
+        {
+            s.stop_after = stop_from;
         }
         let last_group = sr.groups.iter().rposition(|g| !g.is_empty()).unwrap_or(0);
         for (gi, mut group) in sr.groups.into_iter().enumerate() {
@@ -1460,11 +1568,25 @@ pub fn plan_cached(
                 || design.blocks.last().is_none_or(|b| b.color != group_color)
             {
                 // A machine stop (same thread, new block) or a change of thread.
+                // A block left empty (a pause before an object whose first
+                // group is in another thread) hands its pause on.
+                let carried = match (design.blocks.last(), starts.last()) {
+                    (Some(b), Some(s)) if b.runs.is_empty() => s.stop_after,
+                    _ => None,
+                };
                 design.blocks.push(Block {
                     color: group_color,
                     runs: Vec::new(),
                 });
                 design.block_shapes.push(Vec::new());
+                starts.push(BlockStart {
+                    stop_after: carried,
+                    applique: (stop_here && last_nonempty)
+                        .then(|| sr.stops.iter().position(|&g| g == gi))
+                        .flatten()
+                        .map(|k| (si, k as u8 + 1)),
+                    ..BlockStart::default()
+                });
             }
             let bs = design.block_shapes.last_mut().unwrap();
             if !bs.contains(&si) {
@@ -1641,6 +1763,7 @@ pub fn plan_cached(
         }
         force_trim = shape.params.trim == Some(true);
         stop_next = shape.params.stop == Some(true);
+        stop_from = stop_next.then_some(si);
         same_shape = false;
     }
     // Forget shapes no longer there (or no longer like that).
@@ -1648,7 +1771,50 @@ pub fn plan_cached(
     let keep: Vec<bool> = design.blocks.iter().map(|b| !b.runs.is_empty()).collect();
     let mut k = keep.iter();
     design.block_shapes.retain(|_| *k.next().unwrap());
+    let mut k = keep.iter();
+    starts.retain(|_| *k.next().unwrap());
     design.blocks.retain(|b| !b.runs.is_empty());
+    for (k, s) in starts.iter_mut().enumerate() {
+        s.thread_change = k == 0 || design.blocks[k - 1].color != design.blocks[k].color;
+        // (A pause asked for before anything was sewn isn't one.)
+        if k == 0 {
+            s.stop_after = None;
+        }
+        s.note = s
+            .stop_after
+            .and_then(|i| shapes[i].params.stop_note.clone())
+            .filter(|n| !n.trim().is_empty());
+    }
+    design.starts = starts;
+    // The basting box: before everything else, in the first thread.
+    if let Some(margin) = opt.basting {
+        let b = design.bounds();
+        if let Some(first) = design.blocks.first_mut()
+            && !b.is_empty()
+        {
+            let m = margin.max(0.0);
+            let (x0, y0, x1, y1) = (b.min.x - m, b.min.y - m, b.max.x + m, b.max.y + m);
+            let corners = [
+                P::new(x0, y0),
+                P::new(x1, y0),
+                P::new(x1, y1),
+                P::new(x0, y1),
+            ];
+            let pts = running(&corners, true, mm(defaults::BASTING_LEN), 1);
+            design.basting_stitches = pts.len();
+            // (Whatever came first now follows the box: cut in between.)
+            if let Some(r) = first.runs.first_mut() {
+                r.trim_before = true;
+            }
+            first.runs.insert(
+                0,
+                Run {
+                    pts,
+                    trim_before: false,
+                },
+            );
+        }
+    }
     design
 }
 
@@ -1693,6 +1859,24 @@ pub fn default_satin_width(shape: &Shape) -> f64 {
 }
 
 impl Design {
+    /// Why the machine halts before block `k`: a change of thread, a pause
+    /// an object asked for, an appliqué step, or (same thread twice running
+    /// in a design that doesn't say) a plain stop.
+    pub fn block_start(&self, k: usize) -> BlockStart {
+        match self.starts.get(k) {
+            Some(s) => s.clone(),
+            None => BlockStart {
+                thread_change: k == 0
+                    || self
+                        .blocks
+                        .get(k)
+                        .zip(self.blocks.get(k - 1))
+                        .is_none_or(|(b, a)| a.color != b.color),
+                ..BlockStart::default()
+            },
+        }
+    }
+
     pub fn bounds(&self) -> Bounds {
         let mut b = Bounds::empty();
         for blk in &self.blocks {
@@ -1723,6 +1907,41 @@ impl Design {
             .flat_map(|b| &b.runs)
             .map(|r| r.pts.len())
             .sum()
+    }
+
+    /// How much top thread block `k` takes, mm: an estimate (see
+    /// [`thread_mm`]).
+    pub fn block_thread_mm(&self, k: usize) -> f64 {
+        self.blocks
+            .get(k)
+            .map_or(0.0, |b| b.runs.iter().map(|r| thread_mm(&r.pts)).sum())
+    }
+
+    /// Top thread for the whole design, mm (an estimate).
+    pub fn thread_mm(&self) -> f64 {
+        (0..self.blocks.len())
+            .map(|k| self.block_thread_mm(k))
+            .sum()
+    }
+
+    /// Bobbin thread for the whole design, mm (an estimate: a share of the
+    /// top thread, see [`BOBBIN_SHARE`]).
+    pub fn bobbin_mm(&self) -> f64 {
+        self.thread_mm() * BOBBIN_SHARE
+    }
+
+    /// Top thread per thread color, mm, in the order each is first sewn:
+    /// what to have on the spool for each.
+    pub fn thread_by_color(&self) -> Vec<([u8; 3], f64)> {
+        let mut out: Vec<([u8; 3], f64)> = Vec::new();
+        for (k, b) in self.blocks.iter().enumerate() {
+            let mm = self.block_thread_mm(k);
+            match out.iter_mut().find(|(c, _)| *c == b.color) {
+                Some((_, total)) => *total += mm,
+                None => out.push((b.color, mm)),
+            }
+        }
+        out
     }
 
     pub fn trim_count(&self) -> usize {
@@ -2233,6 +2452,177 @@ mod tests {
         assert_eq!(d.blocks.len(), 2);
         assert_eq!(d.blocks[0].color, d.blocks[1].color);
         assert_eq!(d.block_shapes, vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn basting_box_goes_round_the_design_first() {
+        let a = shape(fill(sq(0.0, 0.0, 200.0)), Kind::Fill, [0; 3]);
+        let b = shape(fill(sq(300.0, 100.0, 100.0)), Kind::Fill, [200, 0, 0]);
+        let plain = plan("p", &[a.clone(), b.clone()], &PlanOptions::default());
+        assert_eq!(plain.basting_stitches, 0);
+        let opt = PlanOptions {
+            basting: Some(50.0),
+            ..PlanOptions::default()
+        };
+        let d = plan("p", &[a, b], &opt);
+        // The same blocks and objects' stitches, plus one run at the start.
+        assert_eq!(d.blocks.len(), plain.blocks.len());
+        assert_eq!(d.per_shape, plain.per_shape);
+        assert_eq!(d.block_shapes, plain.block_shapes);
+        assert_eq!(d.blocks[0].runs.len(), plain.blocks[0].runs.len() + 1);
+        let box_run = &d.blocks[0].runs[0];
+        assert_eq!(d.basting_stitches, box_run.pts.len());
+        assert_eq!(d.stitch_count(), plain.stitch_count() + box_run.pts.len());
+        assert!(!box_run.trim_before);
+        assert!(d.blocks[0].runs[1].trim_before, "cut before the design");
+        // 5 mm outside the stitches all round, closed, in long stitches.
+        let pb = plain.bounds();
+        let mut bb = Bounds::empty();
+        box_run.pts.iter().for_each(|&p| bb.add(p));
+        assert!((bb.min.x - (pb.min.x - 50.0)).abs() < 1e-6);
+        assert!((bb.max.y - (pb.max.y + 50.0)).abs() < 1e-6);
+        assert!(box_run.pts[0].dist(*box_run.pts.last().unwrap()) < 1e-6);
+        let longest = box_run
+            .pts
+            .windows(2)
+            .map(|w| w[0].dist(w[1]))
+            .fold(0.0, f64::max);
+        assert!(longest <= 60.0 + 1e-6 && longest > 40.0, "{longest}");
+        // Nothing to baste round: no box.
+        let none = plan("p", &[], &opt);
+        assert!(none.blocks.is_empty());
+        assert_eq!(none.basting_stitches, 0);
+    }
+
+    #[test]
+    fn knockdown_is_a_light_lattice_sewn_in_full() {
+        let under = shape(fill(sq(0.0, 0.0, 400.0)), Kind::Knockdown, [9; 3]);
+        let top = shape(fill(sq(50.0, 50.0, 300.0)), Kind::Fill, [0; 3]);
+        // On its own, and under a fill that covers most of it: the same
+        // stitches, because a knockdown is never cut away.
+        let alone = plan("p", std::slice::from_ref(&under), &PlanOptions::default());
+        let covered = plan("p", &[under.clone(), top.clone()], &PlanOptions::default());
+        assert_eq!(alone.per_shape[0], covered.per_shape[0]);
+        assert!(alone.per_shape[0] > 50);
+        assert!(!covered.covered[0]);
+        // Far lighter than a fill of the same square.
+        let as_fill = shape(fill(sq(0.0, 0.0, 400.0)), Kind::Fill, [9; 3]);
+        let solid = plan("p", &[as_fill], &PlanOptions::default());
+        assert!(
+            alone.per_shape[0] * 3 < solid.per_shape[0],
+            "{} vs {}",
+            alone.per_shape[0],
+            solid.per_shape[0]
+        );
+        // Two sets of rows, across each other: stitches run both ways.
+        let dirs: Vec<f64> = alone
+            .blocks
+            .iter()
+            .flat_map(|b| &b.runs)
+            .flat_map(|r| r.pts.windows(2))
+            .filter(|w| w[0].dist(w[1]) > 20.0)
+            .map(|w| {
+                let v = w[1] - w[0];
+                (v.y.atan2(v.x).to_degrees() + 180.0) % 180.0
+            })
+            .collect();
+        let near = |a: f64| dirs.iter().filter(|d| (**d - a).abs() < 3.0).count();
+        assert!(
+            near(45.0) > 10 && near(135.0) > 10,
+            "{} {}",
+            near(45.0),
+            near(135.0)
+        );
+        // Wider spacing, fewer stitches; and it doesn't cut what's under it.
+        let mut wide = under.clone();
+        wide.params.spacing = Some(4.0);
+        let w = plan("p", &[wide], &PlanOptions::default());
+        assert!(w.per_shape[0] < alone.per_shape[0]);
+        let d = plan("p", &[top, under], &PlanOptions::default());
+        assert!(!d.covered[0] && d.per_shape[0] > 0);
+    }
+
+    #[test]
+    fn thread_estimates_follow_the_stitches() {
+        // 10 stitches of 4 mm: 40 mm of path plus 1 mm each through the fabric.
+        let line: Polyline = (0..=10).map(|k| P::new(k as f64 * 40.0, 0.0)).collect();
+        assert!((thread_mm(&line) - 50.0).abs() < 1e-9);
+        assert_eq!(thread_mm(&[]), 0.0);
+        assert_eq!(thread_mm(&[P::new(1.0, 1.0)]), 0.0);
+        let red = [200, 0, 0];
+        let a = shape(fill(sq(0.0, 0.0, 200.0)), Kind::Fill, [0; 3]);
+        let b = shape(fill(sq(300.0, 0.0, 100.0)), Kind::Fill, red);
+        let c = shape(fill(sq(500.0, 0.0, 200.0)), Kind::Fill, [0; 3]);
+        let d = plan("p", &[a, b, c], &PlanOptions::default());
+        assert_eq!(d.blocks.len(), 3);
+        let per: Vec<f64> = (0..3).map(|k| d.block_thread_mm(k)).collect();
+        assert!(per.iter().all(|m| *m > 0.0));
+        assert!((d.thread_mm() - per.iter().sum::<f64>()).abs() < 1e-6);
+        assert!((d.bobbin_mm() - d.thread_mm() * BOBBIN_SHARE).abs() < 1e-9);
+        // The two black blocks are one thread to have on the spool.
+        let by = d.thread_by_color();
+        assert_eq!(by.len(), 2);
+        assert_eq!(by[0].0, [0; 3]);
+        assert!((by[0].1 - (per[0] + per[2])).abs() < 1e-6);
+        assert!((by[1].1 - per[1]).abs() < 1e-6);
+        // In the range thread makers quote: 4 to 7 m per 1,000 stitches.
+        let per_thousand = d.thread_mm() / d.stitch_count() as f64;
+        assert!((3.0..=7.0).contains(&per_thousand), "{per_thousand}");
+        assert_eq!(d.block_thread_mm(9), 0.0);
+        assert_eq!(fmt_thread(12_440.0), "12.4 m");
+        assert_eq!(fmt_thread(850.0), "85 cm");
+        assert_eq!(fmt_thread(999.0), "1.0 m");
+        assert_eq!(fmt_thread(0.0), "0 cm");
+    }
+
+    #[test]
+    fn every_block_says_why_the_machine_halts_before_it() {
+        let red = [200, 0, 0];
+        let mut a = shape(fill(sq(0.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        a.params.stop = Some(true);
+        a.params.stop_note = Some("Lay the foam".into());
+        let b = shape(fill(sq(130.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let mut c = shape(fill(sq(260.0, 0.0, 100.0)), Kind::Fill, red);
+        c.params.stop = Some(true);
+        let e = shape(fill(sq(390.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let d = plan("p", &[a, b, c, e], &PlanOptions::default());
+        assert_eq!(d.blocks.len(), 4);
+        assert_eq!(d.starts.len(), 4);
+        // The first block: the first thread, nothing to do before it.
+        assert_eq!(
+            d.block_start(0),
+            BlockStart {
+                thread_change: true,
+                ..BlockStart::default()
+            }
+        );
+        // After A: a pause in the same thread, with its note.
+        let s = d.block_start(1);
+        assert!(!s.thread_change && s.is_pause());
+        assert_eq!(s.stop_after, Some(0));
+        assert_eq!(s.note.as_deref(), Some("Lay the foam"));
+        // Before C: only a change of thread.
+        let s = d.block_start(2);
+        assert!(s.thread_change && !s.is_pause());
+        // After C: a pause that is also a change of thread (no note).
+        let s = d.block_start(3);
+        assert!(s.thread_change);
+        assert_eq!((s.stop_after, s.note.clone()), (Some(2), None));
+
+        // An appliqué's two pauses name their steps.
+        let ap = shape(fill(sq(0.0, 0.0, 300.0)), Kind::Applique, [0; 3]);
+        let d = plan("p", &[ap], &PlanOptions::default());
+        assert_eq!(d.blocks.len(), 3);
+        assert_eq!(d.block_start(1).applique, Some((0, 1)));
+        assert_eq!(d.block_start(2).applique, Some((0, 2)));
+
+        // A design that wasn't planned (an opened machine file) still says
+        // where the thread changes.
+        let mut bare = d.clone();
+        bare.starts.clear();
+        assert!(bare.block_start(0).thread_change);
+        assert!(!bare.block_start(1).thread_change);
+        assert!(!bare.block_start(1).is_pause());
     }
 
     #[test]

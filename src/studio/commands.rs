@@ -62,6 +62,18 @@ pub enum Action {
     Pathfinder(zigzag::boolean::PathOp),
     OffsetPath,
     OutlineStroke,
+    /// Object › Path › Add Outline…: an outline layer on top of a fill.
+    AddOutline,
+    /// Object › Merge Layers: the selected objects into one.
+    MergeLayers,
+    /// Object › Add Stop After: pause the machine after the selection.
+    AddStop,
+    /// Object › Add Knockdown…: a light lattice under the design.
+    AddKnockdown,
+    /// Object › Align: line the selection up by an edge or a center.
+    Align(zigzag::document::AlignEdge),
+    /// Object › Align › Distribute: equal gaps between three or more.
+    Distribute(zigzag::document::DistributeAxis),
     /// Object › Path › Release Compound Path: one object per separate shape.
     ReleaseCompound,
     SimplifyPath,
@@ -104,6 +116,11 @@ pub enum Action {
     Panel(PanelId),
     ToggleLeftDock,
     ToggleRightDock,
+    /// File › Open Recent: the file in this place in the list (0: the
+    /// latest). Its label is the file's name (see `Studio::action_label`).
+    OpenRecent(u8),
+    /// File › Open Recent › Clear Menu.
+    ClearRecent,
 }
 
 /// A keyboard shortcut. `cmd` is ⌘ on macOS and Ctrl elsewhere.
@@ -179,16 +196,34 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
         Item(Action::Kind(Kind::Ripple), "Ripple Fill", None),
         Item(Action::Kind(Kind::Cross), "Cross-Stitch", None),
         Item(Action::Kind(Kind::Tartan), "Tartan", None),
+        Item(Action::Kind(Kind::Knockdown), "Knockdown", None),
         Item(Action::Kind(Kind::Manual), "Manual Stitches", None),
         Sep,
         Item(Action::Kind(Kind::Skip), "Don't Stitch", plain(Key::X)),
     ];
+    let mut align: Vec<Entry> = zigzag::document::AlignEdge::ALL
+        .iter()
+        .map(|&e| Item(Action::Align(e), e.label(), None))
+        .collect();
+    align.push(Sep);
+    align.extend(
+        zigzag::document::DistributeAxis::ALL
+            .iter()
+            .map(|&a| Item(Action::Distribute(a), a.label(), None)),
+    );
+    // One place per recent file; the ones without a file aren't shown.
+    let mut recent: Vec<Entry> = (0..crate::recent::MAX as u8)
+        .map(|k| Item(Action::OpenRecent(k), "", None))
+        .collect();
+    recent.push(Sep);
+    recent.push(Item(Action::ClearRecent, "Clear Menu", None));
     vec![
         (
             "File",
             vec![
                 Item(Action::New, "New", cmd(Key::N)),
                 Item(Action::Open, "Open…", cmd(Key::O)),
+                Sub(crate::recent::MENU_TITLE, recent),
                 Item(Action::Place, "Place SVG…", cmd_shift(Key::P)),
                 Sep,
                 Item(Action::CloseTab, "Close", cmd(Key::W)),
@@ -236,6 +271,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                     vec![
                         Item(Action::OffsetPath, "Offset Path…", None),
                         Item(Action::OutlineStroke, "Outline Stroke", None),
+                        Item(Action::AddOutline, "Add Outline…", None),
                         Item(Action::ReleaseCompound, "Release Compound Path", None),
                         Item(Action::SimplifyPath, "Simplify…", None),
                         Item(Action::RoundCorners, "Round Corners…", None),
@@ -253,7 +289,11 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                         Item(Action::Pathfinder(PathOp::Exclude), "Exclude", None),
                     ],
                 ),
+                Item(Action::MergeLayers, "Merge Layers", cmd(Key::E)),
+                Item(Action::AddKnockdown, "Add Knockdown…", None),
                 Sep,
+                Sub("Align", align),
+                Item(Action::AddStop, "Add Stop After", None),
                 Sub(
                     "Sewing Order",
                     vec![
@@ -375,6 +415,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::Panel(PanelId::Transform), "Transform", None),
                 Item(Action::Panel(PanelId::Lettering), "Lettering", None),
                 Item(Action::Panel(PanelId::Threads), "Threads", None),
+                Item(Action::Panel(PanelId::Stops), "Stops", None),
                 Item(Action::Panel(PanelId::Document), "Document", None),
                 Item(Action::Panel(PanelId::Agent), "Agent", None),
             ],
@@ -415,6 +456,34 @@ pub fn all_actions() -> Vec<(Action, &'static str, Option<Sc>)> {
 }
 
 impl Studio {
+    /// The label of an action whose menu item changes with the document or
+    /// the app's state rather than being fixed in `menus` (a recent file's
+    /// name). `None` for every other action, and for a recent-file place
+    /// with no file in it (which isn't shown).
+    pub fn action_label(&self, a: Action) -> Option<String> {
+        match a {
+            Action::OpenRecent(k) => self.recent.label(k as usize),
+            _ => None,
+        }
+    }
+
+    /// File › Open Recent: open the file in place `k` (or bring its tab
+    /// forward). One that's gone from the disk is taken off the list.
+    pub fn open_recent(&mut self, k: usize) {
+        let Some(path) = self.recent.get(k).map(|p| p.to_path_buf()) else {
+            return;
+        };
+        if path.exists() {
+            self.load(&path);
+        } else {
+            self.recent.remove(&path);
+            self.status = format!(
+                "{} isn't there any more (moved, renamed or deleted), so it's off the Open Recent list.",
+                path.display()
+            );
+        }
+    }
+
     pub fn action_enabled(&self, a: Action) -> bool {
         let has_sel = !self.sel_indices().is_empty();
         let has_design = !self.design.blocks.is_empty();
@@ -461,7 +530,13 @@ impl Studio {
             | Action::BringForward
             | Action::SendBackward
             | Action::SendToBack => has_sel,
-            Action::Pathfinder(_) => self.sel_indices().len() >= 2,
+            Action::AddStop | Action::Align(_) => has_sel,
+            Action::Distribute(_) => self.arrange_count() >= 3,
+            Action::AddKnockdown => !self.knockdown_targets().is_empty(),
+            Action::OpenRecent(k) => self.recent.get(k as usize).is_some(),
+            Action::ClearRecent => !self.recent.is_empty(),
+            Action::AddOutline => !self.outlinable_selection().is_empty(),
+            Action::Pathfinder(_) | Action::MergeLayers => self.sel_indices().len() >= 2,
             Action::NextTab | Action::PreviousTab => self.tab_count() > 1,
             Action::Kind(k) => self
                 .sel_indices()
@@ -548,6 +623,11 @@ impl Studio {
                     self.load(&p);
                 }
             }
+            Action::OpenRecent(k) => self.open_recent(k as usize),
+            Action::ClearRecent => {
+                self.recent.clear();
+                self.status = "Cleared the Open Recent list.".into();
+            }
             Action::Place => {
                 let mut exts = vec!["svg"];
                 exts.extend(zigzag::trace::IMAGE_FORMATS);
@@ -628,6 +708,15 @@ impl Studio {
             Action::Pathfinder(op) => self.pathfinder_selected(op),
             Action::OffsetPath => self.layout.offset_dialog = Some(1.0),
             Action::OutlineStroke => self.outline_stroke_selected(),
+            Action::AddOutline => self.open_outline_dialog(),
+            Action::MergeLayers => self.merge_selected(),
+            Action::AddKnockdown => self.open_knockdown_dialog(),
+            Action::Align(e) => self.align_selected(e),
+            Action::Distribute(a) => self.distribute_selected(a),
+            Action::AddStop => {
+                self.add_stop_after_selection();
+                self.dock.reveal(PanelId::Stops);
+            }
             Action::ReleaseCompound => self.release_compound_selected(),
             Action::SimplifyPath => self.open_simplify_dialog(),
             Action::CleanUp => self.open_cleanup_dialog(),
@@ -844,6 +933,16 @@ impl Studio {
                     ui.menu_button(*title, |ui| self.menu_entries(ui, ctx, v));
                 }
                 Item(a, label, sc) => {
+                    // A label that changes (a recent file's name); a place
+                    // with nothing in it isn't shown, except that an empty
+                    // Open Recent says so.
+                    let named = self.action_label(*a);
+                    let label: &str = match (&named, *a) {
+                        (Some(l), _) => l,
+                        (None, Action::OpenRecent(0)) => "No Recent Files",
+                        (None, _) if label.is_empty() => continue,
+                        (None, _) => label,
+                    };
                     let checked = self.action_checked(*a).unwrap_or(false);
                     let text = if checked {
                         format!("✓  {label}")
@@ -854,7 +953,13 @@ impl Studio {
                     if let Some(sc) = sc {
                         b = b.shortcut_text(ctx.format_shortcut(&sc.egui()));
                     }
-                    if ui.add_enabled(self.action_enabled(*a), b).clicked() {
+                    let mut r = ui.add_enabled(self.action_enabled(*a), b);
+                    if let Action::OpenRecent(k) = *a
+                        && let Some(p) = self.recent.get(k as usize)
+                    {
+                        r = r.on_hover_text(p.display().to_string());
+                    }
+                    if r.clicked() {
                         self.run_action(*a);
                         ui.close();
                     }

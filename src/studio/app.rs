@@ -148,6 +148,8 @@ pub struct Studio {
     pub(crate) dock_ui: crate::dock::DockUi,
     /// The macOS menu bar (None elsewhere, and in tests).
     pub(crate) native_menu: Option<crate::native_menu::NativeMenu>,
+    /// File › Open Recent: the last files opened or saved.
+    pub(crate) recent: crate::recent::RecentFiles,
     pub(crate) show_jumps: bool,
 
     pub(crate) player: Option<usize>,
@@ -204,6 +206,10 @@ impl Studio {
         // A job on the Skitch outlives the app: pick it up too.
         let resume = s.restore_sent() && s.session.resume_skitch;
         s.dock = crate::dock::DockState::load();
+        // The recent files from last time, under whatever was opened while
+        // starting up (the file asked for, or the session's).
+        let opened = std::mem::replace(&mut s.recent, crate::recent::RecentFiles::load());
+        s.recent.absorb(&opened);
         s.palettes = crate::palettes::Palettes::load();
         s.agent = crate::agent::AgentState::load();
         s.dock_saved = s.dock.clone();
@@ -310,6 +316,7 @@ impl Studio {
             dock_saved: Default::default(),
             dock_ui: Default::default(),
             native_menu: None,
+            recent: Default::default(),
             show_jumps: true,
             player: None,
             playing: false,
@@ -348,6 +355,9 @@ impl Studio {
             .extension()
             .is_some_and(|e| zigzag::trace::is_image(&e.to_string_lossy()))
         {
+            if path.exists() {
+                self.recent.add(path);
+            }
             self.open_image(path, crate::trace_ui::Target::Open);
             return;
         }
@@ -356,11 +366,13 @@ impl Studio {
             && i != self.active_tab()
         {
             self.switch_tab(i);
+            self.recent.add(path);
             self.status = format!("{} is open in this tab.", path.display());
             return;
         }
         match Document::open(path) {
             Ok(doc) => {
+                self.recent.add(path);
                 let n = doc.shapes.len();
                 if !self.open_document(doc) {
                     self.status = format!(
@@ -670,6 +682,7 @@ impl Studio {
     pub fn save(&mut self, path: Option<&Path>) {
         match self.doc.save(path) {
             Ok(p) => {
+                self.recent.add(&p);
                 self.stable = self.doc.clone();
                 self.modified = false;
                 self.status = format!(
@@ -788,6 +801,7 @@ impl Studio {
                     end: own.end,
                     trim: own.trim,
                     stop: own.stop,
+                    stop_note: own.stop_note,
                     ..src.clone()
                 };
                 n += 1;
@@ -1084,6 +1098,8 @@ impl Studio {
         self.typing_box(&ctx, self.canvas_rect);
         crate::profile::mark("typing_box");
         self.offset_window(&ctx);
+        self.outline_window(&ctx);
+        self.knockdown_window(&ctx);
         self.corner_window(&ctx);
         self.simplify_window(&ctx);
         self.machine_window(&ctx);
@@ -1137,6 +1153,8 @@ impl Studio {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if (self.picker.is_some()
             || self.layout.offset_dialog.is_some()
+            || self.layout.outline_dialog.is_some()
+            || self.layout.knockdown_dialog.is_some()
             || self.previewing()
             || self.layout.cleanup_dialog.is_some()
             || self.shapes.dialog.is_some()
@@ -1146,6 +1164,8 @@ impl Studio {
         {
             self.picker = None;
             self.layout.offset_dialog = None;
+            self.layout.outline_dialog = None;
+            self.layout.knockdown_dialog = None;
             // Cancel any preview.
             self.cancel_previews();
             self.layout.cleanup_dialog = None;

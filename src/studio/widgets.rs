@@ -18,6 +18,7 @@ pub fn kind_name(k: Kind) -> &'static str {
         Kind::Ripple => "Ripple",
         Kind::Cross => "Cross-stitch",
         Kind::Tartan => "Tartan",
+        Kind::Knockdown => "Knockdown",
     }
 }
 
@@ -58,6 +59,9 @@ pub fn kind_help(k: Kind, on_filled_shape: bool) -> &'static str {
         (Kind::Tartan, _) => {
             "Tartan: woven stripes in several threads. Set the stripes below; each thread sews as its own color."
         }
+        (Kind::Knockdown, _) => {
+            "Knockdown: a light open lattice sewn under a design to flatten the pile of towels and fleece, so the stitches on top don't sink in. Sewn in full under whatever covers it; use the fabric's color."
+        }
     }
 }
 
@@ -75,6 +79,7 @@ pub fn allowed_kinds(s: &Shape) -> Vec<Kind> {
                 Kind::Ripple,
                 Kind::Cross,
                 Kind::Tartan,
+                Kind::Knockdown,
                 Kind::Manual,
                 Kind::Skip,
             ]
@@ -334,6 +339,15 @@ pub fn draw_kind_icon(p: &egui::Painter, r: Rect, k: Kind, c: Color32) {
                 p.line_segment([at(x - d, y + d), at(x + d, y - d)], s);
             }
         }
+        Kind::Knockdown => {
+            // An open lattice: diagonals both ways.
+            let thin = Stroke::new(1.0, c);
+            for k in [-0.5_f32, 0.0, 0.5] {
+                let (a, b) = (k.max(0.0), (1.0 + k).min(1.0));
+                p.line_segment([at(a, a - k), at(b, b - k)], thin);
+                p.line_segment([at(a, 1.0 - (a - k)), at(b, 1.0 - (b - k))], thin);
+            }
+        }
         Kind::Tartan => {
             let thin = Stroke::new(1.0, c.gamma_multiply(0.6));
             for v in [0.25, 0.7] {
@@ -384,6 +398,7 @@ pub fn kind_blurb(k: Kind) -> &'static str {
         Kind::Ripple => "Open rows following the outline, or one spiral.",
         Kind::Cross => "A grid of X's, like hand cross-stitch.",
         Kind::Tartan => "Woven stripes in several threads.",
+        Kind::Knockdown => "A light lattice under a design, to flatten a towel's pile.",
         Kind::Skip => "Not stitched.",
     }
 }
@@ -402,6 +417,7 @@ pub fn stitch_type_guide(ui: &mut egui::Ui) {
         Kind::Ripple,
         Kind::Cross,
         Kind::Tartan,
+        Kind::Knockdown,
     ];
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = crate::theme::space::XS;

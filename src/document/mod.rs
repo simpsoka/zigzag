@@ -12,15 +12,18 @@ use crate::params::{Fabric, Kind, Params};
 use crate::svg::{self, Geometry, PX_TO_UNITS, Part, Shape};
 use anyhow::{Context, Result, anyhow, bail};
 
+mod arrange;
 mod cleanup;
 mod edit;
 mod glyphs;
 mod lettering;
 mod paths;
+pub use arrange::{AlignEdge, DistributeAxis};
 pub use cleanup::{CleanUp, CleanUpReport};
 pub use edit::Fragment;
 pub use glyphs::{Carets, GlyphBox};
 pub use lettering::{Align, Case, TextSpec, default_font, font_families};
+pub use paths::{KnockdownSpec, OutlineSpec, OutlineStitch};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -51,7 +54,13 @@ pub struct Settings {
     pub connect_mm: f64,
     /// The fabric's color, for previewing the stitches on it.
     pub cloth: [u8; 3],
+    /// A basting box round the design, this far outside it (mm), sewn first
+    /// to hold the fabric to the stabilizer (0: none).
+    pub baste_mm: f64,
 }
+
+/// The furthest a basting box can sit outside the design, mm.
+pub const MAX_BASTE_MM: f64 = 30.0;
 
 /// The preview fabric color when a design doesn't say.
 pub const DEFAULT_CLOTH: [u8; 3] = [236, 231, 220];
@@ -65,6 +74,7 @@ impl Default for Settings {
             hoop: 0,
             connect_mm: 0.0,
             cloth: DEFAULT_CLOTH,
+            baste_mm: 0.0,
         }
     }
 }
@@ -82,6 +92,13 @@ impl Settings {
                 "hat" => s.hat_order = v == "1",
                 "hoop" => s.hoop = v.parse().unwrap_or(0),
                 "connect" => s.connect_mm = v.parse().unwrap_or(0.0),
+                "baste" => {
+                    s.baste_mm = v
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|m| m.is_finite() && *m > 0.0)
+                        .map_or(0.0, |m| m.min(MAX_BASTE_MM))
+                }
                 "cloth" if v.len() == 6 => {
                     if let Ok(n) = u32::from_str_radix(v, 16) {
                         s.cloth = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
@@ -102,6 +119,9 @@ impl Settings {
                 " connect={}",
                 crate::params::fmt_num(self.connect_mm)
             ));
+        }
+        if self.baste_mm > 0.0 {
+            s.push_str(&format!(" baste={}", crate::params::fmt_num(self.baste_mm)));
         }
         if self.cloth != DEFAULT_CLOTH {
             let [r, g, b] = self.cloth;
@@ -702,6 +722,7 @@ impl Document {
             remove_overlaps: self.settings.remove_overlaps,
             hat_order: self.settings.hat_order,
             connect: self.settings.connect_mm * 10.0,
+            basting: (self.settings.baste_mm > 0.0).then_some(self.settings.baste_mm * 10.0),
             ..Default::default()
         }
     }
@@ -1255,6 +1276,33 @@ mod tests {
         );
         assert!((b.center().x + 200.0).abs() < 1.0);
         assert!(d.to_svg().unwrap().contains("data-zigzag="));
+    }
+
+    #[test]
+    fn basting_is_saved_with_the_design_and_planned() {
+        let mut d = Document::from_svg(ILLUSTRATOR, "t", None).unwrap();
+        assert_eq!(d.settings.baste_mm, 0.0);
+        assert!(!d.to_svg().unwrap().contains("baste="));
+        assert_eq!(d.plan().basting_stitches, 0);
+        d.settings.baste_mm = 5.0;
+        let saved = d.to_svg().unwrap();
+        assert!(saved.contains("baste=5"), "{saved}");
+        let e = Document::from_svg(&saved, "t", None).unwrap();
+        assert_eq!(e.settings.baste_mm, 5.0);
+        let plan = e.plan();
+        assert!(plan.basting_stitches > 4);
+        assert_eq!(
+            plan.stitch_count(),
+            d.plan().stitch_count(),
+            "the same plan before and after saving"
+        );
+        // Nonsense in a file is no basting; a huge margin is capped.
+        assert_eq!(Settings::parse("baste=-3").baste_mm, 0.0);
+        assert_eq!(Settings::parse("baste=x").baste_mm, 0.0);
+        assert_eq!(Settings::parse("baste=500").baste_mm, MAX_BASTE_MM);
+        // The new fabrics are fabrics a file can name.
+        assert_eq!(Settings::parse("fabric=towel").fabric().id, "towel");
+        assert_eq!(Settings::parse("fabric=tshirt").fabric().id, "tshirt");
     }
 
     #[test]
