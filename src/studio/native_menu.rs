@@ -32,6 +32,11 @@ mod imp {
         by_id: HashMap<MenuId, Action>,
         rx: mpsc::Receiver<MenuId>,
         state: HashMap<Action, (bool, Option<bool>)>,
+        /// File › Open Recent, whose items are the recent files: rebuilt
+        /// whenever the list changes (see `sync_recent`).
+        recent: Option<Submenu>,
+        /// The files that submenu lists now (`None`: not built yet).
+        recent_shown: Option<Vec<std::path::PathBuf>>,
     }
 
     fn code(k: Key) -> Option<Code> {
@@ -92,6 +97,14 @@ mod imp {
             for e in entries {
                 match e {
                     Entry::Sep => sub.append(&PredefinedMenuItem::separator())?,
+                    Entry::Sub(title, _) if *title == crate::recent::MENU_TITLE => {
+                        // Its items change as files are opened: kept, and
+                        // filled from the list rather than from `entries`.
+                        let s = Submenu::new(*title, true);
+                        self.recent = Some(s.clone());
+                        self.sync_recent(studio)?;
+                        sub.append(&s)?;
+                    }
                     Entry::Sub(title, v) => {
                         let s = Submenu::new(*title, true);
                         self.fill(&s, v, studio)?;
@@ -122,6 +135,39 @@ mod imp {
             Ok(())
         }
 
+        /// File › Open Recent: one item per recent file (or "No Recent
+        /// Files"), then Clear Menu. Rebuilt only when the list changed.
+        fn sync_recent(&mut self, studio: &Studio) -> muda::Result<()> {
+            let Some(sub) = self.recent.clone() else {
+                return Ok(());
+            };
+            let now = studio.recent.paths();
+            if self.recent_shown.as_deref() == Some(now) {
+                return Ok(());
+            }
+            while sub.remove_at(0).is_some() {}
+            if now.is_empty() {
+                sub.append(&MenuItem::new("No Recent Files", false, None))?;
+            }
+            for k in 0..now.len() {
+                let a = Action::OpenRecent(k as u8);
+                let label = studio.action_label(a).unwrap_or_default();
+                self.by_id.insert(id(a), a);
+                sub.append(&MenuItem::with_id(id(a), label, true, None))?;
+            }
+            sub.append(&PredefinedMenuItem::separator())?;
+            let clear = Action::ClearRecent;
+            self.by_id.insert(id(clear), clear);
+            sub.append(&MenuItem::with_id(
+                id(clear),
+                "Clear Menu",
+                !now.is_empty(),
+                None,
+            ))?;
+            self.recent_shown = Some(now.to_vec());
+            Ok(())
+        }
+
         pub fn new(ctx: egui::Context, studio: &Studio) -> muda::Result<NativeMenu> {
             let (tx, rx) = mpsc::channel();
             let tx = Mutex::new(tx);
@@ -137,6 +183,8 @@ mod imp {
                 by_id: HashMap::new(),
                 rx,
                 state: HashMap::new(),
+                recent: None,
+                recent_shown: None,
             };
             let app = Submenu::new("ZigZag", true);
             app.append_items(&[
@@ -189,6 +237,8 @@ mod imp {
 
         /// Keep enabled / checked states current (only touching what changed).
         pub fn sync(&mut self, studio: &Studio, typing: bool) {
+            // (A menu that can't be rebuilt keeps the items it has.)
+            let _ = self.sync_recent(studio);
             for (a, h) in &self.items {
                 let edit = matches!(
                     a,

@@ -999,6 +999,8 @@ impl Studio {
                     let doc = Document::open(&p).map_err(|e| format!("{e:#}"));
                     doc.map(|d| {
                         self.open_document(d);
+                        // (In File › Open Recent, like any file opened.)
+                        self.recent.add(&p);
                         self.replan_soon();
                         ToolResult::json(&self.design_json())
                     })

@@ -31,6 +31,7 @@ mod pen;
 mod perf_bench;
 mod planner;
 mod profile;
+mod recent;
 mod session;
 mod sew;
 mod shapes;

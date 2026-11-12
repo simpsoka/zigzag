@@ -110,6 +110,11 @@ pub enum Action {
     Panel(PanelId),
     ToggleLeftDock,
     ToggleRightDock,
+    /// File › Open Recent: the file in this place in the list (0: the
+    /// latest). Its label is the file's name (see `Studio::action_label`).
+    OpenRecent(u8),
+    /// File › Open Recent › Clear Menu.
+    ClearRecent,
 }
 
 /// A keyboard shortcut. `cmd` is ⌘ on macOS and Ctrl elsewhere.
@@ -189,12 +194,19 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
         Sep,
         Item(Action::Kind(Kind::Skip), "Don't Stitch", plain(Key::X)),
     ];
+    // One place per recent file; the ones without a file aren't shown.
+    let mut recent: Vec<Entry> = (0..crate::recent::MAX as u8)
+        .map(|k| Item(Action::OpenRecent(k), "", None))
+        .collect();
+    recent.push(Sep);
+    recent.push(Item(Action::ClearRecent, "Clear Menu", None));
     vec![
         (
             "File",
             vec![
                 Item(Action::New, "New", cmd(Key::N)),
                 Item(Action::Open, "Open…", cmd(Key::O)),
+                Sub(crate::recent::MENU_TITLE, recent),
                 Item(Action::Place, "Place SVG…", cmd_shift(Key::P)),
                 Sep,
                 Item(Action::CloseTab, "Close", cmd(Key::W)),
@@ -425,6 +437,34 @@ pub fn all_actions() -> Vec<(Action, &'static str, Option<Sc>)> {
 }
 
 impl Studio {
+    /// The label of an action whose menu item changes with the document or
+    /// the app's state rather than being fixed in `menus` (a recent file's
+    /// name). `None` for every other action, and for a recent-file place
+    /// with no file in it (which isn't shown).
+    pub fn action_label(&self, a: Action) -> Option<String> {
+        match a {
+            Action::OpenRecent(k) => self.recent.label(k as usize),
+            _ => None,
+        }
+    }
+
+    /// File › Open Recent: open the file in place `k` (or bring its tab
+    /// forward). One that's gone from the disk is taken off the list.
+    pub fn open_recent(&mut self, k: usize) {
+        let Some(path) = self.recent.get(k).map(|p| p.to_path_buf()) else {
+            return;
+        };
+        if path.exists() {
+            self.load(&path);
+        } else {
+            self.recent.remove(&path);
+            self.status = format!(
+                "{} isn't there any more (moved, renamed or deleted), so it's off the Open Recent list.",
+                path.display()
+            );
+        }
+    }
+
     pub fn action_enabled(&self, a: Action) -> bool {
         let has_sel = !self.sel_indices().is_empty();
         let has_design = !self.design.blocks.is_empty();
@@ -472,6 +512,8 @@ impl Studio {
             | Action::SendBackward
             | Action::SendToBack => has_sel,
             Action::AddStop => has_sel,
+            Action::OpenRecent(k) => self.recent.get(k as usize).is_some(),
+            Action::ClearRecent => !self.recent.is_empty(),
             Action::AddOutline => !self.outlinable_selection().is_empty(),
             Action::Pathfinder(_) | Action::MergeLayers => self.sel_indices().len() >= 2,
             Action::NextTab | Action::PreviousTab => self.tab_count() > 1,
@@ -559,6 +601,11 @@ impl Studio {
                 {
                     self.load(&p);
                 }
+            }
+            Action::OpenRecent(k) => self.open_recent(k as usize),
+            Action::ClearRecent => {
+                self.recent.clear();
+                self.status = "Cleared the Open Recent list.".into();
             }
             Action::Place => {
                 let mut exts = vec!["svg"];
@@ -862,6 +909,16 @@ impl Studio {
                     ui.menu_button(*title, |ui| self.menu_entries(ui, ctx, v));
                 }
                 Item(a, label, sc) => {
+                    // A label that changes (a recent file's name); a place
+                    // with nothing in it isn't shown, except that an empty
+                    // Open Recent says so.
+                    let named = self.action_label(*a);
+                    let label: &str = match (&named, *a) {
+                        (Some(l), _) => l,
+                        (None, Action::OpenRecent(0)) => "No Recent Files",
+                        (None, _) if label.is_empty() => continue,
+                        (None, _) => label,
+                    };
                     let checked = self.action_checked(*a).unwrap_or(false);
                     let text = if checked {
                         format!("✓  {label}")
@@ -872,7 +929,13 @@ impl Studio {
                     if let Some(sc) = sc {
                         b = b.shortcut_text(ctx.format_shortcut(&sc.egui()));
                     }
-                    if ui.add_enabled(self.action_enabled(*a), b).clicked() {
+                    let mut r = ui.add_enabled(self.action_enabled(*a), b);
+                    if let Action::OpenRecent(k) = *a
+                        && let Some(p) = self.recent.get(k as usize)
+                    {
+                        r = r.on_hover_text(p.display().to_string());
+                    }
+                    if r.clicked() {
                         self.run_action(*a);
                         ui.close();
                     }
