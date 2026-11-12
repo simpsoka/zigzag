@@ -1099,6 +1099,7 @@ impl Studio {
         crate::profile::mark("typing_box");
         self.offset_window(&ctx);
         self.outline_window(&ctx);
+        self.knockdown_window(&ctx);
         self.corner_window(&ctx);
         self.simplify_window(&ctx);
         self.machine_window(&ctx);
@@ -1153,6 +1154,7 @@ impl Studio {
         if (self.picker.is_some()
             || self.layout.offset_dialog.is_some()
             || self.layout.outline_dialog.is_some()
+            || self.layout.knockdown_dialog.is_some()
             || self.previewing()
             || self.layout.cleanup_dialog.is_some()
             || self.shapes.dialog.is_some()
@@ -1163,6 +1165,7 @@ impl Studio {
             self.picker = None;
             self.layout.offset_dialog = None;
             self.layout.outline_dialog = None;
+            self.layout.knockdown_dialog = None;
             // Cancel any preview.
             self.cancel_previews();
             self.layout.cleanup_dialog = None;

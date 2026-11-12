@@ -411,8 +411,15 @@ impl Studio {
         let mut select = None;
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut open_picker = None;
+        // About how much of each thread the design takes.
+        let by_color = self.design.thread_by_color();
         for (c, objects, stitches) in &threads {
             use crate::theme::{LIST_SWATCH, ROW_H, space};
+            let thread = by_color
+                .iter()
+                .find(|(t, _)| t == c)
+                .map(|(_, mm)| self.thread_len(*mm))
+                .unwrap_or_default();
             // Same row layout as the sewing-order list.
             let (rect, resp) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
@@ -460,7 +467,7 @@ impl Studio {
             painter.text(
                 egui::pos2(rect.right() - space::XS, rect.center().y),
                 egui::Align2::RIGHT_CENTER,
-                format!("{} · {}", objects.len(), fmt_int(*stitches)),
+                format!("{} · {} · {thread}", objects.len(), fmt_int(*stitches)),
                 egui::FontId::proportional(11.0),
                 p.secondary,
             );
@@ -494,6 +501,16 @@ impl Studio {
         }
         if let Some(v) = select {
             self.set_selection(&v);
+        }
+    }
+
+    /// A thread length as the panels show it: metres (or yards, when the
+    /// document's unit is inches).
+    pub(crate) fn thread_len(&self, mm: f64) -> String {
+        if self.dock.units == crate::units::Unit::In {
+            format!("{:.1} yd", mm / 914.4)
+        } else {
+            zigzag::design::fmt_thread(mm)
         }
     }
 
@@ -532,6 +549,17 @@ impl Studio {
                 ),
             );
         });
+        // About how much thread the design takes.
+        if !self.design.blocks.is_empty() {
+            let text = format!(
+                "Thread: about {} top · {} bobbin",
+                self.thread_len(self.design.thread_mm()),
+                self.thread_len(self.design.bobbin_mm())
+            );
+            let r = caption(ui, text.clone());
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+            r.on_hover_text("An estimate from the stitches: each one's length plus about 1 mm through the fabric, and bobbin thread at a little under half the top thread. Tension, fabric thickness and thread weight change the real figure, so allow some extra.");
+        }
         // ---- A palette to pick from (off by default: the thread picker
         // has the same palettes; the panel's menu shows it).
         if !self.dock.show_palette {

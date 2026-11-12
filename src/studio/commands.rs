@@ -68,6 +68,12 @@ pub enum Action {
     MergeLayers,
     /// Object › Add Stop After: pause the machine after the selection.
     AddStop,
+    /// Object › Add Knockdown…: a light lattice under the design.
+    AddKnockdown,
+    /// Object › Align: line the selection up by an edge or a center.
+    Align(zigzag::document::AlignEdge),
+    /// Object › Align › Distribute: equal gaps between three or more.
+    Distribute(zigzag::document::DistributeAxis),
     /// Object › Path › Release Compound Path: one object per separate shape.
     ReleaseCompound,
     SimplifyPath,
@@ -190,10 +196,21 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
         Item(Action::Kind(Kind::Ripple), "Ripple Fill", None),
         Item(Action::Kind(Kind::Cross), "Cross-Stitch", None),
         Item(Action::Kind(Kind::Tartan), "Tartan", None),
+        Item(Action::Kind(Kind::Knockdown), "Knockdown", None),
         Item(Action::Kind(Kind::Manual), "Manual Stitches", None),
         Sep,
         Item(Action::Kind(Kind::Skip), "Don't Stitch", plain(Key::X)),
     ];
+    let mut align: Vec<Entry> = zigzag::document::AlignEdge::ALL
+        .iter()
+        .map(|&e| Item(Action::Align(e), e.label(), None))
+        .collect();
+    align.push(Sep);
+    align.extend(
+        zigzag::document::DistributeAxis::ALL
+            .iter()
+            .map(|&a| Item(Action::Distribute(a), a.label(), None)),
+    );
     // One place per recent file; the ones without a file aren't shown.
     let mut recent: Vec<Entry> = (0..crate::recent::MAX as u8)
         .map(|k| Item(Action::OpenRecent(k), "", None))
@@ -273,7 +290,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                     ],
                 ),
                 Item(Action::MergeLayers, "Merge Layers", cmd(Key::E)),
+                Item(Action::AddKnockdown, "Add Knockdown…", None),
                 Sep,
+                Sub("Align", align),
                 Item(Action::AddStop, "Add Stop After", None),
                 Sub(
                     "Sewing Order",
@@ -511,7 +530,9 @@ impl Studio {
             | Action::BringForward
             | Action::SendBackward
             | Action::SendToBack => has_sel,
-            Action::AddStop => has_sel,
+            Action::AddStop | Action::Align(_) => has_sel,
+            Action::Distribute(_) => self.arrange_count() >= 3,
+            Action::AddKnockdown => !self.knockdown_targets().is_empty(),
             Action::OpenRecent(k) => self.recent.get(k as usize).is_some(),
             Action::ClearRecent => !self.recent.is_empty(),
             Action::AddOutline => !self.outlinable_selection().is_empty(),
@@ -689,6 +710,9 @@ impl Studio {
             Action::OutlineStroke => self.outline_stroke_selected(),
             Action::AddOutline => self.open_outline_dialog(),
             Action::MergeLayers => self.merge_selected(),
+            Action::AddKnockdown => self.open_knockdown_dialog(),
+            Action::Align(e) => self.align_selected(e),
+            Action::Distribute(a) => self.distribute_selected(a),
             Action::AddStop => {
                 self.add_stop_after_selection();
                 self.dock.reveal(PanelId::Stops);

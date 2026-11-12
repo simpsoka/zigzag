@@ -7,7 +7,7 @@
 //! Parameters on a group apply to everything inside it; children override.
 //!
 //! Tokens (separated by spaces, underscores, commas or semicolons):
-//!   fill | satin | run | contour | blanket | applique | meander | ripple | cross | tartan | manual | skip   stitch type
+//!   fill | satin | run | contour | blanket | applique | meander | ripple | cross | tartan | knockdown | manual | skip   stitch type
 //!   a=DEG      fill angle
 //!   s=MM       row / zigzag spacing
 //!   l=MM       max stitch length
@@ -56,6 +56,11 @@ pub enum Kind {
     Cross,
     /// Woven stripes in several threads.
     Tartan,
+    /// A light open lattice (rows one way, then across them) sewn under a
+    /// design to flatten the pile of towels, fleece and knits, so the
+    /// stitches on top don't sink into it. Sewn in full: it's never cut
+    /// away under what covers it.
+    Knockdown,
 }
 
 impl Kind {
@@ -73,6 +78,7 @@ impl Kind {
             Kind::Ripple => "ripple",
             Kind::Cross => "cross",
             Kind::Tartan => "tartan",
+            Kind::Knockdown => "knockdown",
         }
     }
     pub fn parse(s: &str) -> Option<Kind> {
@@ -89,6 +95,7 @@ impl Kind {
             "ripple" => Some(Kind::Ripple),
             "cross" | "crossstitch" | "cross-stitch" => Some(Kind::Cross),
             "tartan" | "plaid" => Some(Kind::Tartan),
+            "knockdown" | "knock-down" | "naptack" => Some(Kind::Knockdown),
             _ => None,
         }
     }
@@ -188,9 +195,12 @@ pub struct Fabric {
     pub satin_spacing: f64,
     pub satin_pull: f64,
     pub run_len: f64,
+    /// A raised pile or nap (terry loops, fleece, plush) that stitches sink
+    /// into: wants a knockdown layer under the design and a topping.
+    pub pile: bool,
 }
 
-pub const FABRICS: [Fabric; 4] = [
+pub const FABRICS: [Fabric; 8] = [
     Fabric {
         id: "standard",
         name: "Standard (twill, denim, patches)",
@@ -203,6 +213,7 @@ pub const FABRICS: [Fabric; 4] = [
         satin_spacing: 0.4,
         satin_pull: 0.15,
         run_len: 2.5,
+        pile: false,
     },
     Fabric {
         id: "thin-cap",
@@ -216,6 +227,7 @@ pub const FABRICS: [Fabric; 4] = [
         satin_spacing: 0.42,
         satin_pull: 0.2,
         run_len: 2.2,
+        pile: false,
     },
     Fabric {
         id: "structured-cap",
@@ -229,6 +241,7 @@ pub const FABRICS: [Fabric; 4] = [
         satin_spacing: 0.4,
         satin_pull: 0.2,
         run_len: 2.5,
+        pile: false,
     },
     Fabric {
         id: "knit",
@@ -242,6 +255,63 @@ pub const FABRICS: [Fabric; 4] = [
         satin_spacing: 0.38,
         satin_pull: 0.3,
         run_len: 2.0,
+        pile: false,
+    },
+    Fabric {
+        id: "tshirt",
+        name: "T-shirt (cotton jersey)",
+        about: "Thin, stretchy knit. Light density so the design stays soft and doesn't pucker, edge walk and generous pull compensation. Hoop with cut-away stabilizer.",
+        fill_spacing: 0.4,
+        fill_len: 3.0,
+        fill_pull: 0.3,
+        fill_edge_walk: true,
+        fill_underlay_spacing: 1.5,
+        satin_spacing: 0.42,
+        satin_pull: 0.3,
+        run_len: 2.2,
+        pile: false,
+    },
+    Fabric {
+        id: "towel",
+        name: "Towel (terry cloth)",
+        about: "Loops that swallow stitches. Full density over strong underlay, wide pull compensation, longer stitches. Add a knockdown layer and use a water-soluble topping.",
+        fill_spacing: 0.3,
+        fill_len: 3.5,
+        fill_pull: 0.3,
+        fill_edge_walk: true,
+        fill_underlay_spacing: 1.2,
+        satin_spacing: 0.36,
+        satin_pull: 0.35,
+        run_len: 2.5,
+        pile: true,
+    },
+    Fabric {
+        id: "fleece",
+        name: "Fleece / plush (blankets, stocking cuffs)",
+        about: "Soft, thick nap that stretches a little. Strong underlay and pull compensation; a knockdown layer and a topping keep fine detail on the surface.",
+        fill_spacing: 0.32,
+        fill_len: 3.5,
+        fill_pull: 0.3,
+        fill_edge_walk: true,
+        fill_underlay_spacing: 1.3,
+        satin_spacing: 0.38,
+        satin_pull: 0.3,
+        run_len: 2.5,
+        pile: true,
+    },
+    Fabric {
+        id: "felt",
+        name: "Felt (Christmas stockings, patches)",
+        about: "Thick and stable, no stretch. Standard density with a little pull compensation; no edge walk needed.",
+        fill_spacing: 0.3,
+        fill_len: 3.0,
+        fill_pull: 0.1,
+        fill_edge_walk: false,
+        fill_underlay_spacing: 1.8,
+        satin_spacing: 0.4,
+        satin_pull: 0.15,
+        run_len: 2.5,
+        pile: false,
     },
 ];
 
@@ -275,6 +345,14 @@ pub mod defaults {
     pub const CROSS_CELL: f64 = 2.5;
     pub const MEANDER_SPACING: f64 = 3.0;
     pub const RIPPLE_SPACING: f64 = 2.5;
+    /// Knockdown lattice: rows this far apart (each way), at this angle.
+    pub const KNOCKDOWN_SPACING: f64 = 2.0;
+    pub const KNOCKDOWN_ANGLE: f64 = 45.0;
+    /// How far a knockdown made for a design reaches past it.
+    pub const KNOCKDOWN_MARGIN: f64 = 2.0;
+    /// A basting box: how far outside the design, and its stitch length.
+    pub const BASTING_MARGIN: f64 = 5.0;
+    pub const BASTING_LEN: f64 = 6.0;
 }
 
 impl Params {
@@ -356,6 +434,15 @@ impl Params {
     /// Meander line spacing, mm.
     pub fn meander_spacing(&self) -> f64 {
         self.spacing_set().unwrap_or(defaults::MEANDER_SPACING)
+    }
+    /// Knockdown lattice row spacing, mm.
+    pub fn knockdown_spacing(&self) -> f64 {
+        self.spacing_set().unwrap_or(defaults::KNOCKDOWN_SPACING)
+    }
+    /// The direction of a knockdown's first rows, degrees (the second set
+    /// runs across them).
+    pub fn knockdown_angle(&self) -> f64 {
+        self.angle.unwrap_or(defaults::KNOCKDOWN_ANGLE)
     }
     /// Ripple row spacing, mm.
     pub fn ripple_spacing(&self) -> f64 {
@@ -706,6 +793,37 @@ mod tests {
 
         let p = Params::parse("Layer_1");
         assert_eq!(p, Params::default());
+    }
+
+    #[test]
+    fn fabric_presets_are_distinct_and_sane() {
+        let ids: std::collections::HashSet<&str> = FABRICS.iter().map(|f| f.id).collect();
+        assert_eq!(ids.len(), FABRICS.len(), "no id twice");
+        for f in FABRICS {
+            assert_eq!(Fabric::by_id(f.id), Some(&f));
+            // (Ids go into the SVG's settings attribute as one token.)
+            assert!(!f.id.contains([' ', '=', '_']), "{}", f.id);
+            assert!((0.2..=0.5).contains(&f.fill_spacing), "{}", f.id);
+            assert!((0.3..=0.5).contains(&f.satin_spacing), "{}", f.id);
+            assert!((2.0..=4.0).contains(&f.fill_len), "{}", f.id);
+            assert!((0.0..=0.4).contains(&f.fill_pull), "{}", f.id);
+            assert!((0.0..=0.4).contains(&f.satin_pull), "{}", f.id);
+            assert!(!f.about.is_empty() && !f.name.is_empty());
+        }
+        // The ones this fork adds, and what sets them apart.
+        let (tee, towel) = (
+            Fabric::by_id("tshirt").unwrap(),
+            Fabric::by_id("towel").unwrap(),
+        );
+        assert!(
+            tee.fill_spacing > Fabric::standard().fill_spacing,
+            "lighter on jersey"
+        );
+        assert!(towel.pile && Fabric::by_id("fleece").unwrap().pile);
+        assert!(!tee.pile && !Fabric::by_id("felt").unwrap().pile);
+        assert!(towel.fill_underlay_spacing < Fabric::standard().fill_underlay_spacing);
+        assert_eq!(Kind::parse("knockdown"), Some(Kind::Knockdown));
+        assert_eq!(Kind::parse(Kind::Knockdown.name()), Some(Kind::Knockdown));
     }
 
     #[test]

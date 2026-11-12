@@ -826,6 +826,8 @@ pub fn activity(tool: &str) -> &'static str {
         "delete_object" => "Removing",
         "round_corners" => "Rounding corners",
         "add_outline" => "Outlining",
+        "add_knockdown" => "Adding a knockdown",
+        "align_objects" => "Aligning",
         "merge_objects" => "Merging",
         "trace_image" => "Tracing",
         "render_preview" => "Looking",

@@ -17,7 +17,8 @@ use crate::icons::{self, Icon};
 use crate::theme::{self, caption, pal_ui};
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use zigzag::design::BlockStart;
-use zigzag::document::{OutlineSpec, OutlineStitch};
+use zigzag::document::{KnockdownSpec, OutlineSpec, OutlineStitch};
+use zigzag::params::Kind;
 use zigzag::svg::Geometry;
 
 /// The Add Outline window's settings.
@@ -53,6 +54,30 @@ impl OutlineDialog {
             width_mm: self.width,
             offset_mm: self.offset,
             color: (!self.match_fill).then_some(self.color),
+        }
+    }
+}
+
+/// The Add Knockdown window's settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnockdownDialog {
+    /// How far past the design it reaches, mm.
+    pub margin: f64,
+    /// The lattice's row spacing, mm.
+    pub spacing: f64,
+    /// Sew it in the fabric's color (the document's preview color).
+    pub match_fabric: bool,
+    pub color: [u8; 3],
+}
+
+impl Default for KnockdownDialog {
+    fn default() -> Self {
+        let d = KnockdownSpec::default();
+        KnockdownDialog {
+            margin: d.margin_mm,
+            spacing: d.spacing_mm,
+            match_fabric: true,
+            color: d.color,
         }
     }
 }
@@ -228,6 +253,161 @@ impl Studio {
             self.layout.outline_dialog = None;
         } else {
             self.layout.outline_dialog = Some(d);
+        }
+    }
+
+    /// What a knockdown would go under: the selection, or with nothing
+    /// selected the whole design (leaving out what isn't sewn and any
+    /// knockdown already there).
+    pub(crate) fn knockdown_targets(&self) -> Vec<usize> {
+        let sel = self.sel_indices();
+        let all: Vec<usize> = (0..self.doc.shapes.len()).collect();
+        if sel.is_empty() { all } else { sel }
+            .into_iter()
+            .filter(|&i| {
+                !matches!(
+                    self.doc.shapes[i].params.kind,
+                    Some(Kind::Skip | Kind::Knockdown)
+                )
+            })
+            .collect()
+    }
+
+    /// Object › Add Knockdown…: open the window.
+    pub fn open_knockdown_dialog(&mut self) {
+        if self.knockdown_targets().is_empty() {
+            self.status = "There's nothing to put a knockdown under yet.".into();
+            return;
+        }
+        self.layout.knockdown_dialog = Some(KnockdownDialog::default());
+    }
+
+    /// Add a knockdown layer under the selection (or the whole design), as
+    /// one undo step; it ends up selected.
+    pub fn add_knockdown(&mut self, spec: KnockdownSpec) {
+        let idx = self.knockdown_targets();
+        let whole = self.sel_indices().is_empty();
+        let mut new = 0;
+        match self.structural(|d| {
+            new = d.add_knockdown(&idx, &spec)?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                self.set_selection(&[new]);
+                self.status = format!(
+                    "Added a knockdown layer under {}, sewn first. Use a water-soluble topping as well on towels.",
+                    if whole { "the design" } else { "the selection" }
+                );
+            }
+            Err(e) => self.status = format!("Couldn't add a knockdown: {e:#}"),
+        }
+    }
+
+    /// The Add Knockdown window.
+    pub fn knockdown_window(&mut self, ctx: &egui::Context) {
+        let Some(mut d) = self.layout.knockdown_dialog else {
+            return;
+        };
+        let brand = self.view_tools.brand;
+        let cloth = self.doc.settings.cloth;
+        let whole = self.sel_indices().is_empty();
+        let mut open = true;
+        let (mut ok, mut cancel) = (false, false);
+        egui::Window::new("Add Knockdown")
+            .title_frame(theme::title_frame(ctx))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 90.0))
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                theme::form(ui, "knockdown-form", |fm| {
+                    fm.row("Margin", |ui, _| {
+                        let r = ui.add(crate::units::drag_mm(
+                            &mut d.margin,
+                            0.0..=KnockdownSpec::MAX_MARGIN,
+                            0.1,
+                        ));
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::SpinButton,
+                                true,
+                                "Knockdown margin",
+                            )
+                        });
+                    });
+                    fm.row("Spacing", |ui, _| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut d.spacing)
+                                .range(KnockdownSpec::MIN_SPACING..=KnockdownSpec::MAX_SPACING)
+                                .speed(0.05)
+                                .fixed_decimals(1)
+                                .suffix(" mm"),
+                        );
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::SpinButton,
+                                true,
+                                "Knockdown spacing",
+                            )
+                        });
+                    });
+                    fm.row("Thread", |ui, _| {
+                        ui.checkbox(&mut d.match_fabric, "Fabric color");
+                        let mut c = if d.match_fabric { cloth } else { d.color };
+                        ui.add_enabled_ui(!d.match_fabric, |ui| {
+                            ui.color_edit_button_srgb(&mut c);
+                        });
+                        if !d.match_fabric {
+                            d.color = c;
+                        }
+                        let (_, name, number) = crate::threads::nearest(brand, c);
+                        caption(ui, crate::threads::label(name, number));
+                    });
+                });
+                ui.add_space(theme::space::S);
+                caption(
+                    ui,
+                    format!(
+                        "A light lattice of stitches under {}, reaching a little past it and sewn first. It flattens the pile of towels, fleece and plush so the design doesn't sink in. The fabric color is the document's \"Preview on\" color.",
+                        if whole {
+                            "the whole design"
+                        } else {
+                            "the selected objects"
+                        }
+                    ),
+                );
+                ui.add_space(theme::space::S);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 24.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let accent = pal_ui(ui).accent;
+                        ok = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("OK").color(Color32::WHITE),
+                                )
+                                .fill(accent),
+                            )
+                            .clicked()
+                            || ui.input(|i| i.key_pressed(Key::Enter));
+                        cancel = ui.button("Cancel").clicked()
+                            || ui.input(|i| i.key_pressed(Key::Escape));
+                    },
+                );
+            });
+        if ok {
+            self.layout.knockdown_dialog = None;
+            self.add_knockdown(KnockdownSpec {
+                margin_mm: d.margin,
+                spacing_mm: d.spacing,
+                color: if d.match_fabric { cloth } else { d.color },
+            });
+        } else if cancel || !open {
+            self.layout.knockdown_dialog = None;
+        } else {
+            self.layout.knockdown_dialog = Some(d);
         }
     }
 
@@ -652,6 +832,73 @@ mod tests {
     }
 
     #[test]
+    fn add_knockdown_window_puts_a_lattice_under_the_design() {
+        let mut h = studio();
+        let n = h.state().doc.shapes.len();
+        let before = h.state().design.per_shape.clone();
+        // Nothing selected: it goes under the whole design.
+        h.state_mut().set_selection(&[]);
+        assert!(h.state().action_enabled(Action::AddKnockdown));
+        h.state_mut().run_action(Action::AddKnockdown);
+        h.run_steps(2);
+        assert!(h.state().layout.knockdown_dialog.is_some());
+        h.get_by_label("OK").click();
+        h.run_steps(4);
+        assert!(h.state().layout.knockdown_dialog.is_none());
+        let s = h.state();
+        assert_eq!(s.doc.shapes.len(), n + 1, "{}", s.status);
+        // First in the list, selected, a Knockdown in the fabric's color.
+        assert_eq!(s.sel_indices(), vec![0]);
+        assert_eq!(s.doc.shapes[0].params.kind, Some(Kind::Knockdown));
+        assert_eq!(s.doc.shapes[0].color, s.doc.settings.cloth);
+        assert_eq!(s.names[0], "base layer");
+        assert!(s.design.per_shape[0] > 100);
+        assert_eq!(s.design.sew_order[0], 0);
+        // Everything on top sews exactly as before.
+        assert_eq!(&s.design.per_shape[1..], &before[..]);
+        assert_eq!(s.undo.len(), 1);
+        // With only the knockdown selected there's nothing to go under.
+        assert!(!h.state().action_enabled(Action::AddKnockdown));
+        // It's a stitch type like any other in the Stitch panel.
+        assert!(crate::widgets::allowed_kinds(&h.state().doc.shapes[0]).contains(&Kind::Knockdown));
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::Z);
+        h.run_steps(3);
+        assert_eq!(h.state().doc.shapes.len(), n);
+    }
+
+    #[test]
+    fn basting_and_thread_estimates_show_in_the_panels() {
+        let mut h = studio();
+        let plain = h.state().design.stitch_count();
+        // The Threads panel says about how much thread the design takes.
+        let total = h.state().thread_len(h.state().design.thread_mm());
+        assert!(total.ends_with(" m"), "{total}");
+        assert!(
+            h.query_by_label_contains(&format!("Thread: about {total} top"))
+                .is_some()
+        );
+        // Basting: a checkbox in the Document panel, 5 mm out by default.
+        h.get_by_label("Box at").click();
+        h.run_steps(5);
+        let s = h.state();
+        assert_eq!(s.doc.settings.baste_mm, 5.0);
+        assert!(s.design.basting_stitches > 4, "{}", s.status);
+        assert_eq!(s.design.stitch_count(), plain + s.design.basting_stitches);
+        assert_eq!(s.undo.len(), 1);
+        assert!(s.doc.to_svg().unwrap().contains("baste=5"));
+        // More stitches, more thread.
+        let more = h.state().thread_len(h.state().design.thread_mm());
+        assert_ne!(more, total);
+        h.get_by_label("Box at").click();
+        h.run_steps(5);
+        assert_eq!(h.state().doc.settings.baste_mm, 0.0);
+        assert_eq!(h.state().design.stitch_count(), plain);
+        // Inches as the unit: thread in yards.
+        h.state_mut().dock.units = crate::units::Unit::In;
+        assert!(h.state().thread_len(9144.0).ends_with("10.0 yd"));
+    }
+
+    #[test]
     fn merge_layers_from_the_objects_list() {
         let mut h = studio();
         let n = h.state().doc.shapes.len();
@@ -810,6 +1057,11 @@ mod tests {
     #[test]
     fn clicking_a_stop_selects_what_it_belongs_to() {
         let mut h = studio();
+        // On its own over the canvas, so every row is in view.
+        h.state_mut().dock.separate(PanelId::Stops);
+        h.state_mut()
+            .dock
+            .move_panel(PanelId::Stops, crate::dock::Place::Float, None);
         h.state_mut().dock.reveal(PanelId::Stops);
         let disc = index_of(&h, "disc");
         h.state_mut().set_selection(&[disc]);

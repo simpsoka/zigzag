@@ -232,6 +232,7 @@ impl Studio {
         self.cancel_previews();
         self.layout.offset_dialog = None;
         self.layout.outline_dialog = None;
+        self.layout.knockdown_dialog = None;
         self.layout.stop_note_edit = None;
         self.layout.cleanup_dialog = None;
         self.layout.swatch_dialog = None;

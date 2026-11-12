@@ -94,6 +94,16 @@ pub enum Icon {
     AlignLeft,
     AlignCenter,
     AlignRight,
+    /// Object alignment: two bars against a line (an edge, or through
+    /// their middles), and bars spaced evenly between two lines.
+    ObjAlignLeft,
+    ObjAlignHCenter,
+    ObjAlignRight,
+    ObjAlignTop,
+    ObjAlignVCenter,
+    ObjAlignBottom,
+    DistributeH,
+    DistributeV,
     /// The Shape tools.
     ShapeRect,
     ShapeEllipse,
@@ -583,6 +593,54 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
                 ((0.32, 0.92), (0.08, 0.92), (0.08, 0.68)),
             ] {
                 line(&[a, b, c2]);
+            }
+        }
+        Icon::ObjAlignLeft
+        | Icon::ObjAlignHCenter
+        | Icon::ObjAlignRight
+        | Icon::ObjAlignTop
+        | Icon::ObjAlignVCenter
+        | Icon::ObjAlignBottom
+        | Icon::DistributeH
+        | Icon::DistributeV => {
+            // Drawn for the horizontal case (a vertical line, bars lying
+            // across it); the vertical ones swap x and y.
+            let swap = matches!(
+                icon,
+                Icon::ObjAlignTop
+                    | Icon::ObjAlignVCenter
+                    | Icon::ObjAlignBottom
+                    | Icon::DistributeV
+            );
+            let pt = |x: f32, y: f32| if swap { at(y, x) } else { at(x, y) };
+            let bar = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                p.rect_filled(Rect::from_two_pos(pt(x0, y0), pt(x1, y1)), 1.0, c);
+            };
+            let rule = |x: f32| {
+                p.line_segment([pt(x, 0.06), pt(x, 0.94)], s);
+            };
+            match icon {
+                Icon::ObjAlignLeft | Icon::ObjAlignTop => {
+                    rule(0.1);
+                    bar(0.22, 0.2, 0.92, 0.42);
+                    bar(0.22, 0.58, 0.6, 0.8);
+                }
+                Icon::ObjAlignRight | Icon::ObjAlignBottom => {
+                    rule(0.9);
+                    bar(0.08, 0.2, 0.78, 0.42);
+                    bar(0.4, 0.58, 0.78, 0.8);
+                }
+                Icon::ObjAlignHCenter | Icon::ObjAlignVCenter => {
+                    rule(0.5);
+                    bar(0.1, 0.2, 0.9, 0.42);
+                    bar(0.28, 0.58, 0.72, 0.8);
+                }
+                _ => {
+                    rule(0.08);
+                    rule(0.92);
+                    bar(0.24, 0.22, 0.42, 0.78);
+                    bar(0.58, 0.22, 0.76, 0.78);
+                }
             }
         }
         Icon::PathUnite | Icon::PathMinusFront | Icon::PathIntersect | Icon::PathExclude => {

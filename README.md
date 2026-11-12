@@ -92,6 +92,7 @@ is vendored for `ble`.
 | **Ripple** | Open running-stitch rows following the outline, or one spiral | Filled shapes |
 | **Cross-stitch** | A grid of X's, sewn as rows of half-crosses out and back | Filled shapes |
 | **Tartan** | Woven stripes in several threads (a mirrored sett you edit in the panel), each thread its own color block | Filled shapes |
+| **Knockdown** | A light open lattice (rows one way, then across them) sewn under a design to flatten the pile of towels, fleece and plush; never cut away under what covers it | Filled shapes |
 
 Satins wider than 7 mm are **auto-split** (shorter, staggered stitches) and
 use **auto spacing** (narrow columns more open, wide ones denser).
@@ -101,7 +102,9 @@ Planner features:
 - **Cap order:** center-out, bottom-up, grouped by color, still respecting layering.
 - **Routing:** travel stitches stay inside shapes: straight across where a straight line stays inside, otherwise round the inside of the outline (Ink/Stitch's underpath), so a fill with a cut-out is sewn with few or no cuts. Trims only where neither works (up to 50 mm of travel).
 - **Sewing control per object:** a start and an end point (where the thread comes in and leaves, so the next object is close), trim after, stop after (to lay foam or trim appliqué), with a note saying what to do at the stop. The document can also connect objects up to N mm apart with running stitches instead of cuts.
-- **Fabric presets:** standard, thin cotton cap, structured cap, knit.
+- **Fabric presets:** standard, thin cotton cap, structured cap, knit, T-shirt (cotton jersey), towel (terry), fleece / plush, felt. Each is a set of default densities, stitch lengths, pull compensation and underlay; the two with a pile (towel, fleece) ask for a knockdown layer in the checks.
+- **Basting box:** a box of long (6 mm) running stitches round the whole design, sewn first, to hold the fabric to the stabilizer (Document panel › Basting).
+- **Thread estimates:** about how much top thread each color takes, and the total for top and bobbin, from the stitches (each stitch's length plus 1 mm through the fabric; bobbin at 45% of the top thread).
 - **Checks:** narrow fills, wide/narrow satins, small lettering, tiny gaps, fully covered objects, hoop fit.
 - **Group colors:** reorder to cut thread changes without breaking layering.
 
@@ -162,6 +165,9 @@ Laid out like Illustrator, styled like a Mac app:
 - **Brush** (B), after Illustrator's Paintbrush: paint a line freehand and it comes out smooth, sewn as a satin column at the width you set (or as a running stitch). Smoothness takes out the hand's wobble; sharp turns stay sharp; end where you began to close the line. The cursor is a circle as wide as the satin.
 - **Shapes, the Illustrator way:** Rectangle (M), Ellipse (L), Polygon, Star and Line (\\). Drag from a corner; Option draws from the center, Shift makes a square or circle, keeps a polygon or star upright and a line at 45°. While dragging a polygon or star, ↑/↓ add or remove sides or points. Click without dragging to type an exact size. The bar at the top of the canvas switches shapes and sets corner radius, sides, points and the star's inner radius. Closed shapes come in as fills, lines as runs, in the current thread.
 - **Layers:** every object in the Objects list is a layer, sewn in list order in its own thread. Click a layer's thread swatch in the list to choose its thread (with several layers selected, the pick goes to all of them). **Object › Path › Add Outline…** puts an outline layer on top of each selected fill: a satin border (set its width), a running stitch or a triple run, on the fill's edge or offset outside or inside it, in a thread of its own or the fill's; the fill isn't changed and the outline sews straight after it. **Object › Merge Layers** (⌘E, also the button under the Objects list and the right-click menu) makes the selected layers one, in the thread and with the stitch settings of the one on top, where it was in the sewing order: fills are united (overlaps sewn once), lines stay lines.
+- **Knockdown** (Object › Add Knockdown…): a light lattice under the whole design (or the selection), following its outline with a margin and the holes filled in, sewn first in the fabric's color, so stitches don't sink into a towel's or fleece's pile. It's a stitch type too: any fill can be set to Knockdown in the Stitch panel (angle, spacing, length).
+- **Align and Distribute** (Object › Align, and the Align row in the Transform panel): line the selection up by its left, right, top or bottom edges or its centers, or space three or more objects evenly. One object (or one whole group) lines up with the hoop; a wholly selected group moves as one.
+- **Thread use:** the Threads panel shows about how much thread each color block (or each color) takes and the total for top and bobbin, in meters (yards when the unit is inches); the worksheet and `zigzag info` print the same.
 - **Stops panel** (a tab behind Threads; Window › Stops): every point where the machine halts, in sewing order: each change of thread, each pause after an object, and an appliqué's two steps. **Add Stop** pauses the machine after the selected object (also Object › Add Stop After); type what to do there in the note under it ("Lay the 3 mm foam"), which is saved in the SVG and printed on the worksheet; × takes a pause out. Click a stop to select the object it follows, or what the next thread sews.
 - **Path tools:** Object › Pathfinder (Unite, Minus Front, Intersect, Exclude; also buttons in the Transform panel when two or more objects are selected) and Object › Path (Offset Path…, Outline Stroke, Simplify…, Round Corners…, Clean Up…). Simplify… is VectorCraft's slider, from fewest points to closest to the original, previewed live, with Auto-Simplify picking the level for the selection's size. Clean Up… removes stray points, objects too small to sew (under 1 mm by default) and extra points (points on top of each other, points in the middle of straight lines), showing how many of each it found first. Results come back as smooth curves with their real corners (least-squares curve fitting), not as many-sided polygons.
 - **Logos from images (Image Trace):** open, drop or place a PNG, JPEG, WebP, GIF, BMP or TIFF and the Trace Image window traces it into flat-color shapes, previewed on your hat's color. Choose how many colors (or Auto), the width, detail and the smallest speck to keep; remove the white background; snap every color to your Brother, Janome or own palette's threads; and sew thin lines as single lines. Flat logos trace exactly (edges placed to a fraction of a pixel, corners restored, circles and straight lines exact); photos are posterized. The command line traces too: `zigzag convert logo.png -o logo.pes`.
@@ -190,7 +196,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Sewing row** in the Stitch panel: Start and End (click the outline; green and red markers you can drag), Trim and Stop after the object. Edit › Copy / Paste Stitch Settings carries one object's type and settings to others (each keeps its thread and start/end); Edit › Select Same Stitch Type; Object › Path › Reverse Direction sews a path from its other end.
 - **Test swatches** (Object › Test Swatches…): copies of the selection in a grid, one setting (spacing, length, pull compensation, satin width, fill angle) stepped from a value to another, each lettered with its value, to stitch out and compare on the real fabric.
 - **View › Density Map** tints where stitches pile up (yellow from 2.5 per mm², red at 4), and **View › Sewing Order** numbers the objects on the canvas.
-- **Fabric preset, hoop, Remove overlaps and Cap order** in the Document panel. Preview on your hat's color.
+- **Fabric preset, hoop, Remove overlaps, Cap order and Basting** in the Document panel. Preview on your hat's color.
 - **Issues list** (status bar): problems link to the object. Satins show their rails on the canvas.
 - **Sewing order:** Earlier/Later. **Stitch player** (Space). Undo/redo everything.
 - **Save** (Ctrl/⌘ S) writes settings into the SVG; **Export** PES/DST/EXP/JEF/VP3/PEC/PEN or a **worksheet** (HTML: picture, size, time, every color stop with the nearest Brother and Janome thread); **Send to Skitch**.
@@ -231,6 +237,7 @@ Tools:
 - `set_document` (fabric, hoop, overlaps, cap order, preview color), `group_colors`
 - `render_preview` (returns a PNG of the stitches), `check_design`, `get_svg`, `select`
 - `open_file` (SVG, machine file or image, in a tab of its own), `list_documents`, `switch_document`, `new_document`, `undo`, `save`, `export` (machine formats or `html` worksheet), `send_to_skitch`, `machine_status`
+- `add_knockdown` (a lattice under the design for towels and fleece), `align_objects` (align or distribute); `set_document` takes `basting_mm`, and `get_design`'s stats include `thread_m`, `bobbin_m` and `thread_by_color`
 - `add_outline` (an outline layer on top of a fill: satin border, run or triple run), `merge_objects` (several objects into one layer); `set_object` takes `stop` and `stop_note`, and `get_design` lists every halt under `stops`
 - `trace_image` (PNG/JPEG logo → shapes, colors snapped to a thread chart), `round_corners`, `simplify` (VectorCraft's 0–100 levels, or Auto), `clean_up`
 - `batch`: several calls in one, all or nothing and one undo step; later steps can use earlier results (`"$0.added.0.name"`)
@@ -276,7 +283,7 @@ escapes are decoded, and group settings apply to everything inside the group.
 | `ul=center+contour+zigzag` | satin underlay passes (`ul=none`) |
 | `ss=0` | short stitches off |
 | `r=3` | running passes (3 = bean) |
-| `contour` `blanket` `applique` `manual` | the other stitch types |
+| `contour` `blanket` `applique` `manual` `knockdown` | the other stitch types |
 | `split=7` | satin auto-split length (mm); `split=0` off |
 | `t=e8a33c` | thread color override |
 | `o=2` | sewing order |

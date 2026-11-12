@@ -74,7 +74,7 @@ fn facts(geometry: &Geometry, settings: Option<&str>, measure: impl FnOnce() -> 
 pub fn check(
     shapes: &[Shape],
     design: &Design,
-    _opt: &PlanOptions,
+    opt: &PlanOptions,
     hoop_mm: Option<(f64, f64)>,
 ) -> Vec<Issue> {
     let mut out = Vec::new();
@@ -85,6 +85,20 @@ pub fn check(
             message,
         })
     };
+
+    // A fabric with a pile and nothing to hold it down.
+    if opt.fabric.pile
+        && !design.blocks.is_empty()
+        && !shapes
+            .iter()
+            .any(|s| s.params.kind == Some(crate::params::Kind::Knockdown))
+    {
+        add(
+            None,
+            Level::Info,
+            "This fabric has a pile that stitches sink into. Add a knockdown layer under the design (Object › Add Knockdown…) and use a water-soluble topping.".to_string(),
+        );
+    }
 
     if let Some((w, h)) = hoop_mm {
         let b = design.bounds();

@@ -2040,6 +2040,7 @@ impl Studio {
             "Merge Layers",
             RowIcon::Icon(Icon::PathUnite),
         );
+        self.action_row(ui, A::AddKnockdown, "Add Knockdown…", RowIcon::None);
         self.action_row(ui, A::AddStop, "Add Stop After", RowIcon::Icon(Icon::Pause));
         // One path drawing several shapes: offer to split it up.
         let compound = match &self.doc.shapes[i].geometry {
@@ -2562,6 +2563,38 @@ impl Studio {
                     "",
                 );
             }
+            Kind::Knockdown => {
+                value_row(
+                    fm,
+                    "Angle",
+                    &mut pr.angle,
+                    defaults::KNOCKDOWN_ANGLE,
+                    -90.0..=90.0,
+                    "°",
+                    1.0,
+                    "The direction of the first rows; the second set runs across them",
+                );
+                value_row(
+                    fm,
+                    "Spacing",
+                    &mut pr.spacing,
+                    defaults::KNOCKDOWN_SPACING,
+                    0.8..=5.0,
+                    " mm",
+                    0.1,
+                    "Distance between the lattice's rows: wider is lighter",
+                );
+                value_row(
+                    fm,
+                    "Length",
+                    &mut pr.len,
+                    f.fill_len,
+                    1.5..=7.0,
+                    " mm",
+                    0.1,
+                    "Longest stitch in a row",
+                );
+            }
             Kind::Ripple => {
                 fm.row("Style", |ui, _| {
                     let mut spiral = pr.spiral == Some(true);
@@ -2887,10 +2920,12 @@ impl Studio {
                 egui::FontId::proportional(12.0),
                 if on { p.accent } else { p.text },
             );
+            // Its stitches, and about how much thread they take.
+            let thread = self.thread_len(self.design.block_thread_mm(k));
             painter.text(
                 Pos2::new(rect.right() - 4.0, rect.center().y),
                 egui::Align2::RIGHT_CENTER,
-                fmt_int(n),
+                format!("{} · {thread}", fmt_int(n)),
                 egui::FontId::proportional(11.0),
                 p.secondary,
             );
@@ -2979,6 +3014,29 @@ impl Studio {
                 ui.add_enabled(
                     on,
                     crate::units::drag_mm(&mut self.doc.settings.connect_mm, 0.0..=50.0, 0.1),
+                )
+                .labelled_by(lid);
+            });
+            fm.row("Basting", |ui, lid| {
+                let mut on = self.doc.settings.baste_mm > 0.0;
+                if ui
+                    .checkbox(&mut on, "Box at")
+                    .on_hover_text("Sew a box of long stitches round the whole design first, this far outside it, to hold the fabric to the stabilizer. Pull the stitches out when the design is done.")
+                    .changed()
+                {
+                    self.doc.settings.baste_mm = if on {
+                        defaults::BASTING_MARGIN
+                    } else {
+                        0.0
+                    };
+                }
+                ui.add_enabled(
+                    on,
+                    crate::units::drag_mm(
+                        &mut self.doc.settings.baste_mm,
+                        0.0..=zigzag::document::MAX_BASTE_MM,
+                        0.5,
+                    ),
                 )
                 .labelled_by(lid);
             });

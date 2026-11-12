@@ -4,6 +4,7 @@
 mod agent;
 mod app;
 mod app_icon;
+mod arrange;
 mod brush;
 mod canvas;
 mod capture;

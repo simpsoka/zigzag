@@ -126,12 +126,13 @@ pub fn html(d: &Design, info: &WorksheetInfo) -> Result<String> {
         };
         let _ = write!(
             rows,
-            "<tr><td class=n>{}</td><td><span class=sw style=\"background:{hex}\"></span>{hex}</td><td>{}</td><td>{} {}</td><td class=r>{}</td><td>{}{}</td></tr>",
+            "<tr><td class=n>{}</td><td><span class=sw style=\"background:{hex}\"></span>{hex}</td><td>{}</td><td>{} {}</td><td class=r>{}</td><td class=r>{}</td><td>{}{}</td></tr>",
             k + 1,
             esc(&brother_name(blk.color)),
             esc(&jk),
             esc(&jn),
             n,
+            crate::design::fmt_thread(d.block_thread_mm(k)),
             halt,
             objects.join(", ")
         );
@@ -177,22 +178,25 @@ td.n, td.r {{ font-variant-numeric: tabular-nums; }} td.r {{ text-align: right; 
 <dt>Stitches</dt><dd>{stitches}</dd>
 <dt>Colors</dt><dd>{colors}</dd>
 <dt>Trims</dt><dd>{trims}</dd>
+<dt>Thread</dt><dd>about {thread} top, {bobbin} bobbin</dd>
 <dt>Sewing time</dt><dd>about {minutes:.0} min at {spm:.0} spm</dd>
 <dt>Fabric</dt><dd>{fabric}</dd>
 <dt>Hoop</dt><dd>{hoop}</dd>
 </dl>
 </div>
 <table>
-<thead><tr><th>#</th><th>Color</th><th>Brother</th><th>Janome</th><th class=r>Stitches</th><th>Sews</th></tr></thead>
+<thead><tr><th>#</th><th>Color</th><th>Brother</th><th>Janome</th><th class=r>Stitches</th><th class=r>Thread</th><th>Sews</th></tr></thead>
 <tbody>{rows}</tbody>
 </table>
-<p class="note">Thread names are the nearest match in each brand's standard palette; check against your spools. Center the hoop on the design's center mark.</p>
+<p class="note">Thread names are the nearest match in each brand's standard palette; check against your spools. Thread lengths are estimates from the stitches (tension and fabric thickness change them): allow some extra. Center the hoop on the design's center mark.</p>
 </body></html>
 "#,
         w = b.width() / 10.0,
         h = b.height() / 10.0,
         colors = d.blocks.len(),
         trims = d.trim_count(),
+        thread = crate::design::fmt_thread(d.thread_mm()),
+        bobbin = crate::design::fmt_thread(d.bobbin_mm()),
         fabric = esc(&info.fabric),
     ))
 }
@@ -294,5 +298,11 @@ mod tests {
         assert!(h.contains("<b>Stop</b> (patch: lay the fabric)"));
         assert!(h.contains("<b>Stop</b> (patch: trim the fabric)"));
         assert_eq!(h.matches("<b>Stop</b>").count(), 4);
+        // Thread: a total for the top and the bobbin, and a figure per block.
+        let total = crate::design::fmt_thread(d.thread_mm());
+        assert!(h.contains(&format!("about {total} top, ")), "{total}");
+        assert!(h.contains(">Thread</th>"));
+        let first = crate::design::fmt_thread(d.block_thread_mm(0));
+        assert!(h.contains(&format!("<td class=r>{first}</td>")), "{first}");
     }
 }

@@ -365,6 +365,33 @@ impl Default for OutlineSpec {
     }
 }
 
+/// What [`Document::add_knockdown`] makes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnockdownSpec {
+    /// How far past the objects the knockdown reaches, mm.
+    pub margin_mm: f64,
+    /// The lattice's row spacing, mm.
+    pub spacing_mm: f64,
+    /// Its thread: usually the fabric's color, so it disappears.
+    pub color: [u8; 3],
+}
+
+impl KnockdownSpec {
+    pub const MAX_MARGIN: f64 = 20.0;
+    pub const MIN_SPACING: f64 = 0.8;
+    pub const MAX_SPACING: f64 = 5.0;
+}
+
+impl Default for KnockdownSpec {
+    fn default() -> Self {
+        KnockdownSpec {
+            margin_mm: crate::params::defaults::KNOCKDOWN_MARGIN,
+            spacing_mm: crate::params::defaults::KNOCKDOWN_SPACING,
+            color: super::DEFAULT_CLOTH,
+        }
+    }
+}
+
 /// A path's subpaths as open lines (a closed one ends where it began), so
 /// merged lines stay lines rather than becoming a filled shape.
 fn open_ended(path: BezPath) -> BezPath {
@@ -800,6 +827,67 @@ impl Document {
             .ok_or_else(|| anyhow!("document has no closing </svg>"))?;
         self.xml.insert_str(at, &el);
         Ok(id)
+    }
+
+    /// Add Knockdown: a light lattice under objects (all of them, if
+    /// `indices` is empty), reaching `margin_mm` past them, sewn before the
+    /// first of them, to flatten a towel's or fleece's pile so their
+    /// stitches don't sink into it. It follows their combined outline with
+    /// the holes filled in. Returns the new object's index.
+    pub fn add_knockdown(&mut self, indices: &[usize], spec: &KnockdownSpec) -> Result<usize> {
+        if !spec.margin_mm.is_finite() || !spec.spacing_mm.is_finite() {
+            bail!("the knockdown's margin and spacing must be numbers");
+        }
+        let margin = spec.margin_mm.clamp(0.0, KnockdownSpec::MAX_MARGIN);
+        let spacing = spec
+            .spacing_mm
+            .clamp(KnockdownSpec::MIN_SPACING, KnockdownSpec::MAX_SPACING);
+        let all: Vec<usize> = (0..self.shapes.len()).collect();
+        let uids: Vec<usize> = if indices.is_empty() { &all } else { indices }
+            .iter()
+            .filter_map(|&i| self.shapes.get(i))
+            // Not what isn't sewn, and not another knockdown.
+            .filter(|s| !matches!(s.params.kind, Some(Kind::Skip | Kind::Knockdown)))
+            .map(|s| s.uid)
+            .collect();
+        if uids.is_empty() {
+            bail!("nothing to put a knockdown under");
+        }
+        self.sync()?;
+        let idx = self.uid_indices(&uids);
+        let first = idx[0];
+        let parts: Vec<(Vec<Polyline>, FillRule)> = idx.iter().map(|&i| self.area(i)).collect();
+        // Everything as one shape, then each of its rings on its own as a
+        // solid: the holes (a letter's counters, a ring's middle) fill in.
+        let united = boolean::pathfinder(&parts, PathOp::Unite);
+        let solids: Vec<(Vec<Polyline>, FillRule)> = united
+            .into_iter()
+            .map(|r| (vec![r], FillRule::NonZero))
+            .collect();
+        let solid = boolean::pathfinder(&solids, PathOp::Unite);
+        let path = bezier::from_rings(
+            &boolean::offset(&solid, FillRule::EvenOdd, margin * 10.0),
+            RESULT_TOL,
+        );
+        if path.is_empty() {
+            bail!("those objects cover no area");
+        }
+        let params = Params {
+            kind: Some(Kind::Knockdown),
+            spacing: Some(spacing),
+            ..Params::default()
+        };
+        // (Not "knockdown": that word in an id is the stitch type.)
+        let id = self.insert_shape(&path, None, "base_layer")?;
+        let n = self.finish_new(&id, spec.color, params)?;
+        let uid = self.shapes[n].uid;
+        // Sewn before the first object it lies under.
+        self.move_shape(n, first.min(n));
+        self.sync()?;
+        self.shapes
+            .iter()
+            .position(|s| s.uid == uid)
+            .ok_or_else(|| anyhow!("the knockdown went missing"))
     }
 
     /// Move shape `from` to position `to` in the sewing order (both indices
@@ -1368,6 +1456,64 @@ mod tests {
         let before = d.shapes.len();
         assert!(d.add_outline(&[disc], &gone).is_err());
         assert_eq!(d.shapes.len(), before);
+    }
+
+    #[test]
+    fn add_knockdown_goes_under_the_design_with_a_margin() {
+        let mut d = Document::from_svg(BADGE, "badge", None).unwrap();
+        let n = d.shapes.len();
+        let all = svg::shapes_bounds(&d.shapes);
+        let first_uid = d.shapes[0].uid;
+        let k = d.add_knockdown(&[], &KnockdownSpec::default()).unwrap();
+        assert_eq!(d.shapes.len(), n + 1);
+        // First in the sewing order, a Knockdown in the fabric's color.
+        assert_eq!(k, 0);
+        assert_eq!(d.shapes[1].uid, first_uid);
+        let s = &d.shapes[k];
+        assert_eq!(s.params.kind, Some(Kind::Knockdown));
+        assert_eq!(s.params.spacing, Some(2.0));
+        assert_eq!(s.color, crate::document::DEFAULT_CLOTH);
+        assert_eq!(svg::display_names(&d.shapes)[k], "base layer");
+        // About 2 mm past the artwork all round (the ring is a 1.2 px line,
+        // so its own width adds a little), and one solid piece: the
+        // crescent cut out of the disc is filled in.
+        let b = bounds(&d, k);
+        let grow = (b.width() - all.width()) / 2.0;
+        assert!((18.0..=26.0).contains(&grow), "{grow}");
+        match &s.geometry {
+            Geometry::Fill { rings, .. } => assert_eq!(rings.len(), 1, "no holes"),
+            g => panic!("{g:?}"),
+        }
+        // It sews, lightly, before everything else; nothing is lost on top.
+        let plan = d.plan();
+        assert!(plan.per_shape[k] > 100);
+        assert_eq!(plan.sew_order[0], k);
+        let without = Document::from_svg(BADGE, "badge", None).unwrap().plan();
+        assert_eq!(&plan.per_shape[1..], &without.per_shape[..]);
+        // Saved and reopened: still a knockdown, still first.
+        let back = Document::from_svg(&d.to_svg().unwrap(), "badge", None).unwrap();
+        assert_eq!(back.shapes[0].params.kind, Some(Kind::Knockdown));
+        assert_eq!(back.shapes.len(), n + 1);
+        // A second one doesn't go under the first; one for a single object
+        // sits just before that object.
+        let sun = d
+            .shapes
+            .iter()
+            .position(|s| s.label.contains("sun"))
+            .unwrap();
+        let spec = KnockdownSpec {
+            margin_mm: 1.0,
+            spacing_mm: 3.0,
+            color: [1, 2, 3],
+        };
+        let k2 = d.add_knockdown(&[sun], &spec).unwrap();
+        assert_eq!(k2, sun);
+        assert_eq!(d.shapes[k2 + 1].label, d.shapes[sun + 1].label);
+        assert_eq!(d.shapes[k2].color, [1, 2, 3]);
+        assert!(bounds(&d, k2).width() < b.width() / 2.0);
+        // Nothing but knockdowns selected: nothing to go under.
+        assert!(d.add_knockdown(&[0], &spec).is_err());
+        assert!(Document::empty().add_knockdown(&[], &spec).is_err());
     }
 
     #[test]

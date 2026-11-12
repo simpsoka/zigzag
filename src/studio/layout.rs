@@ -103,6 +103,8 @@ pub struct LayoutState {
     pub offset_dialog: Option<f64>,
     /// The Add Outline window, when open.
     pub outline_dialog: Option<crate::layers::OutlineDialog>,
+    /// The Add Knockdown window, when open.
+    pub knockdown_dialog: Option<crate::layers::KnockdownDialog>,
     /// The settings Add Outline was last used with (the window opens with them).
     pub outline_last: Option<crate::layers::OutlineDialog>,
     /// A stop's note being typed in the Stops panel: (the object's uid, the
@@ -1367,6 +1369,7 @@ impl Studio {
         let c = b.center();
         let mut new_ref: Option<(i8, i8)> = None;
         let mut path_op: Option<zigzag::boolean::PathOp> = None;
+        let mut align_op: Option<crate::commands::Action> = None;
         let mut rotate: Option<f64> = None;
         let mut flip: Option<(f64, f64)> = None;
         let mut center = false;
@@ -1474,9 +1477,21 @@ impl Studio {
                     }
                 });
             }
+            if !self.sel_indices().is_empty() {
+                fm.row("Align", |ui, _| {
+                    if let Some(a) = self.align_buttons(ui) {
+                        align_op = Some(a);
+                    }
+                });
+            }
         });
         if let Some(op) = path_op {
             self.pathfinder_selected(op);
+            return;
+        }
+        if let Some(a) = align_op {
+            self.layout.fields = None;
+            self.run_action(a);
             return;
         }
         if toggle_lock {
