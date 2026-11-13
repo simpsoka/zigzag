@@ -1,0 +1,88 @@
+{
+  "machines": [
+    {
+      "id": "brother-skitch",
+      "name": "Brother Skitch (PP1)",
+      "hoops": ["100x100", "70x70"],
+      "default_hoop": "100x100",
+      "format": "pen",
+      "link": "skitch",
+      "source": "Sewn on a Skitch from ZigZag.",
+      "tested": true
+    },
+    {
+      "id": "brother-4x4",
+      "name": "Brother 4×4 (PE545, SE600 class)",
+      "hoops": ["100x100"],
+      "default_hoop": "100x100",
+      "format": "pes",
+      "source": "Brother's PE545 product page and its help page on the formats these machines read.",
+      "tested": false
+    },
+    {
+      "id": "brother-5x7",
+      "name": "Brother 5×7 (SE2000, PE900)",
+      "hoops": ["130x180", "100x100"],
+      "default_hoop": "130x180",
+      "format": "pes",
+      "source": "Brother's SE2000 and PE900 product pages and its help page on the formats these machines read.",
+      "tested": false
+    },
+    {
+      "id": "brother-pr",
+      "name": "Brother PR (6-needle)",
+      "hoops": ["200x300", "130x180", "100x100", "40x60"],
+      "default_hoop": "200x300",
+      "format": "pes",
+      "min_stitch_mm": 0.4,
+      "source": "Brother's PR680W product page and brochure (frames 300 × 200, 180 × 130, 100 × 100 and 60 × 40 mm). PR manuals: the machine ships set to delete stitches of 0.3 mm or less.",
+      "tested": false
+    },
+    {
+      "id": "janome-550e",
+      "name": "Janome Memory Craft 550E",
+      "hoops": ["200x360", "200x200", "140x200", "140x140"],
+      "default_hoop": "200x360",
+      "format": "jef",
+      "source": "Janome's 550E page and brochure.",
+      "tested": false
+    },
+    {
+      "id": "viking-jade-35",
+      "name": "Husqvarna Viking Designer Jade 35",
+      "hoops": ["150x240", "120x120"],
+      "default_hoop": "150x240",
+      "source": "The Designer Jade 35 product page. The format it reads isn't confirmed, so none is set.",
+      "tested": false
+    },
+    {
+      "id": "melco-summit",
+      "name": "Melco Summit",
+      "hoops": ["410x393"],
+      "default_hoop": "410x393",
+      "format": "exp",
+      "min_stitch_mm": 0.4,
+      "source": "Melco's Summit manual: the largest sewing field. Add your own hoops in a machine of your own. Shortest stitch from a shop running one, which reports it drops stitches under 0.4 mm.",
+      "tested": false
+    },
+    {
+      "id": "zsk-sprint-8",
+      "name": "ZSK Sprint 8",
+      "hoops": ["300x400"],
+      "default_hoop": "300x400",
+      "format": "dst",
+      "source": "ZSK's Sprint 8 catalog (tubular field) and its list of the codes the T8 control reads.",
+      "tested": false
+    },
+    {
+      "id": "commercial-dst",
+      "name": "Commercial machine (DST)",
+      "hoops": ["300x400", "200x300", "130x180", "100x100"],
+      "default_hoop": "200x300",
+      "format": "dst",
+      "min_stitch_mm": 0.4,
+      "source": "No one machine: Tajima's DST and common frame sizes, for Tajima, Barudan, Ricoma, Happy and others until they have profiles of their own. Shortest stitch 0.4 mm: above the 0.3 mm Brother's PR machines delete as they come, and what a shop reports for its Melco.",
+      "tested": false
+    }
+  ]
+}

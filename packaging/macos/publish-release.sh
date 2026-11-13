@@ -63,3 +63,10 @@ gh release create "$tag" --repo "$repo" --verify-tag --draft \
     "$dmg" dist/ZigZag.dmg dist/SHA256SUMS.txt
 gh release edit "$tag" --repo "$repo" --draft=false --latest
 echo "Download: https://github.com/$repo/releases/latest/download/ZigZag.dmg"
+# (Copies of ZigZag from this release on find it themselves: ZigZag >
+# Check for Updates reads the release just published. Nothing to do.)
+# The Homebrew cask, if there's a tap for it: never a reason to fail a
+# release that's already out.
+bash packaging/homebrew/update-cask.sh "$version" \
+    "$(awk -v f="ZigZag-$version.dmg" '$2 == f { print $1 }' dist/SHA256SUMS.txt)" \
+    || echo "The Homebrew cask wasn't updated: run packaging/homebrew/update-cask.sh by hand." >&2

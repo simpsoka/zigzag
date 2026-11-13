@@ -901,9 +901,9 @@ impl Studio {
     /// The topmost text whose box (gaps between the letters included)
     /// `p` is in: text is picked as a whole, not letter by letter.
     pub fn text_at(&self, p: P, tol: f64) -> Option<usize> {
-        (0..self.doc.shapes.len())
-            .rev()
-            .find(|&i| self.doc.lettering(i).is_some() && self.text_box_hit(i, p, tol))
+        (0..self.doc.shapes.len()).rev().find(|&i| {
+            self.free(i) && self.doc.lettering(i).is_some() && self.text_box_hit(i, p, tol)
+        })
     }
 
     /// The text object being typed into, while every letter is deleted:

@@ -706,7 +706,19 @@ fn codex_event(v: &Value, session: &mut Option<String>) -> Vec<(Option<String>, 
                     out.push((id, Entry::Tool(tool.clone(), String::new(), Some(ok))));
                     if !ok {
                         // Why, under the call (once per run for the same reason).
-                        let m = it["error"]["message"].as_str().unwrap_or("").trim();
+                        // (A call that didn't get through has an error; one
+                        // the tool itself refused has the tool's own words,
+                        // as its result.)
+                        let said: Vec<&str> = it["result"]["content"]
+                            .as_array()
+                            .map(|c| c.iter().filter_map(|x| x["text"].as_str()).collect())
+                            .unwrap_or_default();
+                        let said = said.join(" ");
+                        let m = it["error"]["message"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|m| !m.is_empty())
+                            .unwrap_or(said.trim());
                         out.push((None, Entry::Error(codex_tool_error(&tool, m))));
                     }
                 }
@@ -1612,6 +1624,27 @@ mod tests {
             4,
             "reconnect notices aren't errors: {:?}",
             a.log
+        );
+    }
+
+    #[test]
+    fn a_tool_that_refuses_a_codex_call_says_why_in_its_own_words() {
+        // ZigZag's answer to a call it can't do comes back as the call's
+        // result, marked failed, with no error of Codex's own.
+        let l = json!({"type":"item.completed","item":{"id":"1","type":"mcp_tool_call","server":"zigzag","tool":"set_object","status":"failed","error":null,
+            "result":{"content":[{"type":"text","text":"no object named 'Face_mask'. Objects: Face mask, Mouth"}],"structured_content":null}}});
+        let out = codex_event(&l, &mut None);
+        assert_eq!(
+            out[1].1,
+            Entry::Error(
+                "set_object: no object named 'Face_mask'. Objects: Face mask, Mouth".into()
+            )
+        );
+        // With nothing said at all, it's still said that it failed.
+        let l = json!({"type":"item.completed","item":{"id":"2","type":"mcp_tool_call","server":"zigzag","tool":"set_object","status":"failed"}});
+        assert_eq!(
+            codex_event(&l, &mut None)[1].1,
+            Entry::Error("set_object failed.".into())
         );
     }
 

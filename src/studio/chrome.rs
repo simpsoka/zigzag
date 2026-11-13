@@ -62,11 +62,30 @@ impl Studio {
                     self.run_action(Action::ToggleRightDock);
                 }
                 ui.add_space(6.0);
-                self.send_button(ui);
+                // (Only for a machine ZigZag sends to.)
+                if self.sends_direct() {
+                    self.send_button(ui);
+                }
                 let share = icon_button(ui, Icon::Share, "Export", false, 28.0);
                 egui::Popup::menu(&share).show(|ui| {
                     ui.set_min_width(260.0);
                     caption(ui, "Export for your machine");
+                    // The document's machine, and the file it reads, first.
+                    if let Some((name, ext)) = self
+                        .machine()
+                        .and_then(|p| Some((p.name.clone(), p.format?)))
+                    {
+                        if ui
+                            .add_enabled(
+                                !self.design.blocks.is_empty(),
+                                egui::Button::new(format!("{name} ({})…", ext.to_uppercase())),
+                            )
+                            .clicked()
+                        {
+                            self.run_action(Action::Export(ext));
+                        }
+                        ui.separator();
+                    }
                     for (ext, label) in zigzag::formats::MACHINE_FORMATS {
                         if ui
                             .add_enabled(!self.design.blocks.is_empty(), egui::Button::new(label))
@@ -103,6 +122,9 @@ impl Studio {
                             self.request_fit();
                         }
                     });
+                // (To the left of the rest, when there's a newer ZigZag.)
+                ui.add_space(crate::theme::space::XS);
+                self.update_button(ui);
             });
         });
         ui.painter().hline(

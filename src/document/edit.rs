@@ -113,7 +113,7 @@ pub(super) fn fmt_matrix(m: Affine) -> String {
     )
 }
 
-fn parse_transform(v: &str) -> Affine {
+pub(super) fn parse_transform(v: &str) -> Affine {
     match v.parse::<svgtypes::Transform>() {
         Ok(t) => [t.a, t.b, t.c, t.d, t.e, t.f],
         Err(_) => IDENTITY,

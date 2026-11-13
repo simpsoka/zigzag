@@ -28,15 +28,22 @@ pub const MACHINE_FORMATS: [(&str, &str); 7] = [
 /// Machine files ZigZag can open.
 pub const READABLE_FORMATS: [&str; 5] = ["pes", "pec", "dst", "exp", "jef"];
 
-/// Encode a design in the machine format for `ext` (no preview formats).
+/// Encode a design in the machine format for `ext` (no preview formats),
+/// with the usual locks and no shortest stitch.
 pub fn write_format(d: &Design, ext: &str) -> anyhow::Result<Vec<u8>> {
+    write_format_with(d, ext, &ExportOptions::default())
+}
+
+/// [`write_format`] with a document's export settings. (The Skitch's PEN
+/// stream has locks of its own, matched to Brother's app: `opt` isn't for it.)
+pub fn write_format_with(d: &Design, ext: &str, opt: &ExportOptions) -> anyhow::Result<Vec<u8>> {
     Ok(match ext.to_ascii_lowercase().as_str() {
-        "pes" => pes::write_pes(d),
-        "pec" => pes::write_pec_file(d),
-        "dst" => dst::write_dst(d),
-        "exp" => more::write_exp(d),
-        "jef" => more::write_jef(d),
-        "vp3" => more::write_vp3(d),
+        "pes" => pes::write_pes_with(d, opt),
+        "pec" => pes::write_pec_file_with(d, opt),
+        "dst" => dst::write_dst_with(d, opt),
+        "exp" => more::write_exp_with(d, opt),
+        "jef" => more::write_jef_with(d, opt),
+        "vp3" => more::write_vp3_with(d, opt),
         "pen" => pen::encode(d).bytes,
         other => anyhow::bail!(
             "unknown machine format '.{other}' (use pes, dst, exp, jef, vp3, pec or pen)"
@@ -61,17 +68,193 @@ pub struct Cmd {
     pub op: Op,
 }
 
+/// How the thread is locked where sewing starts and before it's cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LockStyle {
+    /// No lock stitches (the machine, or the design's own, hold the thread).
+    None,
+    /// Back and forth along the line of sewing.
+    Back,
+    /// Round a small triangle.
+    Triangle,
+}
+
+impl LockStyle {
+    pub fn name(self) -> &'static str {
+        match self {
+            LockStyle::None => "none",
+            LockStyle::Back => "back",
+            LockStyle::Triangle => "triangle",
+        }
+    }
+    pub fn parse(s: &str) -> Option<LockStyle> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => Some(LockStyle::None),
+            "back" | "back-and-forth" | "backtack" => Some(LockStyle::Back),
+            "triangle" => Some(LockStyle::Triangle),
+            _ => None,
+        }
+    }
+    /// Stitches in one lap: out and back, or round the triangle.
+    fn lap(self) -> u32 {
+        match self {
+            LockStyle::Triangle => 3,
+            _ => 2,
+        }
+    }
+}
+
+/// Lock (tie-in and tie-off) stitches: their shape, length and number.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lock {
+    pub style: LockStyle,
+    /// How long each lock stitch is, mm.
+    pub len_mm: f64,
+    /// How many stitches: whole laps, so the lock ends where it began
+    /// (twos back and forth, threes round a triangle).
+    pub count: u32,
+}
+
+impl Default for Lock {
+    /// What ZigZag has always sewn: four 0.4 mm stitches back and forth.
+    fn default() -> Self {
+        Lock {
+            style: LockStyle::Back,
+            len_mm: 0.4,
+            count: 4,
+        }
+    }
+}
+
+impl Lock {
+    /// The lengths a lock stitch can have, mm.
+    pub const LEN_MM: std::ops::RangeInclusive<f64> = 0.2..=2.0;
+    /// The most stitches in a lock.
+    pub const MAX_COUNT: u32 = 12;
+
+    /// A lock with its length in range and its stitches in whole laps
+    /// (rounded up).
+    pub fn new(style: LockStyle, len_mm: f64, count: u32) -> Lock {
+        let lap = style.lap();
+        Lock {
+            style,
+            len_mm: if len_mm.is_finite() {
+                len_mm.clamp(*Self::LEN_MM.start(), *Self::LEN_MM.end())
+            } else {
+                Lock::default().len_mm
+            },
+            count: (count.clamp(lap, Self::MAX_COUNT).div_ceil(lap) * lap).min(Self::MAX_COUNT),
+        }
+    }
+
+    /// As files write it: `none`, or `back:0.4:4` (style, mm, stitches).
+    pub fn format(&self) -> String {
+        match self.style {
+            LockStyle::None => "none".into(),
+            s => format!(
+                "{}:{}:{}",
+                s.name(),
+                crate::params::fmt_num(self.len_mm),
+                self.count
+            ),
+        }
+    }
+
+    /// [`Lock::format`]'s inverse; a style alone takes the usual length and
+    /// number.
+    pub fn parse(v: &str) -> Option<Lock> {
+        let mut parts = v.split(':');
+        let style = LockStyle::parse(parts.next()?)?;
+        let d = Lock::default();
+        let len = match parts.next() {
+            Some(l) => l.parse().ok()?,
+            None => d.len_mm,
+        };
+        let count = match parts.next() {
+            Some(c) => c.parse().ok()?,
+            None => style.lap() * 2,
+        };
+        Some(Lock::new(style, len, count))
+    }
+}
+
+/// What a document says about the machine file, whatever its format.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExportOptions {
+    pub lock: Lock,
+    /// No stitch in the file is shorter than this, units (0: any length).
+    /// The plan already keeps to it; rounding to the file's whole units can
+    /// still shorten a stitch, and those are merged here.
+    pub min_stitch: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct StreamOptions {
-    /// Add tie-in/tie-off stitches around trims and color changes.
-    pub ties: bool,
+    /// Lock stitches where sewing starts, and before trims and color changes.
+    pub lock: Lock,
+    /// No stitch shorter than this, units (see [`ExportOptions`]).
+    pub min_stitch: f64,
     /// Longest single stitch or jump the format can encode, units.
     pub max_step: f64,
+}
+
+impl StreamOptions {
+    pub fn new(opt: &ExportOptions, max_step: f64) -> StreamOptions {
+        StreamOptions {
+            lock: opt.lock,
+            min_stitch: opt.min_stitch,
+            max_step,
+        }
+    }
+}
+
+/// The needle points of a lock at `at` (whole units), lying along `dir`:
+/// each lap leaves `at` and comes back to it. No lock stitch is shorter
+/// than the shortest allowed: the lock is at least that long, and where
+/// rounding to whole units shortens a side, a unit longer until none is.
+fn lock_points(at: P, dir: P, opt: &StreamOptions) -> Vec<P> {
+    let r = |p: P| P::new(p.x.round(), p.y.round());
+    if opt.lock.style == LockStyle::None {
+        return Vec::new();
+    }
+    // The triangle's second corner: `dir` turned a sixth of a turn.
+    let (s, c) = std::f64::consts::FRAC_PI_3.sin_cos();
+    let side = P::new(dir.x * c - dir.y * s, dir.x * s + dir.y * c);
+    let mut len = (opt.lock.len_mm * 10.0).max(opt.min_stitch);
+    let lap = loop {
+        let lap = match opt.lock.style {
+            LockStyle::Triangle => vec![r(at + dir * len), r(at + side * len), at],
+            _ => vec![r(at + dir * len), at],
+        };
+        let shortest = (0..lap.len())
+            .map(|i| lap[i].dist(lap[(i + lap.len() - 1) % lap.len()]))
+            .fold(f64::INFINITY, f64::min);
+        if shortest >= opt.min_stitch || len > 60.0 {
+            break lap;
+        }
+        len += 1.0;
+    };
+    lap.iter()
+        .cycle()
+        .take(opt.lock.count as usize)
+        .copied()
+        .collect()
 }
 
 /// Flatten a design into a command stream: jump to each run, tie in, stitch,
 /// tie off, trim. Coordinates are rounded to whole units.
 pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
+    commands_owned(d, opt).0
+}
+
+/// [`commands`], and for each command the input shape it's for
+/// ([`Design::stitch_shapes`]): a shape's stitches, the locks and the jump
+/// that begin them and the lock and cut that end them. `None` for a change
+/// of thread, the end, and a design that doesn't say.
+pub fn commands_owned(d: &Design, opt: &StreamOptions) -> (Vec<Cmd>, Vec<Option<usize>>) {
+    let mut owners: Vec<Option<usize>> = Vec::new();
+    // The shape the last stitches were for.
+    let mut owner: Option<usize> = None;
     let mut out: Vec<Cmd> = Vec::new();
     let r = |p: P| P::new(p.x.round(), p.y.round());
     let mut pos: Option<P> = None;
@@ -101,15 +284,12 @@ pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
         }
     };
     let tie = |out: &mut Vec<Cmd>, at: P, dir: P| {
-        if opt.ties {
-            let d = at + dir * 4.0;
-            for q in [r(d), at, r(d), at] {
-                out.push(Cmd {
-                    x: q.x,
-                    y: q.y,
-                    op: Op::Stitch,
-                });
-            }
+        for q in lock_points(at, dir, opt) {
+            out.push(Cmd {
+                x: q.x,
+                y: q.y,
+                op: Op::Stitch,
+            });
         }
     };
 
@@ -123,11 +303,13 @@ pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
                 y: p.y,
                 op: Op::Trim,
             });
+            owners.resize(out.len(), owner);
             out.push(Cmd {
                 x: p.x,
                 y: p.y,
                 op: Op::ColorChange,
             });
+            owners.resize(out.len(), None);
         }
         for (ri, run) in blk.runs.iter().enumerate() {
             if run.pts.is_empty() {
@@ -144,7 +326,16 @@ pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
                     y: p.y,
                     op: Op::Trim,
                 });
+                owners.resize(out.len(), owner);
             }
+            // Whose stitches these are, from each point of the run on.
+            let spans: &[(usize, usize)] = d
+                .stitch_shapes
+                .get(bi)
+                .and_then(|b| b.get(ri))
+                .map_or(&[], |s| s.as_slice());
+            let mut span = 0;
+            owner = spans.first().map(|s| s.1);
             match pos {
                 // Machines start at the origin; the first move is a jump from there.
                 None => push_line(&mut out, P::default(), start, Op::Jump),
@@ -156,6 +347,7 @@ pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
                 y: start.y,
                 op: Op::Stitch,
             });
+            owners.resize(out.len(), owner);
             let first_dir = run
                 .pts
                 .iter()
@@ -164,14 +356,21 @@ pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
                 .map(|v| v.norm())
                 .unwrap_or(P::new(1.0, 0.0));
             tie(&mut out, start, first_dir);
+            owners.resize(out.len(), owner);
             let mut cur = start;
-            for &q in &run.pts[1..] {
+            for (k, &q) in run.pts.iter().enumerate().skip(1) {
+                while spans.get(span + 1).is_some_and(|s| s.0 <= k) {
+                    span += 1;
+                    owner = Some(spans[span].1);
+                }
                 let q = r(q);
-                if q == cur {
+                // (Rounded onto the last point, or too near it for a stitch.)
+                if q == cur || q.dist(cur) < opt.min_stitch {
                     continue;
                 }
                 prev_dir = (cur - q).norm();
                 push_line(&mut out, cur, q, Op::Stitch);
+                owners.resize(out.len(), owner);
                 cur = q;
             }
             pos = Some(cur);
@@ -184,13 +383,73 @@ pub fn commands(d: &Design, opt: &StreamOptions) -> Vec<Cmd> {
             y: p.y,
             op: Op::Trim,
         });
+        owners.resize(out.len(), owner);
         out.push(Cmd {
             x: p.x,
             y: p.y,
             op: Op::End,
         });
+        owners.resize(out.len(), None);
     }
-    out
+    (out, owners)
+}
+
+/// The longest step a machine format's records hold, units: what its
+/// writer splits longer stitches and jumps to. `None` for a format that
+/// isn't written from the command stream.
+fn max_step(ext: &str) -> Option<f64> {
+    match ext.to_ascii_lowercase().as_str() {
+        "dst" => Some(121.0),
+        "pes" | "pec" => Some(120.0),
+        "exp" | "jef" => Some(127.0),
+        "vp3" => Some(255.0),
+        _ => None,
+    }
+}
+
+/// A run of commands for one object in a written file.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnedRange {
+    /// The first and last command, counting every command (stitch, jump,
+    /// trim, change of thread, end) from 0 in the order written.
+    pub first: usize,
+    pub last: usize,
+    /// The same counting only stitches (needle points), if it has any.
+    pub stitches: Option<(usize, usize)>,
+    /// The input shape, or `None` (a change of thread, the end).
+    pub shape: Option<usize>,
+    /// Where the first command is, units.
+    pub at: P,
+}
+
+/// Which object each command of the `ext` file for `d` is for, as runs of
+/// commands for one object: what a checker needs to name the shape behind
+/// a stitch. `None` for a format that isn't written from the command
+/// stream (the Skitch's PEN).
+pub fn object_ranges(d: &Design, ext: &str, opt: &ExportOptions) -> Option<Vec<OwnedRange>> {
+    let (cmds, owners) = commands_owned(d, &StreamOptions::new(opt, max_step(ext)?));
+    let mut out: Vec<OwnedRange> = Vec::new();
+    let mut stitch = 0;
+    for (k, (c, &shape)) in cmds.iter().zip(&owners).enumerate() {
+        let is_stitch = c.op == Op::Stitch;
+        match out.last_mut() {
+            Some(r) if r.shape == shape => {
+                r.last = k;
+                if is_stitch {
+                    r.stitches = Some((r.stitches.map_or(stitch, |s| s.0), stitch));
+                }
+            }
+            _ => out.push(OwnedRange {
+                first: k,
+                last: k,
+                stitches: is_stitch.then_some((stitch, stitch)),
+                shape,
+                at: P::new(c.x, c.y),
+            }),
+        }
+        stitch += is_stitch as usize;
+    }
+    Some(out)
 }
 
 /// Bounds over every command position (pyembroidery's `pattern.bounds()`).
@@ -322,6 +581,173 @@ pub fn pec_palette() -> Vec<Option<[u8; 3]>> {
         .enumerate()
         .map(|(i, &(r, g, b, _))| if i == 0 { None } else { Some([r, g, b]) })
         .collect()
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use crate::design::{Block, Run};
+
+    /// Two runs with a cut between them, the first sewn in direction `dir`.
+    fn two_runs(dir: P) -> Design {
+        let a: Vec<P> = (0..5).map(|k| dir * (k as f64 * 25.0)).collect();
+        let b: Vec<P> = (0..5).map(|k| P::new(300.0, k as f64 * 25.0)).collect();
+        Design {
+            blocks: vec![Block {
+                color: [0, 0, 0],
+                runs: vec![
+                    Run {
+                        pts: a,
+                        trim_before: false,
+                    },
+                    Run {
+                        pts: b,
+                        trim_before: true,
+                    },
+                ],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn stitch_lengths(cmds: &[Cmd]) -> Vec<f64> {
+        cmds.windows(2)
+            .filter(|w| w[0].op == Op::Stitch && w[1].op == Op::Stitch)
+            .map(|w| P::new(w[0].x, w[0].y).dist(P::new(w[1].x, w[1].y)))
+            .collect()
+    }
+
+    fn stream(d: &Design, lock: Lock, min_stitch: f64) -> Vec<Cmd> {
+        commands(
+            d,
+            &StreamOptions {
+                lock,
+                min_stitch,
+                max_step: 121.0,
+            },
+        )
+    }
+
+    #[test]
+    fn a_lock_is_written_and_read_back_in_whole_laps() {
+        assert_eq!(Lock::default().format(), "back:0.4:4");
+        for l in [
+            Lock::default(),
+            Lock::new(LockStyle::Triangle, 0.55, 6),
+            Lock::new(LockStyle::None, 0.4, 4),
+        ] {
+            let back = Lock::parse(&l.format()).unwrap();
+            assert_eq!(back.style, l.style);
+            if l.style != LockStyle::None {
+                assert_eq!(back, l);
+            }
+        }
+        // Stitches come in whole laps (rounded up), within limits.
+        assert_eq!(Lock::new(LockStyle::Back, 0.4, 3).count, 4);
+        assert_eq!(Lock::new(LockStyle::Triangle, 0.4, 4).count, 6);
+        assert_eq!(Lock::new(LockStyle::Triangle, 0.4, 1).count, 3);
+        assert_eq!(Lock::new(LockStyle::Back, 0.4, 99).count, 12);
+        assert_eq!(Lock::new(LockStyle::Back, 9.0, 2).len_mm, 2.0);
+        // A style alone takes the usual length and two laps.
+        assert_eq!(Lock::parse("back"), Some(Lock::default()));
+        assert_eq!(
+            Lock::parse("triangle"),
+            Some(Lock::new(LockStyle::Triangle, 0.4, 6))
+        );
+        assert_eq!(Lock::parse("zigzag"), None);
+        assert_eq!(Lock::parse("back:long:4"), None);
+    }
+
+    #[test]
+    fn the_usual_lock_is_what_it_always_was() {
+        let d = two_runs(P::new(1.0, 0.0));
+        let cmds = stream(&d, Lock::default(), 0.0);
+        // Tie-in at the start: out 0.4 mm along the run and back, twice.
+        let at: Vec<(f64, f64)> = cmds[1..6].iter().map(|c| (c.x, c.y)).collect();
+        assert_eq!(
+            at,
+            [(0.0, 0.0), (4.0, 0.0), (0.0, 0.0), (4.0, 0.0), (0.0, 0.0)]
+        );
+        // 4 lock stitches at each of: start, before the cut, after it, end.
+        let n = |cmds: &[Cmd]| cmds.iter().filter(|c| c.op == Op::Stitch).count();
+        assert_eq!(n(&cmds), 10 + 4 * 4);
+        // No locks: only the runs' own stitches.
+        let none = stream(&d, Lock::new(LockStyle::None, 0.4, 4), 0.0);
+        assert_eq!(n(&none), 10);
+        assert_eq!(
+            none.iter().filter(|c| c.op == Op::Trim).count(),
+            cmds.iter().filter(|c| c.op == Op::Trim).count()
+        );
+    }
+
+    #[test]
+    fn a_triangle_lock_goes_round_and_comes_back() {
+        let d = two_runs(P::new(1.0, 0.0));
+        let cmds = stream(&d, Lock::new(LockStyle::Triangle, 0.6, 3), 0.0);
+        let at: Vec<(f64, f64)> = cmds[1..5].iter().map(|c| (c.x, c.y)).collect();
+        assert_eq!(at, [(0.0, 0.0), (6.0, 0.0), (3.0, 5.0), (0.0, 0.0)]);
+        assert_eq!(
+            cmds.iter().filter(|c| c.op == Op::Stitch).count(),
+            10 + 4 * 3
+        );
+    }
+
+    #[test]
+    fn no_lock_stitch_is_shorter_than_the_shortest_stitch() {
+        // Whichever way the run goes: rounding a lock's corner to whole
+        // units can shorten its sides (0.4 mm along (3, 4) rounds to 0.36).
+        for deg in (0..360).step_by(7) {
+            let a = (deg as f64).to_radians();
+            let d = two_runs(P::new(a.cos(), a.sin()));
+            for lock in [
+                Lock::default(),
+                Lock::new(LockStyle::Triangle, 0.4, 3),
+                Lock::new(LockStyle::Back, 0.2, 2),
+            ] {
+                let cmds = stream(&d, lock, 4.0);
+                let shortest = stitch_lengths(&cmds)
+                    .into_iter()
+                    .fold(f64::INFINITY, f64::min);
+                assert!(shortest >= 4.0, "{deg}° {lock:?}: a {shortest} stitch");
+            }
+        }
+        // (Without a shortest stitch, that one is as it rounds.)
+        let d = two_runs(P::new(0.6, 0.8));
+        let cmds = stream(&d, Lock::default(), 0.0);
+        assert!(stitch_lengths(&cmds).iter().any(|l| *l < 4.0));
+    }
+
+    #[test]
+    fn stitches_rounded_too_short_are_merged_in_the_file() {
+        // 0.44 mm apart, but 0.4 and then 0.3 once on whole units.
+        let pts = vec![
+            P::new(0.0, 0.0),
+            P::new(30.0, 0.0),
+            P::new(34.4, 0.0),
+            P::new(37.6, 0.0),
+            P::new(60.0, 0.0),
+        ];
+        let d = Design {
+            blocks: vec![Block {
+                color: [0, 0, 0],
+                runs: vec![Run {
+                    pts,
+                    trim_before: false,
+                }],
+            }],
+            ..Default::default()
+        };
+        let none = Lock::new(LockStyle::None, 0.4, 4);
+        let xs = |cmds: &[Cmd]| -> Vec<f64> {
+            cmds.iter()
+                .filter(|c| c.op == Op::Stitch)
+                .map(|c| c.x)
+                .collect()
+        };
+        assert_eq!(xs(&stream(&d, none, 0.0)), [0.0, 30.0, 34.0, 38.0, 60.0]);
+        assert_eq!(xs(&stream(&d, none, 4.0)), [0.0, 30.0, 34.0, 38.0, 60.0]);
+        assert_eq!(xs(&stream(&d, none, 5.0)), [0.0, 30.0, 38.0, 60.0]);
+    }
 }
 
 #[cfg(test)]

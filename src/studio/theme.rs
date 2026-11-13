@@ -235,12 +235,32 @@ fn style_for(p: &Pal, base: &egui::Style) -> egui::Style {
     s
 }
 
+const SEMIBOLD: &str = "semibold";
+static HAS_SEMIBOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The heading font: the system font a weight up. (The ordinary font until
+/// [`install`] has run, as in tests.)
+pub fn semibold(size: f32) -> FontId {
+    if HAS_SEMIBOLD.load(std::sync::atomic::Ordering::Relaxed) {
+        FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
+    } else {
+        FontId::proportional(size)
+    }
+}
+
 /// Fonts and both appearances; the system setting picks between them.
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+    let mut heavy = false;
     if let Some((name, bytes, index)) = system_font() {
         let mut data = FontData::from_owned(bytes);
         data.index = index;
+        // The same font a weight up, for headings (where the font has a
+        // weight axis, as the system's does; elsewhere it's the same face).
+        let mut bold = data.clone();
+        bold.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", 600.0)]);
+        fonts.font_data.insert(SEMIBOLD.into(), Arc::new(bold));
+        heavy = true;
         fonts.font_data.insert(name.clone(), Arc::new(data));
         fonts
             .families
@@ -248,7 +268,19 @@ pub fn install(ctx: &egui::Context) {
             .or_default()
             .insert(0, name);
     }
+    let mut family = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if heavy {
+        family.insert(0, SEMIBOLD.into());
+    }
+    fonts
+        .families
+        .insert(FontFamily::Name(SEMIBOLD.into()), family);
     ctx.set_fonts(fonts);
+    HAS_SEMIBOLD.store(true, std::sync::atomic::Ordering::Relaxed);
     let base = (*ctx.global_style()).clone();
     ctx.set_style_of(Theme::Light, style_for(&LIGHT, &base));
     ctx.set_style_of(Theme::Dark, style_for(&DARK, &base));
@@ -515,6 +547,40 @@ pub fn segmented<T: PartialEq + Copy>(
         x += w;
     }
     changed
+}
+
+/// The heading of a section that folds away: a chevron and its name, the
+/// whole row to click. `open` is how it stands; the caller keeps that
+/// (in the settings, so it's the same next time: see `Prefs::fold_open`)
+/// and draws what's under it when it's open.
+pub fn fold_header(ui: &mut egui::Ui, title: &str, open: bool) -> Response {
+    let p = pal_ui(ui);
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, title));
+    let ink = if resp.hovered() { p.text } else { p.secondary };
+    let chevron = Rect::from_center_size(
+        Pos2::new(rect.left() + 5.0, rect.center().y),
+        Vec2::splat(9.0),
+    );
+    icons::paint(
+        ui.painter(),
+        chevron,
+        if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        },
+        ink,
+    );
+    ui.painter().text(
+        Pos2::new(rect.left() + 16.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(12.5),
+        p.text,
+    );
+    resp
 }
 
 /// A thin horizontal separator line.

@@ -14,7 +14,7 @@ const MARGIN: i8 = 22;
 const GAP_BELOW_HEADING: f32 = 16.0;
 const GAP_ABOVE_BUTTONS: f32 = 16.0;
 /// Buttons: height, least width, corner radius, label size.
-const BUTTON_H: f32 = 28.0;
+pub const BUTTON_H: f32 = 28.0;
 const BUTTON_MIN_W: f32 = 72.0;
 const BUTTON_RADIUS: u8 = 6;
 const BUTTON_TEXT: f32 = 13.0;
@@ -68,9 +68,13 @@ pub fn show<R>(
 pub fn heading(ui: &mut egui::Ui, text: &str) {
     let p = pal_ui(ui);
     ui.add(
-        egui::Label::new(egui::RichText::new(text).size(15.0).strong().color(p.text))
-            .wrap()
-            .selectable(false),
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(crate::theme::semibold(15.0))
+                .color(p.text),
+        )
+        .wrap()
+        .selectable(false),
     );
     ui.add_space(GAP_BELOW_HEADING - ui.spacing().item_spacing.y);
 }

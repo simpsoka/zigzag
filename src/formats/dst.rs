@@ -1,21 +1,23 @@
 //! Tajima DST. Record encoding and header ported from pyembroidery's DstWriter
 //! (MIT License, Copyright (c) 2018 Tatarize).
 
-use super::{Cmd, Op, StreamOptions, commands, stream_bounds};
+use super::{Cmd, ExportOptions, Op, StreamOptions, commands, stream_bounds};
 use crate::design::Design;
 
 pub fn stream(d: &Design) -> Vec<Cmd> {
-    commands(
-        d,
-        &StreamOptions {
-            ties: true,
-            max_step: 121.0,
-        },
-    )
+    stream_with(d, &ExportOptions::default())
+}
+
+pub fn stream_with(d: &Design, opt: &ExportOptions) -> Vec<Cmd> {
+    commands(d, &StreamOptions::new(opt, 121.0))
 }
 
 pub fn write_dst(d: &Design) -> Vec<u8> {
-    dst_from_stream(&d.name, &stream(d))
+    write_dst_with(d, &ExportOptions::default())
+}
+
+pub fn write_dst_with(d: &Design, opt: &ExportOptions) -> Vec<u8> {
+    dst_from_stream(&d.name, &stream_with(d, opt))
 }
 
 /// Largest per-axis step a DST record can encode.

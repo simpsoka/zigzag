@@ -4,30 +4,38 @@
 //! (MIT License, Copyright (c) 2018 Tatarize).
 
 use super::pec_data::PEC_ICON_BLANK;
-use super::{Cmd, Op, StreamOptions, commands, nearest_index, pec_palette, stream_bounds};
+use super::{
+    Cmd, ExportOptions, Op, StreamOptions, commands, nearest_index, pec_palette, stream_bounds,
+};
 use crate::design::Design;
 use crate::geom::Bounds;
 
 pub const MAX_STEP: f64 = 2047.0;
 
 pub fn stream(d: &Design) -> Vec<Cmd> {
-    commands(
-        d,
-        &StreamOptions {
-            ties: true,
-            max_step: 120.0,
-        },
-    )
+    stream_with(d, &ExportOptions::default())
+}
+
+pub fn stream_with(d: &Design, opt: &ExportOptions) -> Vec<Cmd> {
+    commands(d, &StreamOptions::new(opt, 120.0))
 }
 
 pub fn write_pes(d: &Design) -> Vec<u8> {
-    let cmds = stream(d);
+    write_pes_with(d, &ExportOptions::default())
+}
+
+pub fn write_pes_with(d: &Design, opt: &ExportOptions) -> Vec<u8> {
+    let cmds = stream_with(d, opt);
     let threads: Vec<[u8; 3]> = d.blocks.iter().map(|b| b.color).collect();
     pes_from_stream(&d.name, &cmds, &threads)
 }
 
 pub fn write_pec_file(d: &Design) -> Vec<u8> {
-    let cmds = stream(d);
+    write_pec_file_with(d, &ExportOptions::default())
+}
+
+pub fn write_pec_file_with(d: &Design, opt: &ExportOptions) -> Vec<u8> {
+    let cmds = stream_with(d, opt);
     let threads: Vec<[u8; 3]> = d.blocks.iter().map(|b| b.color).collect();
     let mut f = b"#PEC0001".to_vec();
     write_pec(&mut f, &d.name, &cmds, &threads);

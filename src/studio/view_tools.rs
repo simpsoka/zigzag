@@ -1,7 +1,7 @@
 //! Canvas helpers: mm grid, needle points, measuring, the pen tool for drawing
 //! shapes and manual stitches, sewing-order tools and the worksheet.
 
-use crate::app::{HOOPS, SPM, Studio, Tool};
+use crate::app::{SPM, Studio, Tool};
 use crate::canvas::View;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use zigzag::design::Design;
@@ -36,7 +36,8 @@ pub struct ViewTools {
     /// Snap to other objects and the hoop while dragging (⌘U).
     pub smart_guides: bool,
     pub points: bool,
-    /// View › Draw Stitches on GPU (off: egui's painter draws them).
+    /// Settings › General › Draw stitches on the GPU (off: egui's painter
+    /// draws them).
     pub gpu_stitches: bool,
     pub measure: Option<(P, P)>,
     /// A Measure drag is under way.
@@ -560,7 +561,7 @@ impl Studio {
     }
 
     pub fn worksheet_html(&self) -> anyhow::Result<String> {
-        let h = HOOPS[self.doc.settings.hoop.min(HOOPS.len() - 1)];
+        let (hw, hh) = self.hoop_dims();
         let info = zigzag::formats::worksheet::WorksheetInfo {
             title: if self.doc.name.is_empty() {
                 "Design".into()
@@ -568,7 +569,7 @@ impl Studio {
                 self.doc.name.clone()
             },
             fabric: self.doc.settings.fabric().name.to_string(),
-            hoop: Some((h.1.to_string(), h.2, h.3)),
+            hoop: Some((self.hoop_label(), hw, hh)),
             background: self.doc.settings.cloth,
             names: self.names.clone(),
             spm: SPM,
@@ -840,6 +841,53 @@ mod tests {
                 .settings
                 .connect_mm,
             20.0
+        );
+    }
+
+    #[test]
+    fn the_hoop_menu_has_the_standard_hoops_and_custom_takes_any_size() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio(None);
+        // A 150 mm square: too big for the 4×4 hoop a new design starts in.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="150mm" height="150mm" viewBox="0 0 150 150"><rect id="sq" width="150" height="150" fill="#203040"/></svg>"##;
+        let mut doc = zigzag::document::Document::from_svg(svg, "sq", None).unwrap();
+        doc.settings.hoop = (200.0, 200.0);
+        h.state_mut().set_document(doc);
+        h.run_steps(3);
+        assert_eq!(h.state().hoop_label(), "8×8 in (200 × 200 mm)");
+        assert!(!h.state().design_over_hoop());
+        assert!(h.query_by_label("Hoop height").is_none(), "no size fields");
+        // Choose the 4×4 from the menu: the design no longer fits.
+        h.get_by_label("Hoop").click();
+        h.run_steps(3);
+        h.get_by_label("4×4 in (100 × 100 mm) · Skitch / PE")
+            .click();
+        h.run_steps(4);
+        assert_eq!(h.state().hoop_dims(), (100.0, 100.0));
+        assert!(h.state().design_over_hoop());
+        // Custom shows the width and height; the size stays until typed.
+        h.get_by_label("Hoop").click();
+        h.run_steps(3);
+        h.get_by_label("Custom").click();
+        h.run_steps(3);
+        assert!(h.state().hoop_custom);
+        assert_eq!(h.state().hoop_dims(), (100.0, 100.0));
+        assert!(h.query_by_label("Hoop height").is_some());
+        // A frame no list has: named by its size, saved, and read back.
+        h.state_mut().doc.settings.hoop = (160.0, 155.5);
+        h.state_mut().replan();
+        h.run_steps(3);
+        assert_eq!(h.state().hoop_label(), "Custom · 160 × 155.5 mm");
+        assert!(!h.state().design_over_hoop());
+        let out = h.state().doc.to_svg().unwrap();
+        assert!(out.contains("hoop=160x155.5"), "{out}");
+        let back = zigzag::document::Document::from_svg(&out, "sq", None).unwrap();
+        h.state_mut().set_document(back);
+        h.run_steps(3);
+        assert!(!h.state().hoop_custom);
+        assert!(
+            h.query_by_label("Hoop height").is_some(),
+            "a hoop that isn't a standard one shows its size"
         );
     }
 

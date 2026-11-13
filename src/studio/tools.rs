@@ -18,32 +18,35 @@ Typical flow: get_design → add_svg (any SVG artwork) and add_text (lettering) 
 Stitch types: fill (tatami rows; areas wider than ~7 mm), satin (glossy zigzag columns 1–7 mm wide; works on strokes, and on narrow filled shapes like letters, bars and rings), run (thin running stitch for details), \
 contour (rows following the outline inward), blanket (E-stitch edge), applique (placement line, stop, tack-down, stop, satin cover) and manual (every path point is a needle point). \
 Settings can also be preset in SVG element ids, e.g. id=\"logo_fill_a=45\" or id=\"border_satin_w=2\". \
+An object is named for its id without the settings (id=\"Face_mask_fill\" is \"Face mask\"); name it to a tool by that name, by the id, or by its index. \
+list_machines and set_document's machine set a document up for a machine: its hoop, the file it reads, its shortest stitch and its lock stitches. \
 Hat designs are small (about 50 × 50 mm on the front of a cap): keep satin columns under 7 mm wide, letters at least 5 mm tall, and details at least 1.5 mm. \
-open_file also opens machine files (pes, dst, exp, jef) as manual stitches. \
-trace_image turns a PNG/JPEG logo into shapes (snap colors to Brother or Janome threads with `threads`). round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
-Use batch to make several changes in one call: it is all or nothing and one undo step, and later steps can use earlier results (\"$0.added.0.name\").";
+open_file also opens machine files (pes, pec, dst, exp, jef) as manual stitches. \
+trace_image turns a logo (PNG, JPEG, WebP, GIF, BMP or TIFF) into shapes (snap colors to Brother or Janome threads with `threads`). round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
+Use batch to make several changes in one call: it is all or nothing and one undo step, each step is {\"tool\": name, \"arguments\": {…}}, and later steps can use earlier results (\"$0.added.0.name\"). \
+Tools that change the design return the whole object or document; pass terse: true (on a tool, or on a batch for all its steps) for a short answer instead: ok, the names of objects added, and new_problems, the design problems that weren't there before.";
 
 fn obj_schema() -> Value {
-    json!({ "description": "Object: its index in sewing order (0-based) or its name from get_design.", "oneOf": [{ "type": "integer" }, { "type": "string" }] })
+    json!({ "description": "Object: its index in sewing order (0-based), its name from get_design, or the id you gave it in an SVG (Face_mask for \"Face mask\").", "oneOf": [{ "type": "integer" }, { "type": "string" }] })
 }
 
 fn text_props(new: bool) -> Value {
     let mut p = json!({
         "text": { "type": "string" },
         "font": { "type": "string", "description": "Font family (see list_fonts). Default: a clean sans." },
-        "size_mm": { "type": "number", "description": "Capital letter height. Default 8." },
+        "size_mm": { "type": "number", "description": "Capital letter height, 2 to 80. Default 8." },
         "spacing_mm": { "type": "number", "description": "Extra letter spacing. Default 0.4." },
         "arc_mm": { "type": "number", "description": "Arc radius: 0 straight, >0 over the top, <0 along the bottom." },
-        "bold": { "type": "boolean" },
+        "bold": { "type": "boolean", "description": "Default true: bold letters make better satin columns." },
         "italic": { "type": "boolean" },
         "color": { "type": "string", "description": "#rrggbb" },
         "kind": { "type": "string", "enum": ["satin", "fill", "run"], "description": "Default satin." },
         "leading": { "type": "number", "description": "Line spacing for multi-line text (newlines in `text`), as a multiple of the letter height. Default 1.5." },
         "align": { "type": "string", "enum": ["left", "center", "right"], "description": "Line alignment. Default center." },
-        "h_scale": { "type": "number", "description": "Horizontal scale, percent. Default 100." },
+        "h_scale": { "type": "number", "description": "Horizontal scale, percent (20 to 400). Default 100." },
         "v_scale": { "type": "number", "description": "Vertical scale, percent. Default 100." },
         "case": { "type": "string", "enum": ["as", "upper", "lower", "title"], "description": "Letter case applied to the text. Default as typed." },
-        "on_path": { "description": "Put the text on an existing path object's outline (the object is then not sewn); null takes it off.", "oneOf": [{ "type": "integer" }, { "type": "string" }, { "type": "null" }] },
+        "on_path": { "description": "Put the text on an existing path object's outline (the object is then not sewn, and stays that way until its kind is set again); null takes it off.", "oneOf": [{ "type": "integer" }, { "type": "string" }, { "type": "null" }] },
         "path_offset": { "type": "number", "description": "On a path: where the text starts, 0–1 along it." },
         "path_flip": { "type": "boolean", "description": "On a path: letters on the other side." },
         "kern": { "type": "array", "description": "Pair kerning: for each, the 0-based character index and how far (mm) to move it and the rest of the line; replaces any kerning set before.", "items": { "type": "object", "properties": { "at": { "type": "integer" }, "mm": { "type": "number" } }, "required": ["at", "mm"] } }
@@ -71,28 +74,44 @@ fn apply_text_args(spec: &mut zigzag::document::TextSpec, args: &Value) -> Resul
             .cloned()
             .ok_or_else(|| format!("font '{want}' isn't installed; call list_fonts"))?;
     }
-    let num = |k: &str| {
-        args.get(k)
-            .and_then(Value::as_f64)
-            .filter(|v| v.is_finite())
+    // (A number that isn't one, or a yes that isn't true or false, is
+    // said so: left out, the text would come back unchanged and look done.)
+    let num = |k: &str| -> Result<Option<f64>, String> {
+        match args.get(k) {
+            None => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .map(Some)
+                .ok_or(format!("`{k}` must be a number")),
+        }
     };
-    if let Some(v) = num("size_mm") {
+    let flag = |k: &str| -> Result<Option<bool>, String> {
+        match args.get(k) {
+            None => Ok(None),
+            Some(v) => v
+                .as_bool()
+                .map(Some)
+                .ok_or(format!("`{k}` must be true or false")),
+        }
+    };
+    if let Some(v) = num("size_mm")? {
         spec.size_mm = v.clamp(2.0, 80.0);
     }
-    if let Some(v) = num("spacing_mm") {
+    if let Some(v) = num("spacing_mm")? {
         spec.spacing_mm = v.clamp(-2.0, 10.0);
     }
-    if let Some(v) = num("arc_mm") {
+    if let Some(v) = num("arc_mm")? {
         spec.arc_mm = if v.abs() < 0.5 {
             0.0
         } else {
             v.signum() * v.abs().clamp(5.0, 200.0)
         };
     }
-    if let Some(v) = args.get("bold").and_then(Value::as_bool) {
+    if let Some(v) = flag("bold")? {
         spec.bold = v;
     }
-    if let Some(v) = args.get("italic").and_then(Value::as_bool) {
+    if let Some(v) = flag("italic")? {
         spec.italic = v;
     }
     if let Some(v) = args.get("color") {
@@ -109,7 +128,7 @@ fn apply_text_args(spec: &mut zigzag::document::TextSpec, args: &Value) -> Resul
             _ => return Err("kind must be satin, fill or run".into()),
         };
     }
-    if let Some(v) = num("leading") {
+    if let Some(v) = num("leading")? {
         spec.leading = v.clamp(0.5, 5.0);
     }
     if let Some(v) = args.get("align") {
@@ -118,10 +137,10 @@ fn apply_text_args(spec: &mut zigzag::document::TextSpec, args: &Value) -> Resul
             .and_then(zigzag::document::Align::parse)
             .ok_or("align must be left, center or right")?;
     }
-    if let Some(v) = num("h_scale") {
+    if let Some(v) = num("h_scale")? {
         spec.h_scale = v.clamp(20.0, 400.0);
     }
-    if let Some(v) = num("v_scale") {
+    if let Some(v) = num("v_scale")? {
         spec.v_scale = v.clamp(20.0, 400.0);
     }
     if let Some(v) = args.get("case") {
@@ -130,10 +149,10 @@ fn apply_text_args(spec: &mut zigzag::document::TextSpec, args: &Value) -> Resul
             .and_then(zigzag::document::Case::parse)
             .ok_or("case must be as, upper, lower or title")?;
     }
-    if let Some(v) = num("path_offset") {
+    if let Some(v) = num("path_offset")? {
         spec.path_offset = v.clamp(0.0, 1.0);
     }
-    if let Some(v) = args.get("path_flip").and_then(Value::as_bool) {
+    if let Some(v) = flag("path_flip")? {
         spec.path_flip = v;
     }
     if let Some(list) = args.get("kern") {
@@ -167,7 +186,7 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "add_svg",
-            "description": "Add SVG artwork to the canvas (or replace the document). Every filled shape and stroke becomes an object; fills default to fill stitch, strokes to satin (≥1 mm) or run. Settings in element ids apply (e.g. id=\"leaf_satin\"). By default the artwork keeps its own size (viewBox units scaled by width/height attributes, else 1 unit = 1 px) and is centered on the hoop.",
+            "description": "Add SVG artwork to the canvas (or replace the document). Every filled shape and stroke becomes an object; fills default to fill stitch, strokes to satin (≥1 mm) or run. Settings in element ids apply (e.g. id=\"leaf_satin\"). A satin can be given as its two edges: one stroked path (any stroke width, id with satin) whose two longest subpaths are the column's rails, with any shorter subpaths crossing both as rungs that keep the rails in step and set which way the stitches run, e.g. d=\"M4 10 C12 2 28 2 36 10 M4 10 C12 18 28 18 36 10 M14 5 L18 15\". By default the artwork keeps its own size (viewBox units scaled by width/height attributes, else 1 unit = 1 px) and is centered on the hoop.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -176,7 +195,7 @@ pub fn tool_specs() -> Value {
                     "y_mm": { "type": "number", "description": "Center of the artwork, mm below the hoop center. Default 0." },
                     "width_mm": { "type": "number", "description": "Scale the artwork to this width." },
                     "height_mm": { "type": "number", "description": "Scale the artwork to this height (with width_mm: fit inside both)." },
-                    "replace": { "type": "boolean", "description": "Start a new document with only this artwork. Default false." }
+                    "replace": { "type": "boolean", "description": "Start a new document with only this artwork, keeping the document settings (fabric, hoop, machine, preview color). Default false." }
                 },
                 "required": ["svg"]
             }
@@ -195,17 +214,20 @@ pub fn tool_specs() -> Value {
                     "pull_mm": { "type": ["number", "null"], "description": "Pull compensation per side." },
                     "width_mm": { "type": ["number", "null"], "description": "Satin width (strokes and borders), appliqué cover width, or blanket prong length." },
                     "split_mm": { "type": ["number", "null"], "description": "Satin auto-split: split stitches longer than this (0 = off; default 7)." },
+                    "lean": { "type": ["number", "null"], "description": "Satin: how far the stitches lean from square across the column, degrees (−60 to 60; default 0). A few degrees keeps stitches from sinking between a knit's rows; more shows a slant." },
                     "border": { "type": ["boolean", "null"], "description": "Satin on a filled shape: true = along its outline, false = across it as a column." },
                     "spiral": { "type": ["boolean", "null"], "description": "Contour fill as one spiral out from the center (or the start point) instead of rings." },
                     "underlay": { "type": ["boolean", "null"] },
                     "satin_underlay": { "description": "Satin underlay passes, or \"auto\".", "oneOf": [{ "type": "array", "items": { "type": "string", "enum": ["center", "contour", "zigzag"] } }, { "type": "string", "enum": ["auto"] }] },
                     "short_stitches": { "type": ["boolean", "null"] },
-                    "repeats": { "type": ["integer", "null"], "description": "Running stitch passes: 1 or 3 (bean)." },
+                    "repeats": { "type": ["integer", "null"], "description": "Running stitch passes over the line, 1 to 9: 1 is a single run, 3 a triple run (bolder). An even number ends back where it started." },
                     "color": { "type": ["string", "null"], "description": "Thread color #rrggbb, or null for the SVG's color." },
                     "start": { "type": ["number", "null"], "description": "Where sewing starts: 0–1 along the object's outline (fills: the outer ring from its first point; lines: from their start). Null: the planner chooses." },
                     "end": { "type": ["number", "null"], "description": "Where sewing ends, 0–1 along the outline (the thread goes on from there to the next object)." },
                     "trim": { "type": ["boolean", "null"], "description": "Cut the thread after this object even if the next one is close." },
-                    "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." }
+                    "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." },
+                    "hidden": { "type": ["boolean", "null"], "description": "Hide the object: it isn't shown or sewn, and keeps its stitch settings for when it's shown again." },
+                    "locked": { "type": ["boolean", "null"], "description": "Lock the object: the person can't select or move it on the canvas (a background, so dragging over it selects what's on top). It sews as usual, and these tools still change it." }
                 },
                 "required": ["object"]
             }
@@ -311,13 +333,24 @@ pub fn tool_specs() -> Value {
                 "type": "object",
                 "properties": {
                     "fabric": { "type": "string", "enum": fabrics, "description": "Fabric preset; sets default densities and compensation." },
-                    "hoop": { "type": "string", "enum": hoops },
+                    "machine": { "type": "string", "description": "The machine the design is for: an id or name from list_machines, or \"none\". Sets the hoop to the machine's default (a design already in one of its hoops stays there) unless hoop is given too, sets min_stitch_mm and lock to the machine's (the usual ones if it has none) unless given too, and makes the machine's file format the default for export." },
+                    "min_stitch_mm": { "type": "number", "description": "No stitch shorter than this (0.1 to 1 mm; 0.1 is the usual), for machines that drop short stitches. Fill rows closer together than this are sewn in alternating passes and other short stitches merged, in the plan and in exported files. Choosing a machine sets it." },
+                    "narrow_satin_mm": { "type": "number", "description": "Satins narrower than this on average (mm) get a too-narrow warning from the checks; 1 is the usual, 0 never warns. Set it to what sews cleanly on the fabric (0 to 3). Stitches don't depend on it." },
+                    "lock": { "type": "object", "description": "The lock (tie-in and tie-off) stitches in exported files: style back (back and forth), triangle or none; each stitch's length (0.2 to 2 mm, never shorter than min_stitch_mm); how many (twos for back, threes for triangle). The usual is back, 0.4 mm, 4. Choosing a machine sets it.", "properties": { "style": { "type": "string", "enum": ["back", "triangle", "none"] }, "length_mm": { "type": "number" }, "count": { "type": "integer" } } },
+                    "hoop": { "type": "string", "description": format!("The hoop's sewing field, width by height in mm. Standard hoops: {}. Any other size is a custom hoop, e.g. 150x220 (each side 10 to 1000 mm).", hoops.join(", ")) },
                     "remove_overlaps": { "type": "boolean", "description": "Skip fill hidden under later objects." },
                     "hat_order": { "type": "boolean", "description": "Sew center-out and bottom-up (for caps)." },
+                    "over_sewn": { "type": "boolean", "description": "Where the thread can't get from one part of an object to the next out of sight (under stitches still to come, or under what's sewn later), sew it over the fill already sewn instead of cutting it: fewer trims, but the running stitch lies on top of the fill. Default false: cut." },
                     "connect_mm": { "type": "number", "description": "Sew across gaps up to this long (mm), between objects or the separate parts of one, with running stitches instead of cutting the thread, where there is no way round out of sight (under a fill or what is sewn on top: that travel is made anyway); 0 cuts those." },
                     "preview_color": { "type": "string", "description": "Fabric color for previews, #rrggbb (e.g. the hat's color)." }
                 }
             }
+        }),
+        json!({
+            "name": "list_machines",
+            "description": "The machines a document can be set up for (set_document's machine): ZigZag's and the user's own. Each has its hoops (width by height in mm), the hoop a new design starts in, the file format it reads if known, the shortest stitch and locks it asks for if any, its link if ZigZag sends designs straight to it (skitch: send_to_skitch; the rest take an exported file), and whether it has been sewn on from ZigZag. Also the document's machine and the one new documents start with.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true }
         }),
         json!({
             "name": "render_preview",
@@ -361,8 +394,8 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "export",
-            "description": "Write a machine file: pes (Brother, Baby Lock), dst (Tajima, most commercial machines), exp (Melco, Bernina), jef (Janome), vp3 (Husqvarna Viking, Pfaff), pec, or pen (raw Skitch stream). Or html: a printable production worksheet (picture, size, time, thread list with Brother/Janome names).",
-            "inputSchema": { "type": "object", "properties": { "format": { "type": "string", "enum": ["pes", "dst", "exp", "jef", "vp3", "pec", "pen", "html"] }, "path": { "type": "string", "description": "Absolute output path." } }, "required": ["format", "path"] }
+            "description": "Write a machine file: pes (Brother, Baby Lock), dst (Tajima, most commercial machines), exp (Melco, Bernina), jef (Janome), vp3 (Husqvarna Viking, Pfaff), pec, or pen (raw Skitch stream). Or html: a printable production worksheet (picture, size, time, thread list with Brother/Janome names). Without a format, the one the path ends in (.dst), or else the one the document's machine reads.",
+            "inputSchema": { "type": "object", "properties": { "format": { "type": "string", "enum": ["pes", "dst", "exp", "jef", "vp3", "pec", "pen", "html"] }, "path": { "type": "string", "description": "Absolute output path." }, "objects": { "type": "boolean", "description": "Also write PATH.objects.json beside a machine file: which object each stitch, jump and trim in it is for (the objects, and the runs of commands for each, numbered as the file has them), so a checker can name the shape behind a stitch. Not for pen or html. Default false." } }, "required": ["path"] }
         }),
         json!({
             "name": "trace_image",
@@ -372,7 +405,7 @@ pub fn tool_specs() -> Value {
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path of the image." },
                     "colors": { "type": "integer", "description": "Thread colors, 2–10. Default: found automatically." },
-                    "width_mm": { "type": "number", "description": "Width of the traced artwork. Default: 80% of the hoop." },
+                    "width_mm": { "type": "number", "description": "Width of the whole image, mm (the traced shapes are narrower when a white margin is left out). Default: 80% of the hoop." },
                     "x_mm": { "type": "number", "description": "Center x (mm from hoop center). Default 0." },
                     "y_mm": { "type": "number", "description": "Center y. Default 0." },
                     "remove_background": { "type": "boolean", "description": "Leave out white areas. Default true." },
@@ -381,7 +414,7 @@ pub fn tool_specs() -> Value {
                     "line_width_mm": { "type": "number", "description": "With lines: the widest line traced as a line. Default 1.5." },
                     "detail": { "type": "number", "description": "0–100, how closely outlines follow the pixels. Default 60." },
                     "speckle_mm": { "type": "number", "description": "Drop areas smaller than this across. Default 1." },
-                    "replace": { "type": "boolean", "description": "Start a new document with only the trace. Default false." }
+                    "replace": { "type": "boolean", "description": "Start a new document with only the trace, keeping the document settings (fabric, hoop, machine, preview color). Default false." }
                 },
                 "required": ["path"]
             }
@@ -392,7 +425,7 @@ pub fn tool_specs() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "objects": { "type": "array", "items": obj_schema(), "description": "Objects to round." },
+                    "objects": { "description": "The objects to round: one (index or name) or a list of them.", "oneOf": [{ "type": "integer" }, { "type": "string" }, { "type": "array", "items": { "oneOf": [{ "type": "integer" }, { "type": "string" }] } }] },
                     "radius_mm": { "type": "number", "description": "Corner radius. Default 1.5." },
                     "kind": { "type": "string", "enum": ["round", "inverted", "chamfer"], "description": "Default round." }
                 },
@@ -405,7 +438,7 @@ pub fn tool_specs() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "objects": { "type": "array", "items": obj_schema(), "description": "Objects to simplify." },
+                    "objects": { "description": "The objects to simplify: one (index or name) or a list of them.", "oneOf": [{ "type": "integer" }, { "type": "string" }, { "type": "array", "items": { "oneOf": [{ "type": "integer" }, { "type": "string" }] } }] },
                     "level": { "type": "number", "description": "0–100: 0 for the fewest points, 100 to stay closest to the original (each 10 halves how far the outline may move; 50 is 1 pt). Default: Auto, the level for the objects' size." }
                 },
                 "required": ["objects"]
@@ -427,7 +460,7 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "batch",
-            "description": "Run several tool calls in one go, in order. Atomic by default: if any step fails nothing changes, and the whole batch is one undo step. A string argument \"$N.field\" (e.g. \"$0.added.0.name\") is replaced by that field of step N's JSON result; write \"$$\" for a literal \"$\". open_file and undo can't run in an atomic batch. The stitches are planned once, at the end (and before any step that reads them: get_design, render_preview, check_design, export), so stitch counts in other steps' results are from before the batch.",
+            "description": "Run several tool calls in one go, in order. Atomic by default: if any step fails nothing changes, and the whole batch is one undo step. A string argument \"$N.field\" (e.g. \"$0.added.0.name\") is replaced by that field of step N's JSON result; write \"$$\" for a literal \"$\". A step is {\"tool\": name, \"arguments\": {…}}. open_file, new_document, switch_document and undo can't run in an atomic batch, nor a batch in a batch. The stitches are planned once, at the end (and before any step that reads them: get_design, render_preview, check_design, export), so stitch counts in other steps' results are from before the batch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -443,7 +476,7 @@ pub fn tool_specs() -> Value {
                             "required": ["tool"]
                         }
                     },
-                    "atomic": { "type": "boolean", "description": "Roll everything back if a step fails, and undo as one step. Default true." },
+                    "atomic": { "type": "boolean", "description": "Roll everything back if a step fails, and undo as one step. False: stop at the step that fails and keep the ones before it. Default true." },
                     "label": { "type": "string", "description": "What the batch did, shown to the person." }
                 },
                 "required": ["steps"]
@@ -453,15 +486,18 @@ pub fn tool_specs() -> Value {
     // Hints for clients: which tools only read, and which can lose work.
     for t in &mut tools {
         let name = t["name"].as_str().unwrap_or("").to_string();
-        let read_only = matches!(
-            name.as_str(),
-            "get_design"
-                | "list_fonts"
-                | "render_preview"
-                | "check_design"
-                | "get_svg"
-                | "list_documents"
-        );
+        let read_only = only_reads(&name);
+        // Every tool that changes something can answer in a line.
+        if !read_only {
+            t["inputSchema"]["properties"]["terse"] = json!({
+                "type": "boolean",
+                "description": if name == "batch" {
+                    "Answer in a few lines instead of every step's full result: ok, how many steps ran, the names of objects added, the results of steps that only read (get_design, check_design, …), and new_problems (design problems that weren't there before the batch). Later steps can still use earlier results. Default false."
+                } else {
+                    "Answer in a line instead of the full result: ok, the names of any objects added, and new_problems (design problems that weren't there before this call). Default false."
+                }
+            });
+        }
         let destructive = matches!(
             name.as_str(),
             "delete_object" | "open_file" | "export" | "save"
@@ -476,7 +512,7 @@ pub fn tool_specs() -> Value {
     }
     tools.push(json!({
         "name": "send_to_skitch",
-        "description": "Send the design to the connected Brother Skitch (the studio's Skitch window connects; ask the person to connect there first if machine_status says it isn't). The window then walks the person through tracing the outline and sewing. Check the design and get the person's go-ahead first.",
+        "description": "Send the design to the connected Brother Skitch, for a document whose machine is a Skitch or that has none (the studio's Skitch window connects; ask the person to connect there first if machine_status says it isn't). The window then walks the person through tracing the outline and sewing. Check the design and get the person's go-ahead first.",
         "inputSchema": { "type": "object", "properties": {} },
         "annotations": { "destructiveHint": false, "openWorldHint": true }
     }));
@@ -487,6 +523,50 @@ pub fn tool_specs() -> Value {
         "annotations": { "readOnlyHint": true }
     }));
     Value::Array(tools)
+}
+
+/// Tools that only look: they change nothing, and their results are what
+/// was asked for.
+fn only_reads(name: &str) -> bool {
+    matches!(
+        name,
+        "get_design"
+            | "list_fonts"
+            | "render_preview"
+            | "check_design"
+            | "get_svg"
+            | "list_documents"
+            | "list_machines"
+    )
+}
+
+/// A problem's message without its measurements (`Satin only # mm wide…`):
+/// the same problem a little bigger or smaller isn't a new one.
+fn problem_kind(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_ascii_digit() {
+            if !out.ends_with('#') {
+                out.push('#');
+            }
+        } else if c == '.' && out.ends_with('#') && chars.peek().is_some_and(char::is_ascii_digit) {
+            // (A decimal point inside a number.)
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The names of the objects a result says were added, if it says.
+fn added_names(result: &Value) -> Vec<Value> {
+    result["added"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|o| o.get("name").cloned().unwrap_or_else(|| o.clone()))
+        .collect()
 }
 
 /// A tool result's text.
@@ -627,6 +707,14 @@ impl Studio {
                 if let Some(i) = self.doc.shapes.iter().position(|x| x.id == *s) {
                     return Ok(i);
                 }
+                // The name as it's written in an id: `Face_mask`, or the whole
+                // id with its settings (`Face_mask_fill_a=45`), for "Face mask".
+                // An agent that wrote the SVG knows its objects by those.
+                let words = zigzag::svg::name_words(s).join(" ").to_lowercase();
+                let lower = if words.is_empty() { lower } else { words };
+                if let Some(i) = self.names.iter().position(|x| x.to_lowercase() == lower) {
+                    return Ok(i);
+                }
                 let hits: Vec<usize> = self
                     .names
                     .iter()
@@ -693,6 +781,7 @@ impl Studio {
                 );
                 settings.insert("short_stitches".into(), json!(p.short_stitches_on()));
                 settings.insert("split_mm".into(), json!(p.satin_split().unwrap_or(0.0)));
+                settings.insert("lean".into(), json!(p.satin_lean()));
             }
             Kind::Run => {
                 settings.insert("length_mm".into(), json!(p.run_len(&f)));
@@ -768,6 +857,13 @@ impl Studio {
                 }
             }
         }
+        // (Said when they're so: hidden isn't sewn, locked can't be
+        // selected on the canvas.)
+        for (k, on) in [("hidden", p.hidden()), ("locked", p.locked())] {
+            if on {
+                settings.insert(k.into(), json!(true));
+            }
+        }
         json!({
             "index": i,
             "name": self.names.get(i),
@@ -798,6 +894,29 @@ impl Studio {
         })
     }
 
+    /// `list_machines`: every machine, the document's and the one new
+    /// documents start with.
+    fn machines_json(&self) -> Value {
+        let hoop = zigzag::document::format_hoop;
+        json!({
+            "machines": self.machines.all().map(|p| json!({
+                "id": p.id,
+                "name": p.name,
+                "hoops": p.hoops.iter().map(|&h| hoop(h)).collect::<Vec<_>>(),
+                "default_hoop": hoop(p.default_hoop),
+                "format": p.format,
+                "min_stitch_mm": p.min_stitch_mm,
+                "lock": p.lock.map(zigzag::machine::profile::lock_json),
+                "link": p.link,
+                "sewn_from_zigzag": p.tested,
+                "source": p.source,
+                "yours": self.machines.is_mine(&p.id),
+            })).collect::<Vec<_>>(),
+            "document": self.doc.settings.machine,
+            "new_documents": self.machines.current,
+        })
+    }
+
     fn design_json(&self) -> Value {
         let b = self.design.bounds();
         let total = self.design.stitch_count();
@@ -811,8 +930,18 @@ impl Studio {
                 "unsaved_changes": self.modified,
                 "fabric": fabric.id,
                 "fabric_name": fabric.name,
-                "hoop": { "id": HOOPS[self.doc.settings.hoop.min(2)].0, "width_mm": hw, "height_mm": hh },
+                "hoop": { "id": zigzag::document::format_hoop((hw, hh)), "name": self.hoop_label(), "width_mm": hw, "height_mm": hh },
+                "machine": self.doc.settings.machine.as_ref().map(|id| json!({
+                    "id": id,
+                    "name": self.machine_label(),
+                    "format": self.machine().and_then(|p| p.format),
+                })),
+                "min_stitch_mm": self.doc.settings.min_stitch_mm,
+                "narrow_satin_mm": self.doc.settings.narrow_satin_mm,
+                "lock": zigzag::machine::profile::lock_json(self.doc.settings.lock),
                 "remove_overlaps": self.doc.settings.remove_overlaps,
+                "connect_mm": self.doc.settings.connect_mm,
+                "over_sewn": self.doc.settings.over_sewn,
                 "hat_order": self.doc.settings.hat_order,
                 "preview_color": hex(self.doc.settings.cloth),
             },
@@ -845,6 +974,9 @@ impl Studio {
         if (reads || !self.batching) && self.dirty_needs_plan() {
             self.replan();
         }
+        // A short answer was asked for: what's wrong now, to tell what's new.
+        let terse = args.get("terse").and_then(Value::as_bool) == Some(true);
+        let before = (terse && name != "batch").then(|| self.problems());
         let result = match name {
             "batch" => return self.tool_batch(args),
             "trace_image" => self.tool_trace_image(args),
@@ -938,6 +1070,7 @@ impl Studio {
                 _ => Err("path must be absolute".into()),
             },
             "list_documents" => Ok(ToolResult::json(&self.documents_json())),
+            "list_machines" => Ok(ToolResult::json(&self.machines_json())),
             "switch_document" => {
                 let infos = self.tab_infos();
                 let i = match (
@@ -985,7 +1118,9 @@ impl Studio {
                     .to_lowercase();
                 let fonts: Vec<String> = zigzag::document::font_families()
                     .into_iter()
-                    .filter(|f| f.to_lowercase().contains(&q))
+                    // (Names that begin with a dot are the system's own
+                    // faces for its interface, not ones to set type in.)
+                    .filter(|f| !f.starts_with('.') && f.to_lowercase().contains(&q))
                     .collect();
                 Ok(ToolResult::json(
                     &json!({ "default": zigzag::document::default_font(), "fonts": fonts }),
@@ -1034,6 +1169,13 @@ impl Studio {
                 {
                     return ToolResult::error("path must be absolute");
                 }
+                if let Some(p) = &path
+                    && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+                {
+                    return ToolResult::error(
+                        "save writes an SVG: the path must end in .svg (for a machine file, use export)",
+                    );
+                }
                 if path.is_none() && self.doc.path.is_none() {
                     return ToolResult::error(
                         "this document has never been saved; pass an absolute path ending in .svg",
@@ -1047,16 +1189,51 @@ impl Studio {
                 }
             }
             "export" => {
-                let fmt = args.get("format").and_then(Value::as_str).unwrap_or("");
-                match args.get("path").and_then(Value::as_str).map(PathBuf::from) {
+                // No format: the one the path ends in, or else the one the
+                // document's machine reads.
+                let path = args.get("path").and_then(Value::as_str).map(PathBuf::from);
+                let named = path
+                    .as_ref()
+                    .and_then(|p| p.extension())
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .and_then(|e| {
+                        zigzag::machine::profile::machine_format(&e)
+                            .or((e == "html").then_some("html"))
+                    });
+                let fmt = match args.get("format").and_then(Value::as_str) {
+                    Some(f) => Some(f),
+                    None => named.or(self.machine().and_then(|p| p.format)),
+                };
+                match path {
+                    _ if fmt.is_none() => Err(
+                        "format is required: the path doesn't end in one (.pes, .dst, …) and the document has no machine that says which file it reads"
+                            .into(),
+                    ),
                     Some(p) if p.is_absolute() => self
-                        .export_to(fmt, &p)
-                        .map(|_| {
-                            ToolResult::text(format!(
+                        .export_to(fmt.unwrap_or(""), &p)
+                        .and_then(|_| {
+                            let mut said = format!(
                                 "Wrote {} ({} stitches).",
                                 p.display(),
                                 self.design.stitch_count()
-                            ))
+                            );
+                            // The map of its commands to the objects.
+                            if args.get("objects").and_then(Value::as_bool) == Some(true) {
+                                let file = p.file_name().unwrap_or_default().to_string_lossy();
+                                let map = self
+                                    .doc
+                                    .object_map(&self.design, fmt.unwrap_or(""), &file)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "the file was written, but only machine files other than pen have an object map"
+                                        )
+                                    })?;
+                                let to = zigzag::document::Document::object_map_path(&p);
+                                std::fs::write(&to, serde_json::to_string_pretty(&map)?)?;
+                                said.push_str(&format!(" Wrote {}.", to.display()));
+                            }
+                            Ok(ToolResult::text(said))
                         })
                         .map_err(|e| format!("{e:#}")),
                     _ => Err("path must be absolute".into()),
@@ -1072,13 +1249,71 @@ impl Studio {
             // Later steps name objects as they are now (names are cheap).
             self.names = zigzag::svg::display_names(&self.doc.shapes);
         }
-        result.unwrap_or_else(ToolResult::error)
+        let result = result.unwrap_or_else(ToolResult::error);
+        match before {
+            Some(before) if !result.is_error => self.terse_result(result, &before),
+            _ => result,
+        }
+    }
+
+    /// The design's problems, as (object, kind of problem): which object
+    /// is which number can change, and so can a measurement in the message;
+    /// its name and what's wrong with it don't.
+    fn problems(&self) -> Vec<(Option<String>, String)> {
+        self.issues
+            .iter()
+            .map(|i| {
+                (
+                    i.shape.and_then(|s| self.names.get(s).cloned()),
+                    problem_kind(&i.message),
+                )
+            })
+            .collect()
+    }
+
+    /// The problems there are now that weren't in `before`.
+    fn new_problems(&self, before: &[(Option<String>, String)]) -> Vec<Value> {
+        self.issues
+            .iter()
+            .filter(|i| {
+                let object = i.shape.and_then(|s| self.names.get(s).cloned());
+                let kind = problem_kind(&i.message);
+                !before.iter().any(|(o, m)| *o == object && *m == kind)
+            })
+            .map(|i| issue_json(i, &self.names))
+            .collect()
+    }
+
+    /// A tool's result in a line: that it worked, what it added, and what
+    /// it broke. (A result that's already a sentence stays as it is; inside
+    /// a batch the stitches aren't planned yet, so the batch says what's new.)
+    fn terse_result(&self, full: ToolResult, before: &[(Option<String>, String)]) -> ToolResult {
+        let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(&text_of(&full)) else {
+            return full;
+        };
+        let mut out = json!({ "ok": true });
+        let added = added_names(&value);
+        if !added.is_empty() {
+            out["added"] = Value::Array(added);
+        }
+        if !self.batching {
+            out["new_problems"] = Value::Array(self.new_problems(before));
+        }
+        let mut r = ToolResult::json(&out);
+        r.content.extend(
+            full.content
+                .into_iter()
+                .filter(|c| matches!(c, Content::Image(_))),
+        );
+        r
     }
 
     /// Several tool calls in order; atomic: all or nothing, one undo step.
     fn tool_batch(&mut self, args: &Value) -> ToolResult {
+        let terse = args.get("terse").and_then(Value::as_bool) == Some(true);
+        let before = terse.then(|| self.problems());
         let was = std::mem::replace(&mut self.batching, true);
-        let r = self.tool_batch_steps(args);
+        let mut r = self.tool_batch_steps(args);
         self.batching = was;
         if !was && self.undo.len() > crate::app::UNDO_STEPS {
             let extra = self.undo.len() - crate::app::UNDO_STEPS;
@@ -1086,6 +1321,35 @@ impl Studio {
         }
         if !was && (self.dirty || self.dirty_needs_plan()) {
             self.replan();
+        }
+        // The short answer: what ran, what it added, what the steps that
+        // only read found, and what's wrong now that wasn't.
+        if let Some(before) = before.filter(|_| !r.is_error) {
+            let full: Value = serde_json::from_str(&text_of(&r)).unwrap_or(Value::Null);
+            let steps = full["results"].as_array().cloned().unwrap_or_default();
+            let mut out = json!({ "ok": true, "steps": steps.len() });
+            let added: Vec<Value> = steps
+                .iter()
+                .flat_map(|s| added_names(&s["result"]))
+                .collect();
+            if !added.is_empty() {
+                out["added"] = Value::Array(added);
+            }
+            let read: Vec<Value> = steps
+                .iter()
+                .filter(|s| s["tool"].as_str().is_some_and(only_reads))
+                .cloned()
+                .collect();
+            if !read.is_empty() {
+                out["results"] = Value::Array(read);
+            }
+            out["new_problems"] = Value::Array(self.new_problems(&before));
+            let images: Vec<Content> = std::mem::take(&mut r.content)
+                .into_iter()
+                .filter(|c| matches!(c, Content::Image(_)))
+                .collect();
+            r = ToolResult::json(&out);
+            r.content.extend(images);
         }
         r
     }
@@ -1110,6 +1374,22 @@ impl Studio {
         let mut images = Vec::new();
         for (k, step) in steps.iter().enumerate() {
             let tool = step.get("tool").and_then(Value::as_str).unwrap_or("");
+            // (A step with `args` or `params` for `arguments` would run with
+            // none, and fail for want of one of them: say what a step is.)
+            let odd = step
+                .as_object()
+                .and_then(|o| {
+                    o.keys()
+                        .find(|k| !matches!(k.as_str(), "tool" | "arguments"))
+                })
+                .map(|k| {
+                    format!(
+                        "a step doesn't take `{k}`: it is {{\"tool\": name, \"arguments\": {{…}}}}."
+                    )
+                })
+                .or((tool.is_empty()).then(|| {
+                    "a step needs a `tool`: it is {\"tool\": name, \"arguments\": {…}}.".to_string()
+                }));
             let failed = |msg: String| {
                 if atomic {
                     format!(
@@ -1122,12 +1402,15 @@ impl Studio {
             // Opening a file clears the history, so it couldn't be rolled
             // back; nor could a step in another document (the batch's undo
             // step and its rollback belong to the one it began in).
-            let outcome = if tool == "batch"
+            let outcome = if let Some(odd) = odd {
+                Err(odd)
+            } else if tool == "batch"
                 || (atomic
                     && matches!(
                         tool,
                         "undo" | "open_file" | "switch_document" | "new_document"
-                    )) {
+                    ))
+            {
                 Err(format!("`{tool}` can't run inside an atomic batch."))
             } else {
                 resolve_refs(step.get("arguments").unwrap_or(&json!({})), &results)
@@ -1242,7 +1525,11 @@ impl Studio {
         let mut added = Vec::new();
         self.structural(|d| {
             if replace {
+                // A new document for the same job: its fabric, hoop,
+                // machine and the rest stay.
+                let settings = std::mem::take(&mut d.settings);
                 *d = Document::empty();
+                d.settings = settings;
             }
             added = d.add_svg(&t.svg, place)?;
             Ok(())
@@ -1264,14 +1551,7 @@ impl Studio {
 
     fn tool_simplify(&mut self, args: &Value) -> Result<ToolResult, String> {
         use zigzag::pathtools;
-        let list = args
-            .get("objects")
-            .and_then(Value::as_array)
-            .ok_or("`objects` must be a list")?;
-        let idx: Vec<usize> = list
-            .iter()
-            .map(|v| self.resolve(Some(v)))
-            .collect::<Result<_, _>>()?;
+        let idx = self.resolve_many(args.get("objects"))?;
         let level = match args.get("level") {
             None | Some(Value::Null) => {
                 let mut b = zigzag::geom::Bounds::empty();
@@ -1357,14 +1637,7 @@ impl Studio {
     }
 
     fn tool_round_corners(&mut self, args: &Value) -> Result<ToolResult, String> {
-        let list = args
-            .get("objects")
-            .and_then(Value::as_array)
-            .ok_or("`objects` must be a list")?;
-        let idx: Vec<usize> = list
-            .iter()
-            .map(|v| self.resolve(Some(v)))
-            .collect::<Result<_, _>>()?;
+        let idx = self.resolve_many(args.get("objects"))?;
         let r = args.get("radius_mm").and_then(Value::as_f64).unwrap_or(1.5);
         if !(r.is_finite() && r > 0.0) {
             return Err("radius_mm must be a positive number".into());
@@ -1428,7 +1701,11 @@ impl Studio {
         let mut added = Vec::new();
         self.structural(|d| {
             if replace {
+                // A new document for the same job: its fabric, hoop,
+                // machine and the rest stay.
+                let settings = std::mem::take(&mut d.settings);
                 *d = Document::empty();
+                d.settings = settings;
             }
             added = d.add_svg(svg, place)?;
             Ok(())
@@ -1540,6 +1817,11 @@ impl Studio {
         if let Some(v) = num("split_mm")? {
             p.split = v.map(|x| x.max(0.0));
         }
+        if let Some(v) = num("lean")? {
+            p.lean = v
+                .map(|x| x.clamp(-zigzag::params::MAX_LEAN, zigzag::params::MAX_LEAN))
+                .filter(|x| *x != 0.0);
+        }
         if let Some(v) = num("repeats")? {
             p.repeats = v.map(|x| x.clamp(1.0, 9.0) as u32);
         }
@@ -1557,6 +1839,12 @@ impl Studio {
         }
         if let Some(v) = flag("stop")? {
             p.stop = v.filter(|&x| x);
+        }
+        if let Some(v) = flag("hidden")? {
+            p.hide = v.filter(|&x| x);
+        }
+        if let Some(v) = flag("locked")? {
+            p.lock = v.filter(|&x| x);
         }
         match args.get("satin_underlay") {
             None => {}
@@ -1640,10 +1928,12 @@ impl Studio {
             }
             (sx, sy) = (k, k);
         }
-        match (
-            num("width_mm").filter(|v| *v > 0.0),
-            num("height_mm").filter(|v| *v > 0.0),
-        ) {
+        for k in ["width_mm", "height_mm"] {
+            if num(k).is_some_and(|v| v <= 0.0) {
+                return Err(format!("{k} must be positive"));
+            }
+        }
+        match (num("width_mm"), num("height_mm")) {
             (Some(w), Some(h)) => {
                 (sx, sy) = (
                     w * 10.0 / b.width().max(1e-6),
@@ -1723,10 +2013,43 @@ impl Studio {
             ))?;
             s.fabric = id.to_string();
         }
+        if let Some(m) = args.get("machine") {
+            let name = m.as_str().ok_or("machine must be a string")?;
+            if name.trim().eq_ignore_ascii_case("none") {
+                s.machine = None;
+            } else {
+                let p = self.machines.named(name).ok_or(format!(
+                    "unknown machine; use \"none\" or one of {} (see list_machines)",
+                    self.machines
+                        .all()
+                        .map(|p| p.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))?;
+                p.apply(&mut s, !self.doc.shapes.is_empty());
+            }
+        }
+        if let Some(v) = args.get("min_stitch_mm") {
+            s.min_stitch_mm = v
+                .as_f64()
+                .filter(|m| zigzag::document::MIN_STITCH_MM.contains(m))
+                .ok_or("min_stitch_mm must be from 0.1 to 1")?;
+        }
+        if let Some(v) = args.get("narrow_satin_mm") {
+            s.narrow_satin_mm = v
+                .as_f64()
+                .filter(|m| zigzag::document::NARROW_SATIN_MM.contains(m))
+                .ok_or("narrow_satin_mm must be from 0 to 3")?;
+        }
+        if let Some(v) = args.get("lock") {
+            s.lock = zigzag::machine::profile::lock_from(v, s.lock).ok_or(
+                "lock must have a style of back, triangle or none, and may have length_mm and count",
+            )?;
+        }
         if let Some(h) = args.get("hoop") {
             let id = h.as_str().ok_or("hoop must be a string")?;
-            s.hoop = HOOPS.iter().position(|x| x.0 == id).ok_or(format!(
-                "unknown hoop; use one of {}",
+            s.hoop = zigzag::document::parse_hoop(id).ok_or(format!(
+                "hoop must be width by height in mm, each side 10 to 1000 (e.g. 150x220); the standard hoops are {}",
                 HOOPS.iter().map(|h| h.0).collect::<Vec<_>>().join(", ")
             ))?;
         }
@@ -1735,6 +2058,9 @@ impl Studio {
         }
         if let Some(v) = args.get("hat_order") {
             s.hat_order = v.as_bool().ok_or("hat_order must be true or false")?;
+        }
+        if let Some(v) = args.get("over_sewn") {
+            s.over_sewn = v.as_bool().ok_or("over_sewn must be true or false")?;
         }
         if let Some(v) = args.get("connect_mm") {
             s.connect_mm = v
@@ -1768,7 +2094,14 @@ impl Studio {
             .get("show_jumps")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let fit_hoop = args.get("fit").and_then(Value::as_str) == Some("hoop");
+        let fit_hoop = match args.get("fit") {
+            None => false,
+            Some(v) => match v.as_str() {
+                Some("design") => false,
+                Some("hoop") => true,
+                _ => return Err("fit must be design or hoop".into()),
+            },
+        };
         let opt = PreviewOptions {
             hoop_mm: fit_hoop.then(|| self.hoop_dims()),
             background: self.doc.settings.cloth,
@@ -1812,6 +2145,20 @@ impl Studio {
 
 impl Studio {
     fn tool_send_to_skitch(&mut self) -> Result<ToolResult, String> {
+        // (A document set up for a machine that takes a file isn't sent.)
+        if !self.sends_direct() {
+            return Err(format!(
+                "This document is set up for {}, which ZigZag doesn't send to: export a file for it instead (or change the document's machine with set_document).",
+                self.machine_label()
+                    .or_else(|| self
+                        .machines
+                        .current
+                        .as_deref()
+                        .and_then(|id| self.machines.find(id))
+                        .map(|p| p.name.clone()))
+                    .unwrap_or("a machine".into())
+            ));
+        }
         let s = self.machine.snapshot();
         self.machine.open = true;
         if s.link != crate::machine::Link::Connected {
@@ -1931,6 +2278,7 @@ mod tests {
             .collect();
         for want in [
             "get_design",
+            "list_machines",
             "add_svg",
             "set_object",
             "render_preview",
@@ -2031,6 +2379,394 @@ mod tests {
     }
 
     #[test]
+    fn agents_can_set_a_document_up_for_a_machine() {
+        let mut s = Studio::with_file(None, None);
+        let doc = |s: &mut Studio| ok(s.run_tool("get_design", &json!({})))["document"].clone();
+        assert!(doc(&mut s)["machine"].is_null());
+        let list = ok(s.run_tool("list_machines", &json!({})));
+        let melco = list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "melco-summit")
+            .unwrap();
+        assert_eq!(melco["hoops"], json!(["410x393"]));
+        assert_eq!(
+            (
+                &melco["format"],
+                &melco["yours"],
+                &melco["sewn_from_zigzag"]
+            ),
+            (&json!("exp"), &json!(false), &json!(false))
+        );
+        assert!(list["document"].is_null() && list["new_documents"].is_null());
+        // By name: an empty document goes to the machine's default hoop,
+        // which is named for the machine when no standard hoop is that size.
+        ok(s.run_tool("set_document", &json!({ "machine": "Melco Summit" })));
+        let d = doc(&mut s);
+        assert_eq!(
+            d["machine"],
+            json!({ "id": "melco-summit", "name": "Melco Summit", "format": "exp" })
+        );
+        assert_eq!(d["hoop"]["id"], "410x393");
+        assert_eq!(d["hoop"]["name"], "410 × 393 mm · Melco Summit");
+        // (Which machine new documents start with is the user's to say.)
+        assert_eq!(s.machines.current, None);
+        // Replacing the artwork keeps the document's settings.
+        ok(s.run_tool("set_document", &json!({ "fabric": "thin-cap" })));
+        ok(s.run_tool(
+            "add_svg",
+            &json!({ "svg": BADGE, "width_mm": 50.0, "replace": true }),
+        ));
+        let d = doc(&mut s);
+        assert_eq!(
+            (&d["machine"]["id"], &d["hoop"]["id"], &d["fabric"]),
+            (
+                &json!("melco-summit"),
+                &json!("410x393"),
+                &json!("thin-cap")
+            )
+        );
+        // Export without a format writes the file the machine reads.
+        let dir = std::env::temp_dir().join(format!("zigzag-machine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("badge.exp");
+        let r = s.run_tool("export", &json!({ "path": out.to_str().unwrap() }));
+        assert!(!r.is_error, "{}", text(&r));
+        let exp =
+            zigzag::formats::write_format_with(&s.design, "exp", &s.doc.settings.export_options())
+                .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), exp);
+        // A hoop given along with the machine is the hoop.
+        ok(s.run_tool(
+            "set_document",
+            &json!({ "machine": "brother-5x7", "hoop": "100x100" }),
+        ));
+        assert_eq!(doc(&mut s)["hoop"]["id"], "100x100");
+        // A design in a hoop the next machine has stays in it; in one it
+        // hasn't, it moves to that machine's default.
+        ok(s.run_tool("set_document", &json!({ "machine": "brother-pr" })));
+        assert_eq!(doc(&mut s)["hoop"]["id"], "100x100");
+        ok(s.run_tool("set_document", &json!({ "machine": "janome-550e" })));
+        assert_eq!(doc(&mut s)["hoop"]["id"], "200x360");
+        // No machine again: the hoop stays, and export needs its format,
+        // from the call or from what the path ends in.
+        ok(s.run_tool("set_document", &json!({ "machine": "none" })));
+        let d = doc(&mut s);
+        assert!(d["machine"].is_null());
+        assert_eq!(d["hoop"]["id"], "200x360");
+        let r = s.run_tool("export", &json!({ "path": out.to_str().unwrap() }));
+        assert!(!r.is_error, "{}", text(&r));
+        let plain = dir.join("badge");
+        let r = s.run_tool("export", &json!({ "path": plain.to_str().unwrap() }));
+        assert!(
+            r.is_error && text(&r).contains("format is required"),
+            "{}",
+            text(&r)
+        );
+        let r = s.run_tool("set_document", &json!({ "machine": "nope" }));
+        assert!(
+            r.is_error && text(&r).contains("melco-summit"),
+            "{}",
+            text(&r)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agents_can_set_the_shortest_stitch_and_the_locks() {
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool(
+            "add_svg",
+            &json!({ "svg": BADGE, "width_mm": 50.0, "replace": true }),
+        ));
+        let doc = |s: &mut Studio| ok(s.run_tool("get_design", &json!({})))["document"].clone();
+        let d = doc(&mut s);
+        assert_eq!(d["min_stitch_mm"], 0.1);
+        assert_eq!(
+            d["lock"],
+            json!({ "style": "back", "length_mm": 0.4, "count": 4 })
+        );
+        // The stitches of the file as written, shortest first.
+        let dir = std::env::temp_dir().join(format!("zigzag-minst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("badge.dst");
+        let shortest = |s: &mut Studio| {
+            let r = s.run_tool(
+                "export",
+                &json!({ "format": "dst", "path": out.to_str().unwrap() }),
+            );
+            assert!(!r.is_error, "{}", text(&r));
+            let data = std::fs::read(&out).unwrap();
+            let back = zigzag::formats::read::read_stitch_file(&data, "dst").unwrap();
+            let mut lens: Vec<f64> = Vec::new();
+            for b in &back.blocks {
+                for r in &b.runs {
+                    // (Not the needle going down where a jump landed:
+                    // that's no stitch, and reads back as no distance.)
+                    lens.extend(r.windows(2).map(|w| w[0].dist(w[1])).filter(|l| *l > 0.0));
+                }
+            }
+            (
+                lens.iter().copied().fold(f64::INFINITY, f64::min),
+                lens.len(),
+            )
+        };
+        let (usual, n_usual) = shortest(&mut s);
+        assert!(usual < 4.0, "the usual file has stitches under 0.4 mm");
+        // A machine that drops short stitches: none in the file, locks
+        // included, and about as many stitches as before.
+        ok(s.run_tool("set_document", &json!({ "machine": "melco-summit" })));
+        assert_eq!(doc(&mut s)["min_stitch_mm"], 0.4);
+        let (min, n) = shortest(&mut s);
+        assert!(min >= 4.0, "a {min} stitch");
+        assert!(n as f64 > n_usual as f64 * 0.97, "{n} of {n_usual}");
+        // Given values win over the machine's, and a lock can change in part.
+        let d = ok(s.run_tool(
+            "set_document",
+            &json!({ "machine": "melco-summit", "min_stitch_mm": 0.6, "lock": { "style": "triangle" } }),
+        ));
+        assert_eq!(d["min_stitch_mm"], 0.6);
+        assert_eq!(
+            d["lock"],
+            json!({ "style": "triangle", "length_mm": 0.4, "count": 6 })
+        );
+        let d = ok(s.run_tool(
+            "set_document",
+            &json!({ "lock": { "count": 3, "length_mm": 0.5 } }),
+        ));
+        assert_eq!(
+            d["lock"],
+            json!({ "style": "triangle", "length_mm": 0.5, "count": 3 })
+        );
+        let (min, _) = shortest(&mut s);
+        assert!(min >= 6.0, "a {min} stitch");
+        // No locks: fewer stitches, the same cuts.
+        let (_, with) = shortest(&mut s);
+        let d = ok(s.run_tool("set_document", &json!({ "lock": "none" })));
+        assert_eq!(d["lock"], json!({ "style": "none" }));
+        let (_, without) = shortest(&mut s);
+        assert!(without < with);
+        // A machine that says nothing of either puts the usual back.
+        let d = ok(s.run_tool("set_document", &json!({ "machine": "brother-5x7" })));
+        assert_eq!(d["min_stitch_mm"], 0.1);
+        assert_eq!(d["lock"]["style"], "back");
+        for bad in [
+            json!({ "min_stitch_mm": 3 }),
+            json!({ "lock": { "style": "knot" } }),
+        ] {
+            assert!(s.run_tool("set_document", &bad).is_error, "{bad}");
+        }
+        let list = ok(s.run_tool("list_machines", &json!({})));
+        let melco = list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "melco-summit")
+            .unwrap();
+        assert_eq!(melco["min_stitch_mm"], 0.4);
+        assert!(melco["lock"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_terse_answer_says_ok_what_was_added_and_what_is_newly_wrong() {
+        let mut s = Studio::with_file(None, None);
+        // Adding: the objects' names, not the objects.
+        let r = ok(s.run_tool(
+            "add_svg",
+            &json!({ "svg": BADGE, "width_mm": 50.0, "terse": true }),
+        ));
+        let added = r["added"].as_array().unwrap().clone();
+        assert!(
+            added.len() >= 3 && added.iter().all(Value::is_string),
+            "{r}"
+        );
+        assert_eq!(r["ok"], true);
+        assert!(r.get("total_objects").is_none(), "{r}");
+        let bar = added
+            .iter()
+            .find(|n| n.as_str().unwrap().contains("bar"))
+            .unwrap()
+            .clone();
+        // A change that breaks nothing: one line's worth.
+        let full = text(&s.run_tool("set_object", &json!({ "object": bar, "kind": "satin" })));
+        let r = s.run_tool(
+            "set_object",
+            &json!({ "object": bar, "kind": "fill", "terse": true }),
+        );
+        assert_eq!(ok(r), json!({ "ok": true, "new_problems": [] }));
+        assert!(full.len() > 300, "the full answer is the whole object");
+        // One that does: the problem it made, once.
+        let r = ok(s.run_tool("set_document", &json!({ "hoop": "20x20", "terse": true })));
+        let new = r["new_problems"].as_array().unwrap();
+        assert_eq!(new.len(), 1, "{r}");
+        assert!(
+            new[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("the hoop sews")
+        );
+        let r = ok(s.run_tool("set_document", &json!({ "fabric": "knit", "terse": true })));
+        assert_eq!(r["new_problems"], json!([]), "still wrong, not newly wrong");
+        assert_eq!(
+            problem_kind("Design is 50.6 × 49.5 mm; the hoop sews 20 × 20 mm."),
+            "Design is # × # mm; the hoop sews # × # mm."
+        );
+        ok(s.run_tool("set_document", &json!({ "hoop": "100x100" })));
+        // A batch: the count, what was added, what the reading steps found
+        // and what's newly wrong; later steps still use earlier results.
+        let steps = json!([
+            { "tool": "add_svg", "arguments": { "svg": BADGE, "width_mm": 20.0, "x_mm": 30.0 } },
+            { "tool": "set_object", "arguments": { "object": "$0.added.0.name", "kind": "contour" } },
+            { "tool": "set_object", "arguments": { "object": "$0.added.1.name", "angle": 30 } },
+            { "tool": "check_design", "arguments": {} },
+        ]);
+        let before = s.doc.shapes.len();
+        let full = text(&s.run_tool("batch", &json!({ "steps": steps })));
+        ok(s.run_tool("undo", &json!({})));
+        assert_eq!(s.doc.shapes.len(), before);
+        let r = s.run_tool("batch", &json!({ "steps": steps, "terse": true }));
+        let short = text(&r);
+        let r = ok(r);
+        assert_eq!((&r["ok"], &r["steps"]), (&json!(true), &json!(4)));
+        assert_eq!(r["added"].as_array().unwrap().len(), added.len());
+        let kept = r["results"].as_array().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            (&kept[0]["step"], &kept[0]["tool"]),
+            (&json!(3), &json!("check_design"))
+        );
+        assert!(r["new_problems"].is_array());
+        assert!(
+            short.len() * 4 < full.len(),
+            "{} of {}",
+            short.len(),
+            full.len()
+        );
+        let first = s.doc.shapes.len() - added.len();
+        assert_eq!(s.doc.shapes[first].params.kind, Some(Kind::Contour));
+        // A sentence stays a sentence; a tool that only reads has nothing
+        // to cut short; a failure says what failed.
+        let dir = std::env::temp_dir().join(format!("zigzag-terse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("b.dst");
+        let r = s.run_tool(
+            "export",
+            &json!({ "format": "dst", "path": out.to_str().unwrap(), "terse": true }),
+        );
+        assert!(
+            !r.is_error && text(&r).starts_with("Wrote "),
+            "{}",
+            text(&r)
+        );
+        assert!(s.run_tool("get_design", &json!({ "terse": true })).is_error);
+        let r = s.run_tool("set_object", &json!({ "object": "nope", "terse": true }));
+        assert!(r.is_error);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agents_can_say_how_narrow_a_satin_may_be() {
+        let mut s = Studio::with_file(None, None);
+        // A 0.9 mm satin line.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><path id="stem_satin" d="M2 5 L38 5" fill="none" stroke="#111" stroke-width="0.9"/></svg>"##;
+        ok(s.run_tool("add_svg", &json!({ "svg": svg, "width_mm": 40.0 })));
+        let narrow = |s: &mut Studio| {
+            ok(s.run_tool("check_design", &json!({})))
+                .to_string()
+                .contains("too narrow to look smooth")
+        };
+        assert!(narrow(&mut s));
+        let d = ok(s.run_tool("set_document", &json!({ "narrow_satin_mm": 0.8 })));
+        assert_eq!(d["narrow_satin_mm"], 0.8);
+        assert!(!narrow(&mut s));
+        assert!(s.doc.to_svg().unwrap().contains("narrowsatin=0.8"));
+        assert!(
+            s.run_tool("set_document", &json!({ "narrow_satin_mm": 9 }))
+                .is_error
+        );
+        // And which way its stitches lean.
+        let r = ok(s.run_tool("set_object", &json!({ "object": 0, "lean": 8 })));
+        assert_eq!(r["settings"]["lean"], 8.0);
+        assert!(s.doc.to_svg().unwrap().contains("lean=8"));
+        let r = ok(s.run_tool("set_object", &json!({ "object": 0, "lean": 200 })));
+        assert_eq!(r["settings"]["lean"], 60.0);
+        let r = ok(s.run_tool("set_object", &json!({ "object": 0, "lean": null })));
+        assert_eq!(r["settings"]["lean"], 0.0);
+        assert!(!s.doc.to_svg().unwrap().contains("lean="));
+    }
+
+    #[test]
+    fn export_can_write_which_object_each_stitch_is_for() {
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool("add_svg", &json!({ "svg": BADGE, "width_mm": 50.0 })));
+        let dir = std::env::temp_dir().join(format!("zigzag-objects-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("badge.exp");
+        let map = dir.join("badge.exp.objects.json");
+        let r = s.run_tool(
+            "export",
+            &json!({ "format": "exp", "path": out.to_str().unwrap() }),
+        );
+        assert!(!r.is_error && !map.exists(), "not unless asked");
+        let r = s.run_tool(
+            "export",
+            &json!({ "format": "exp", "path": out.to_str().unwrap(), "objects": true }),
+        );
+        assert!(!r.is_error, "{}", text(&r));
+        assert!(text(&r).contains("badge.exp.objects.json"));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&map).unwrap()).unwrap();
+        assert_eq!(v["file"], "badge.exp");
+        let names: Vec<String> = v["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.contains("bar")), "{names:?}");
+        assert!(v["ranges"].as_array().unwrap().len() >= names.len());
+        // The Skitch's stream has no such map: the file is written, and
+        // the answer says the map wasn't.
+        let pen = dir.join("badge.pen");
+        let r = s.run_tool(
+            "export",
+            &json!({ "format": "pen", "path": pen.to_str().unwrap(), "objects": true }),
+        );
+        assert!(r.is_error && pen.exists(), "{}", text(&r));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agents_can_choose_a_standard_hoop_or_give_any_size() {
+        let mut s = Studio::with_file(None, None);
+        let hoop =
+            |s: &mut Studio| ok(s.run_tool("get_design", &json!({})))["document"]["hoop"].clone();
+        assert_eq!(hoop(&mut s)["id"], "100x100");
+        ok(s.run_tool("set_document", &json!({ "hoop": "200x300" })));
+        let h = hoop(&mut s);
+        assert_eq!(h["name"], "8×12 in (200 × 300 mm)");
+        assert_eq!(
+            (h["width_mm"].as_f64(), h["height_mm"].as_f64()),
+            (Some(200.0), Some(300.0))
+        );
+        // A frame that isn't in the list.
+        ok(s.run_tool("set_document", &json!({ "hoop": "150x220.5" })));
+        let h = hoop(&mut s);
+        assert_eq!(h["id"], "150x220.5");
+        assert_eq!(h["name"], "Custom · 150 × 220.5 mm");
+        for bad in ["huge", "5x100", "100x5000", "100"] {
+            let r = s.run_tool("set_document", &json!({ "hoop": bad }));
+            assert!(
+                r.is_error && text(&r).contains("130x180"),
+                "{bad}: {}",
+                text(&r)
+            );
+        }
+        assert_eq!(s.hoop_dims(), (150.0, 220.5));
+    }
+
+    #[test]
     fn agents_can_lay_out_objects() {
         let mut s = Studio::with_file(None, None);
         ok(s.run_tool(
@@ -2111,6 +2847,289 @@ mod tests {
         assert!(r.is_error && text(&r).contains("nothing visible"));
         let r = s.run_tool("nope", &json!({}));
         assert!(r.is_error);
+    }
+
+    #[test]
+    fn objects_can_be_hidden_and_locked() {
+        use crate::commands::{Action, Flag};
+        let mut s = Studio::with_file(None, None);
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="40mm" viewBox="0 0 60 40">
+            <rect id="Ground" x="2" y="2" width="56" height="36" fill="#203040"/>
+            <rect id="Patch" x="10" y="10" width="15" height="15" fill="#c00000"/>
+            <rect id="Badge" x="35" y="10" width="15" height="15" fill="#c2c5c3"/>
+        </svg>"##;
+        let ok = |r: ToolResult| {
+            assert!(!r.is_error, "{}", text(&r));
+            serde_json::from_str::<Value>(&text(&r)).unwrap_or(Value::Null)
+        };
+        ok(s.run_tool("add_svg", &json!({ "svg": svg })));
+        s.replan();
+        let all = s.design.stitch_count();
+        let badge = s.design.per_shape[2];
+        assert!(badge > 100);
+
+        // Hidden: not sewn (what's under it is filled again, with nothing
+        // on top to leave room for), still there, and said so. Shown
+        // again, it's as it was.
+        let o = ok(s.run_tool("set_object", &json!({ "object": "Badge", "hidden": true })));
+        assert_eq!(o["settings"]["hidden"], true);
+        assert_eq!(o["stitches"], 0);
+        s.replan();
+        assert_eq!(s.design.per_shape[2], 0);
+        assert!(s.design.per_shape[0] > 0 && s.design.stitch_count() != all);
+        assert_ne!(
+            s.doc.shapes[2].params.kind,
+            Some(Kind::Skip),
+            "its stitch type is kept"
+        );
+        let ids = |s: &Studio| -> Vec<String> {
+            let svg = s.doc.to_svg().unwrap();
+            svg.split("id=\"")
+                .skip(1)
+                .filter_map(|t| t.split('"').next().map(str::to_string))
+                .collect()
+        };
+        assert!(
+            ids(&s)
+                .iter()
+                .any(|id| id.starts_with("Badge") && id.ends_with("hide=1")),
+            "{:?}",
+            ids(&s)
+        );
+        // (Kept in the file: opened again, it's still hidden.)
+        let again =
+            zigzag::document::Document::from_svg(&s.doc.to_svg().unwrap(), "t", None).unwrap();
+        assert!(again.shapes[2].params.hidden() && !again.shapes[1].params.hidden());
+        assert_eq!(svg_names(&again), ["Ground", "Patch", "Badge"]);
+        let o = ok(s.run_tool("set_object", &json!({ "object": "Badge", "hidden": false })));
+        assert!(o["settings"].get("hidden").is_none());
+        s.replan();
+        assert_eq!(
+            (s.design.per_shape[2], s.design.stitch_count()),
+            (badge, all)
+        );
+
+        // Locked: the pointer goes through it to nothing (or to what's
+        // under it), a selection box leaves it out, and so does Select
+        // All. It still sews.
+        let on_patch = P::new(-120.0, -20.0);
+        let on_ground = P::new(-270.0, 150.0);
+        assert_eq!(s.pick(on_patch, 5.0), Some(1));
+        assert_eq!(s.pick(on_ground, 5.0), Some(0));
+        ok(s.run_tool("set_object", &json!({ "object": "Ground", "locked": true })));
+        assert!(
+            ids(&s)
+                .iter()
+                .any(|id| id.starts_with("Ground") && id.ends_with("lock=1")),
+            "{:?}",
+            ids(&s)
+        );
+        assert_eq!(s.pick(on_ground, 5.0), None);
+        assert_eq!(s.pick(on_patch, 5.0), Some(1));
+        // A box over the patch and well inside the ground: the patch.
+        // Unlocked, the ground's fill is touched too.
+        assert_eq!(s.in_box(P::new(-190.0, -90.0), P::new(-60.0, 40.0)), [1]);
+        // A box over both small ones.
+        assert_eq!(s.in_box(P::new(-190.0, -90.0), P::new(190.0, 40.0)), [1, 2]);
+        // One that only catches a corner of the badge.
+        assert_eq!(s.in_box(P::new(190.0, 40.0), P::new(260.0, 120.0)), [2]);
+        // And one over bare ground: nothing.
+        assert_eq!(
+            s.in_box(P::new(-280.0, 120.0), P::new(-200.0, 170.0)),
+            Vec::<usize>::new()
+        );
+        s.run_action(Action::SelectAll);
+        assert_eq!(s.sel_indices(), [1, 2]);
+        s.replan();
+        assert!(s.design.per_shape[0] > 0);
+        // Lock (⌘2) locks what's selected and lets go of it; Unlock All
+        // brings everything back.
+        assert!(s.action_enabled(Action::Lock) && s.action_enabled(Action::UnlockAll));
+        s.run_action(Action::Lock);
+        assert!(s.sel_indices().is_empty());
+        assert!(s.flagged(&[0, 1, 2], Flag::Lock));
+        assert!(!s.action_enabled(Action::Lock), "nothing selected");
+        s.run_action(Action::UnlockAll);
+        assert!(!s.doc.shapes.iter().any(|x| x.params.locked()));
+        assert!(!s.action_enabled(Action::UnlockAll));
+        assert_eq!(s.in_box(P::new(-190.0, -90.0), P::new(-60.0, 40.0)), [0, 1]);
+        // Hide (⌘3) and Show All, the same.
+        s.set_selection(&[1]);
+        s.run_action(Action::Hide);
+        assert!(s.doc.shapes[1].params.hidden() && s.sel_indices().is_empty());
+        assert_eq!(s.pick(on_patch, 5.0), Some(0), "through the hidden patch");
+        s.run_action(Action::ShowAll);
+        assert!(!s.doc.shapes.iter().any(|x| x.params.hidden()));
+    }
+
+    fn svg_names(d: &zigzag::document::Document) -> Vec<String> {
+        zigzag::svg::display_names(&d.shapes)
+    }
+
+    #[test]
+    fn an_object_answers_to_the_id_an_agent_gave_it() {
+        // An agent that drew the design knows its objects by the ids it
+        // wrote; ZigZag shows those with spaces, and without the settings.
+        let mut s = Studio::with_file(None, None);
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="40mm" viewBox="0 0 60 40">
+            <rect id="Face_mask_fill_a=-45" x="5" y="5" width="30" height="30" fill="#777e84"/>
+            <rect id="Face_mask_shadow" x="8" y="8" width="20" height="20" fill="#25272b"/>
+            <rect id="Left_eye_satin" x="40" y="5" width="12" height="3" fill="#c2c5c3"/>
+        </svg>"##;
+        let r = s.run_tool("add_svg", &json!({ "svg": svg }));
+        assert!(!r.is_error, "{}", text(&r));
+        assert_eq!(s.names, ["Face mask", "Face mask shadow", "Left eye"]);
+        for (given, object) in [
+            ("Face_mask", 0),
+            ("face_mask", 0),
+            ("Face mask", 0),
+            ("Face_mask_fill", 0),
+            ("Face_mask_fill_a=-45", 0),
+            ("Face_mask_shadow", 1),
+            ("Left_eye", 2),
+            ("Left_eye_satin", 2),
+            // (Part of a name still finds it, when only one has it.)
+            ("shadow", 1),
+        ] {
+            assert_eq!(s.resolve(Some(&json!(given))), Ok(object), "{given}");
+        }
+        let r = s.run_tool(
+            "set_object",
+            &json!({ "object": "Face_mask", "kind": "fill", "angle": 30, "terse": true }),
+        );
+        assert!(!r.is_error, "{}", text(&r));
+        assert_eq!(s.doc.shapes[0].params.angle, Some(30.0));
+        // What isn't there still isn't, and says what is.
+        let r = s.run_tool(
+            "set_object",
+            &json!({ "object": "Right_eye", "kind": "fill" }),
+        );
+        assert!(r.is_error && text(&r).contains("Objects: Face mask, Face mask shadow, Left eye"));
+    }
+
+    #[test]
+    fn tools_do_what_they_say_at_the_edges() {
+        // What a sweep of every tool against its description turned up.
+        let mut s = Studio::with_file(None, None);
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="40mm" viewBox="0 0 60 40">
+            <rect id="Big_patch" x="5" y="5" width="30" height="20" fill="#203040"/>
+            <rect id="Small_patch" x="40" y="5" width="12" height="12" fill="#c00000"/>
+        </svg>"##;
+        let ok = |r: ToolResult| {
+            assert!(!r.is_error, "{}", text(&r));
+            text(&r)
+        };
+        let no = |r: ToolResult, why: &str| {
+            assert!(r.is_error && text(&r).contains(why), "{}", text(&r));
+        };
+        ok(s.run_tool("add_svg", &json!({ "svg": svg })));
+
+        // Lettering that's been scaled can still be edited (each edit after
+        // one that set h_scale failed, with two transforms on the element).
+        ok(s.run_tool("add_text", &json!({ "text": "CAMP", "y_mm": 30 })));
+        let text_obj = s.names.len() - 1;
+        ok(s.run_tool("edit_text", &json!({ "object": text_obj, "h_scale": 150 })));
+        let wide = shape_bounds(&s.doc.shapes[text_obj]).width();
+        ok(s.run_tool(
+            "edit_text",
+            &json!({ "object": text_obj, "color": "#00aa00" }),
+        ));
+        ok(s.run_tool(
+            "transform_objects",
+            &json!({ "objects": text_obj, "move_by_mm": [3, 0] }),
+        ));
+        ok(s.run_tool("edit_text", &json!({ "object": text_obj, "case": "upper" })));
+        let still = shape_bounds(&s.doc.shapes[text_obj]).width();
+        assert!((wide - still).abs() < 1.0, "{wide} {still}");
+        // A setting of the wrong sort is said, not passed over.
+        no(
+            s.run_tool(
+                "edit_text",
+                &json!({ "object": text_obj, "size_mm": "big" }),
+            ),
+            "`size_mm` must be a number",
+        );
+        no(
+            s.run_tool("edit_text", &json!({ "object": text_obj, "bold": "yes" })),
+            "`bold` must be true or false",
+        );
+        // Fonts to set type in: not the system's own, whose names begin
+        // with a dot.
+        let fonts = ok(s.run_tool("list_fonts", &json!({})));
+        let fonts: Value = serde_json::from_str(&fonts).unwrap();
+        assert!(
+            fonts["fonts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| !f.as_str().unwrap().starts_with('.'))
+        );
+
+        // A size of nothing isn't a size.
+        no(
+            s.run_tool("transform_objects", &json!({ "objects": 0, "width_mm": 0 })),
+            "width_mm must be positive",
+        );
+        no(
+            s.run_tool("render_preview", &json!({ "fit": "page" })),
+            "fit must be design or hoop",
+        );
+        // One object, or a list, as for transform_objects.
+        ok(s.run_tool("round_corners", &json!({ "objects": "Big_patch" })));
+        ok(s.run_tool("simplify", &json!({ "objects": 1 })));
+        // What set_document sets, get_design says.
+        ok(s.run_tool(
+            "set_document",
+            &json!({ "connect_mm": 3, "over_sewn": true }),
+        ));
+        let d: Value = serde_json::from_str(&ok(s.run_tool("get_design", &json!({})))).unwrap();
+        assert_eq!(d["document"]["connect_mm"], 3.0);
+        assert_eq!(d["document"]["over_sewn"], true);
+        // (And it's kept in the file, when it isn't the usual: cut.)
+        assert!(s.doc.to_svg().unwrap().contains(" oversewn=1"));
+        ok(s.run_tool("set_document", &json!({ "over_sewn": false })));
+        assert!(!s.doc.to_svg().unwrap().contains("oversewn"));
+        no(
+            s.run_tool("set_document", &json!({ "over_sewn": "yes" })),
+            "over_sewn must be true or false",
+        );
+
+        // Files: save writes SVG and nothing else; export without a format
+        // goes by what the path ends in; a file that can't be opened says
+        // what can.
+        let dir = std::env::temp_dir().join(format!("zigzag-edges-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |n: &str| dir.join(n).display().to_string();
+        no(
+            s.run_tool("save", &json!({ "path": at("x.txt") })),
+            "must end in .svg",
+        );
+        assert!(!dir.join("x.txt").exists());
+        ok(s.run_tool("export", &json!({ "path": at("x.dst") })));
+        assert_eq!(&std::fs::read(dir.join("x.dst")).unwrap()[..3], b"LA:");
+        no(
+            s.run_tool("export", &json!({ "path": at("x.bin") })),
+            "format is required",
+        );
+        ok(s.run_tool("export", &json!({ "path": at("x.vp3"), "format": "vp3" })));
+        no(
+            s.run_tool("open_file", &json!({ "path": at("x.vp3") })),
+            "isn't a file ZigZag can open",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A batch step that isn't {tool, arguments} says what a step is.
+        no(
+            s.run_tool(
+                "batch",
+                &json!({ "steps": [{ "tool": "set_object", "args": { "object": 0, "kind": "fill" } }] }),
+            ),
+            "a step doesn't take `args`",
+        );
+        no(
+            s.run_tool("batch", &json!({ "steps": [{ "arguments": {} }] })),
+            "a step needs a `tool`",
+        );
     }
 
     fn http(port: u16, body: &str, origin: Option<&str>) -> (u16, String) {

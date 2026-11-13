@@ -2,17 +2,11 @@
 //! Byte layouts ported from pyembroidery (MIT License, Copyright (c) 2018 Tatarize).
 
 use super::jef_data::JEF_PALETTE;
-use super::{Cmd, Op, StreamOptions, color_distance, commands, stream_bounds};
+use super::{Cmd, ExportOptions, Op, StreamOptions, color_distance, commands, stream_bounds};
 use crate::design::Design;
 
-fn stream(d: &Design, max_step: f64) -> Vec<Cmd> {
-    commands(
-        d,
-        &StreamOptions {
-            ties: true,
-            max_step,
-        },
-    )
+fn stream(d: &Design, opt: &ExportOptions, max_step: f64) -> Vec<Cmd> {
+    commands(d, &StreamOptions::new(opt, max_step))
 }
 
 fn deltas(cmds: &[Cmd]) -> impl Iterator<Item = (i64, i64, Op)> + '_ {
@@ -28,7 +22,11 @@ fn deltas(cmds: &[Cmd]) -> impl Iterator<Item = (i64, i64, Op)> + '_ {
 
 /// Melco / Bernina EXP.
 pub fn write_exp(d: &Design) -> Vec<u8> {
-    let cmds = stream(d, 127.0);
+    write_exp_with(d, &ExportOptions::default())
+}
+
+pub fn write_exp_with(d: &Design, opt: &ExportOptions) -> Vec<u8> {
+    let cmds = stream(d, opt, 127.0);
     let mut f = Vec::with_capacity(cmds.len() * 2 + 16);
     for (dx, dy, op) in deltas(&cmds) {
         match op {
@@ -82,7 +80,11 @@ fn jef_hoop(w: i64, h: i64) -> i32 {
 
 /// Janome JEF.
 pub fn write_jef(d: &Design) -> Vec<u8> {
-    let cmds = stream(d, 127.0);
+    write_jef_with(d, &ExportOptions::default())
+}
+
+pub fn write_jef_with(d: &Design, opt: &ExportOptions) -> Vec<u8> {
+    let cmds = stream(d, opt, 127.0);
     let threads: Vec<[u8; 3]> = d.blocks.iter().map(|b| b.color).collect();
     let mut palette = jef_palette(&threads);
     if palette.is_empty() {
@@ -148,7 +150,11 @@ pub fn write_jef(d: &Design) -> Vec<u8> {
 
 /// Husqvarna Viking / Pfaff VP3.
 pub fn write_vp3(d: &Design) -> Vec<u8> {
-    let cmds = stream(d, 255.0);
+    write_vp3_with(d, &ExportOptions::default())
+}
+
+pub fn write_vp3_with(d: &Design, opt: &ExportOptions) -> Vec<u8> {
+    let cmds = stream(d, opt, 255.0);
     let mut f: Vec<u8> = Vec::new();
     let be16 = |f: &mut Vec<u8>, v: i64| f.extend_from_slice(&(v as i16).to_be_bytes());
     let be32 = |f: &mut Vec<u8>, v: i64| f.extend_from_slice(&(v as i32).to_be_bytes());

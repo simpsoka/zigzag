@@ -24,6 +24,12 @@ pub struct FillParams {
     pub stagger: u32,
     /// Sew rows from the bottom up (for caps: push puckering away from the brim seam).
     pub bottom_up: bool,
+    /// No stitch shorter than this, units. Rows closer together than that
+    /// can't be sewn one after the next (the turn at each row's end would
+    /// be too short a stitch), so they're sewn every second (or third…)
+    /// row one way and the rows between on the way back: the same needle
+    /// points, with turns two (or three…) rows long.
+    pub min_stitch: f64,
 }
 
 struct Edge {
@@ -39,6 +45,10 @@ struct Row {
     y: f64,
     xa: f64,
     xb: f64,
+    /// A stitch straight from the row before's end to this one's start
+    /// would leave the shape (the ends are far apart along a slanting or
+    /// wavy edge): the way between them is along the rows instead.
+    dogleg: bool,
 }
 
 /// Returns one stitched polyline per section, in original coordinates.
@@ -115,7 +125,13 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
             } else if was && !now {
                 let (xa, xb) = (start + shrink, x - shrink);
                 if xb - xa >= min_row {
-                    ivs.push(Row { k, y, xa, xb });
+                    ivs.push(Row {
+                        k,
+                        y,
+                        xa,
+                        xb,
+                        dogleg: false,
+                    });
                 }
             }
         }
@@ -139,9 +155,12 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
         } else {
             (last.xa, next.xa, 1.0)
         };
+        // (From just inside the outline: rows widened for pull end past
+        // it, where nothing is inside.)
         let eps = 1.0f64
             .min((last.xb - last.xa) * 0.25)
-            .min((next.xb - next.xa) * 0.25);
+            .min((next.xb - next.xa) * 0.25)
+            + (-shrink).max(0.0);
         let a = P::new(x0 + inward * eps, last.y);
         let b = P::new(x1 + inward * eps, next.y);
         let gap = (last.k - next.k)
@@ -168,6 +187,9 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
             }
         })
     };
+
+    // The rows are sewn one after the next (not in passes: see `min_stitch`).
+    let one_pass = !(p.min_stitch > p.spacing && p.spacing > 0.0);
 
     // Group intervals into sections: an interval continues a section when it is
     // the only overlap of that section's last interval (and vice versa).
@@ -198,11 +220,25 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
             })
             .collect();
         let mut new_open = Vec::with_capacity(ivs.len());
-        for (iv, c) in ivs.into_iter().zip(cands) {
-            if c.len() == 1 && hits[c[0]] == 1 && connects_inside(&sections[open[c[0]]], &iv) {
-                sections[open[c[0]]].push(iv);
-                new_open.push(open[c[0]]);
-            } else {
+        for (mut iv, c) in ivs.into_iter().zip(cands) {
+            if c.len() == 1 && hits[c[0]] == 1 {
+                // The one row over the one row before: the same section.
+                // Where a stitch between their ends would cut a corner (a
+                // stem meeting a crossbar, a row at a wavy edge), the two
+                // are joined along the rows (see `dogleg`). A row split
+                // off there would be a section of its own, a row or two
+                // sewn after the rest, with the thread taken to it across
+                // rows already sewn. (Rows sewn in passes go by the old
+                // way: their turns skip rows.)
+                let inside = connects_inside(&sections[open[c[0]]], &iv);
+                if inside || one_pass {
+                    iv.dogleg = !inside;
+                    sections[open[c[0]]].push(iv);
+                    new_open.push(open[c[0]]);
+                    continue;
+                }
+            }
+            {
                 sections.push(vec![iv]);
                 new_open.push(sections.len() - 1);
             }
@@ -212,27 +248,112 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
 
     let (cb, sb) = (p.angle.cos(), p.angle.sin());
     let stagger = p.stagger.max(1) as i64;
-    let min_end = (p.len * 0.25).min(5.0);
+    let min_end = (p.len * 0.25).min(5.0).max(p.min_stitch);
     sections
         .into_iter()
         .map(|rows| {
             let mut pts: Polyline = Vec::with_capacity(rows.len() * 4);
-            for (ri, r) in rows.iter().enumerate() {
+            // The order the rows are sewn in: as they come, or in `skip`
+            // passes of every `skip`th row, there and back.
+            let skip = if p.min_stitch > p.spacing && p.spacing > 0.0 {
+                (p.min_stitch / p.spacing).ceil() as usize
+            } else {
+                1
+            };
+            let mut order: Vec<usize> = Vec::with_capacity(rows.len());
+            for pass in 0..skip.min(rows.len()) {
+                let at = order.len();
+                order.extend((pass..rows.len()).step_by(skip));
+                if pass % 2 == 1 {
+                    order[at..].reverse();
+                }
+                // A pass begins beside the row the last one ended on: too
+                // near. So it begins at its first row that's far enough,
+                // comes back for the ones before, and goes on from there:
+                // every turn is long enough.
+                if pass > 0 {
+                    let last = order[at - 1];
+                    if let Some(j) = order[at..].iter().position(|k| k.abs_diff(last) >= skip) {
+                        order[at..=at + j].reverse();
+                    }
+                }
+            }
+            // (The row sewn last: its place among the section's rows.)
+            let mut last_row: Option<usize> = None;
+            for (ri, &k) in order.iter().enumerate() {
+                let r = &rows[k];
                 let forward = ri % 2 == 0;
                 let off = (r.k.rem_euclid(stagger)) as f64 * p.len / stagger as f64;
                 let m0 = ((r.xa + min_end - off) / p.len).ceil() as i64;
                 let m1 = ((r.xb - min_end - off) / p.len).floor() as i64;
                 let (xs, xe) = if forward { (r.xa, r.xb) } else { (r.xb, r.xa) };
                 let start = P::new(xs, r.y);
-                if let Some(&prev) = pts.last() {
-                    // Travel from the previous row's end along the outline.
-                    let d = prev.dist(start);
-                    let n = (d / p.len).ceil() as usize;
-                    for i in 1..n {
-                        pts.push(prev.lerp(start, i as f64 / n as f64));
+                match pts.last().copied() {
+                    // The last row ended too near for a stitch between
+                    // (a pass of one row, or rows that meet at a shape's
+                    // tip): one needle point turns the corner, whichever
+                    // of the two reaches further out, so neither row stops
+                    // short of the outline.
+                    Some(prev) if prev.dist(start) < p.min_stitch => {
+                        let further = if forward {
+                            start.x < prev.x
+                        } else {
+                            start.x > prev.x
+                        };
+                        if further {
+                            *pts.last_mut().unwrap() = start;
+                        }
                     }
+                    Some(_) => {
+                        // Travel from the previous row's end along the
+                        // outline. To a row some way off (where a pass
+                        // over the rows ends and the next begins), by the
+                        // ends of the rows between, `skip` rows a stitch:
+                        // straight there could leave the shape.
+                        if let Some(from) = last_row {
+                            let hops = from.abs_diff(k) / skip.max(1);
+                            for h in 1..hops {
+                                let m = if k > from {
+                                    from + h * skip
+                                } else {
+                                    from - h * skip
+                                };
+                                let via = &rows[m];
+                                pts.push(P::new(if forward { via.xa } else { via.xb }, via.y));
+                            }
+                        }
+                        let prev = *pts.last().unwrap();
+                        // Round a corner the straight way would cut: back
+                        // along the row just sewn to where this one is
+                        // over it, across, and along this row's line to
+                        // its start. All of it on a row or under one.
+                        let mut legs = vec![prev];
+                        if r.dogleg && skip == 1 {
+                            let x = prev.x.clamp(r.xa, r.xb);
+                            for q in [P::new(x, prev.y), P::new(x, r.y)] {
+                                if legs.last().is_some_and(|l| l.dist(q) > 1e-6) {
+                                    legs.push(q);
+                                }
+                            }
+                        }
+                        legs.push(start);
+                        for w in legs.windows(2) {
+                            let d = w[0].dist(w[1]);
+                            let n = (d / p.len).ceil() as usize;
+                            for i in 1..n {
+                                pts.push(w[0].lerp(w[1], i as f64 / n as f64));
+                            }
+                            if d > 1e-6 {
+                                pts.push(w[1]);
+                            }
+                        }
+                        if pts.last().is_some_and(|l| l.dist(start) > 1e-6) {
+                            pts.push(start);
+                        }
+                    }
+                    None => pts.push(start),
                 }
-                pts.push(start);
+                last_row = Some(k);
                 let mut push = |q: P| {
                     // Split the (rare) over-long first/last stitch of a row.
                     let prev = *pts.last().unwrap();
@@ -283,7 +404,158 @@ mod tests {
             pull: 0.0,
             stagger: 4,
             bottom_up: false,
+            min_stitch: 0.0,
         }
+    }
+
+    #[test]
+    fn a_stem_under_a_crossbar_is_one_section_joined_along_the_rows() {
+        // A T: the crossbar's rows, then the stem's. A stitch from the
+        // end of the last crossbar row to the stem would cut the corner
+        // outside the shape, so the stem used to be a section of its own
+        // (and a row or two split off like that at a wavy edge was sewn
+        // after the rest, the thread taken to it across the fill). Now
+        // it's the same section: back along the crossbar's last row to
+        // over the stem, and on.
+        let t = [vec![
+            P::new(0.0, 0.0),
+            P::new(300.0, 0.0),
+            P::new(300.0, 50.0),
+            P::new(180.0, 50.0),
+            P::new(180.0, 200.0),
+            P::new(120.0, 200.0),
+            P::new(120.0, 50.0),
+            P::new(0.0, 50.0),
+        ]];
+        let sections = tatami(&t, FillRule::NonZero, &params());
+        assert_eq!(sections.len(), 1);
+        let pts = &sections[0];
+        // Every stitch stays in the T: no corner cut across the open
+        // cloth beside the stem.
+        for w in pts.windows(2) {
+            for k in 0..=4 {
+                let q = w[0].lerp(w[1], k as f64 / 4.0);
+                let inside = if q.y <= 50.0 {
+                    q.x > -0.01 && q.x < 300.01
+                } else {
+                    q.x > 119.99 && q.x < 180.01
+                };
+                assert!(inside && q.y > -0.01 && q.y < 200.01, "{q:?}");
+            }
+        }
+        // And all of it is sewn: rows the crossbar's width, rows the
+        // stem's, down to its foot.
+        assert!(pts.iter().any(|q| q.x < 1.0) && pts.iter().any(|q| q.x > 299.0));
+        assert!(pts.iter().any(|q| q.y > 195.0));
+        // In passes (a shortest stitch longer than the rows are apart) the
+        // turns skip rows, and the two stay separate, as before.
+        let passes = FillParams {
+            min_stitch: 4.0,
+            ..params()
+        };
+        assert_eq!(tatami(&t, FillRule::NonZero, &passes).len(), 2);
+    }
+
+    #[test]
+    fn rows_closer_than_the_shortest_stitch_are_sewn_in_passes() {
+        let sq = [square(0.0, 0.0, 100.0)];
+        let usual = tatami(&sq, FillRule::NonZero, &params()).remove(0);
+        // The same needle points, whatever the order (and however often:
+        // the way from one pass to the next goes by row ends it has sewn).
+        let key = |q: &P| ((q.x * 1e3).round() as i64, (q.y * 1e3).round() as i64);
+        let sorted = |pts: &[P]| {
+            let mut k: Vec<_> = pts.iter().map(key).collect();
+            k.sort();
+            k.dedup();
+            k
+        };
+        // 0.4 mm over 0.25 mm rows: every second row, then the rows
+        // between. 0.4 mm over 0.15 mm rows: three passes.
+        for (spacing, passes) in [(2.5, 2.0), (1.5, 3.0)] {
+            let mut p = params();
+            p.spacing = spacing;
+            let plain = tatami(&sq, FillRule::NonZero, &p).remove(0);
+            p.min_stitch = 4.0;
+            let s = tatami(&sq, FillRule::NonZero, &p).remove(0);
+            let shortest = s
+                .windows(2)
+                .map(|w| w[0].dist(w[1]))
+                .fold(f64::INFINITY, f64::min);
+            assert!(shortest >= 4.0 - 1e-9, "{spacing}: a {shortest} stitch");
+            assert_eq!(
+                sorted(&s),
+                sorted(&plain),
+                "{spacing}: the same needle points"
+            );
+            // Each turn is a stitch up the edge, `passes` rows long.
+            let turns: Vec<f64> = s
+                .windows(2)
+                .filter(|w| (w[0].x - w[1].x).abs() < 1e-6)
+                .map(|w| (w[0].y - w[1].y).abs())
+                .collect();
+            assert!(turns.len() > 30);
+            assert!(
+                turns.iter().all(|t| *t >= spacing * passes - 1e-6),
+                "{spacing}"
+            );
+            assert!(s.windows(2).all(|w| w[0].dist(w[1]) <= 30.0 + 1e-6));
+        }
+        // Rows no closer than the shortest stitch are sewn as ever.
+        let mut p = params();
+        p.min_stitch = 2.5;
+        assert_eq!(tatami(&sq, FillRule::NonZero, &p).remove(0), usual);
+        // A section of one row, or two, has nowhere to go but the next row.
+        let mut p = params();
+        p.min_stitch = 4.0;
+        let sliver = [vec![
+            P::new(0.0, 0.0),
+            P::new(100.0, 0.0),
+            P::new(100.0, 4.0),
+            P::new(0.0, 4.0),
+        ]];
+        let s = tatami(&sliver, FillRule::NonZero, &p).remove(0);
+        assert!(s.len() >= 4 && s.iter().all(|q| q.y >= 0.0 && q.y <= 4.0));
+    }
+
+    #[test]
+    fn rows_widened_for_pull_are_still_one_section() {
+        // A stem 1.6 mm wide, its rows 0.3 mm apart and widened 0.3 mm a
+        // side for pull (as on a knit): the rows end past the outline, and
+        // are joined all the same. (Each used to be a section of its own.)
+        let stem = [vec![
+            P::new(0.0, 0.0),
+            P::new(16.0, 0.0),
+            P::new(16.0, 40.0),
+            P::new(0.0, 40.0),
+        ]];
+        let mut p = params();
+        p.spacing = 3.0;
+        p.pull = 3.0;
+        let plain = tatami(&stem, FillRule::NonZero, &p);
+        assert_eq!(plain.len(), 1);
+        // With a shortest stitch longer than the rows are apart, every row
+        // is still sewn from one side to the other.
+        p.min_stitch = 4.0;
+        let s = tatami(&stem, FillRule::NonZero, &p).remove(0);
+        for k in 0..13 {
+            let y = (k as f64 + 0.5) * 3.0;
+            for x in [-3.0, 19.0] {
+                assert!(
+                    s.iter()
+                        .any(|q| (q.x - x).abs() < 1e-6 && (q.y - y).abs() < 1e-6),
+                    "row {k} reaches x = {x}"
+                );
+            }
+        }
+        assert!(s.windows(2).all(|w| w[0].dist(w[1]) >= 4.0 - 1e-9));
+        // And the way from one pass to the next keeps to the stem's side.
+        assert!(s.iter().all(|q| q.x >= -3.0 - 1e-6 && q.x <= 19.0 + 1e-6));
+        assert!(
+            s.windows(2)
+                .filter(|w| (w[0].x - w[1].x).abs() < 1e-6)
+                .all(|w| (w[0].y - w[1].y).abs() <= 9.0 + 1e-6),
+            "no stitch up the side longer than three rows"
+        );
     }
 
     #[test]
@@ -356,6 +628,7 @@ mod circle_tests {
             pull: 0.0,
             stagger: 4,
             bottom_up: false,
+            min_stitch: 0.0,
         };
         let secs = tatami(&[ring], FillRule::NonZero, &p);
         assert_eq!(secs.len(), 1);

@@ -49,6 +49,12 @@ pub enum Icon {
     Menu,
     /// An ×, to close.
     Close,
+    /// An eye: shown (the Objects list's visibility column).
+    Eye,
+    /// A padlock: locked.
+    Lock,
+    /// Settings.
+    Gear,
     /// Panels, for the icon strip: stacked layers, a zigzag, a transform
     /// box, swatches, a page.
     Layers,
@@ -465,24 +471,32 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             p.rect_filled(Rect::from_min_max(at(0.22, 0.14), at(0.4, 0.86)), 1.5, c);
             p.rect_filled(Rect::from_min_max(at(0.6, 0.14), at(0.78, 0.86)), 1.5, c);
         }
+        // (Share and Send sit between the same top and bottom as the
+        // icons beside them in the toolbar, 0.12 to 0.88: Share's tray
+        // hung lower than their feet, and the needle rode higher.)
         Icon::Share => {
             line(&[
-                (0.32, 0.4),
-                (0.18, 0.4),
-                (0.18, 0.95),
-                (0.82, 0.95),
-                (0.82, 0.4),
-                (0.68, 0.4),
+                (0.32, 0.42),
+                (0.18, 0.42),
+                (0.18, 0.88),
+                (0.82, 0.88),
+                (0.82, 0.42),
+                (0.68, 0.42),
             ]);
-            line(&[(0.5, 0.05), (0.5, 0.65)]);
-            line(&[(0.32, 0.22), (0.5, 0.05), (0.68, 0.22)]);
+            line(&[(0.5, 0.1), (0.5, 0.64)]);
+            line(&[(0.33, 0.26), (0.5, 0.1), (0.67, 0.26)]);
         }
         Icon::Send => {
             // Needle and thread loop.
-            line(&[(0.15, 0.85), (0.78, 0.22)]);
-            p.circle_stroke(at(0.83, 0.17), side * 0.07, s);
+            line(&[(0.15, 0.88), (0.78, 0.25)]);
+            p.circle_stroke(at(0.83, 0.2), side * 0.07, s);
             let b = CubicBezierShape::from_points_stroke(
-                [at(0.78, 0.22), at(0.35, 0.1), at(0.1, 0.45), at(0.45, 0.6)],
+                [
+                    at(0.78, 0.25),
+                    at(0.35, 0.13),
+                    at(0.1, 0.48),
+                    at(0.45, 0.63),
+                ],
                 false,
                 Color32::TRANSPARENT,
                 Stroke::new(w * 0.8, c),
@@ -557,6 +571,21 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
         Icon::RotateRight => {
             arc(0.5, 0.55, 0.34, 0.7 * PI, 2.0 * PI);
             line(&[(0.72, 0.44), (0.84, 0.6), (0.96, 0.44)]);
+        }
+        Icon::Gear => {
+            // Eight square teeth round a ring, and the hole for the shaft.
+            let (teeth, outer, inner) = (8, 0.5, 0.37);
+            let step = std::f32::consts::TAU / teeth as f32;
+            let mut rim = Vec::with_capacity(teeth * 4);
+            for k in 0..teeth {
+                let a = k as f32 * step;
+                for (da, rad) in [(-0.27, inner), (-0.17, outer), (0.17, outer), (0.27, inner)] {
+                    let b = a + da * step;
+                    rim.push(at(0.5 + rad * b.cos(), 0.5 + rad * b.sin()));
+                }
+            }
+            p.add(Shape::closed_line(rim, s));
+            p.circle_stroke(at(0.5, 0.5), side * 0.15, s);
         }
         Icon::Target => {
             p.circle_stroke(at(0.5, 0.5), side * 0.3, s);
@@ -693,6 +722,36 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
         Icon::Close => {
             line(&[(0.25, 0.25), (0.75, 0.75)]);
             line(&[(0.75, 0.25), (0.25, 0.75)]);
+        }
+        Icon::Eye => {
+            // Two lids meeting at the corners, and the pupil.
+            let lid = |up: f32| -> Vec<Pos2> {
+                (0..=12)
+                    .map(|k| {
+                        let t = k as f32 / 12.0;
+                        at(0.04 + 0.92 * t, 0.5 + up * 0.34 * (t * PI).sin())
+                    })
+                    .collect()
+            };
+            p.add(Shape::line(lid(-1.0), s));
+            p.add(Shape::line(lid(1.0), s));
+            p.circle_filled(at(0.5, 0.5), side * 0.13, c);
+        }
+        Icon::Lock => {
+            p.rect_filled(
+                Rect::from_min_max(at(0.14, 0.46), at(0.86, 0.94)),
+                side * 0.1,
+                c,
+            );
+            // The shackle.
+            let arch: Vec<Pos2> = std::iter::once(at(0.3, 0.5))
+                .chain((0..=10).map(|k| {
+                    let a = PI + k as f32 / 10.0 * PI;
+                    at(0.5 + 0.2 * a.cos(), 0.3 + 0.2 * a.sin())
+                }))
+                .chain(std::iter::once(at(0.7, 0.5)))
+                .collect();
+            p.add(Shape::line(arch, s));
         }
         Icon::Menu => {
             for y in [0.25, 0.5, 0.75] {

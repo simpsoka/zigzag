@@ -41,6 +41,10 @@ pub struct SatinParams {
     pub split: Option<f64>,
     /// How the top stitches cross the column.
     pub style: SatinStyle,
+    /// How far the top stitches lean from square across the column,
+    /// radians (0: straight across). Positive leans the far rail's end of
+    /// each stitch on along the column.
+    pub lean: f64,
 }
 
 /// The pattern a satin column's top stitches make (Ink/Stitch's satin,
@@ -122,44 +126,136 @@ impl<'a> Arc<'a> {
     }
 }
 
-/// Matched points on both rails, evenly about `step` apart along the column
-/// center. Between sync points (rungs, or the offsets of a centerline) each
-/// rail is followed in proportion, so stitches stay square to the column
-/// even where one rail is much longer than the other (round a bend).
-pub fn pairs(r: &Rails, step: f64) -> Vec<(P, P)> {
-    if r.a.len() < 2 || r.b.len() < 2 {
-        return Vec::new();
-    }
-    let (a, b) = (Arc::new(&r.a), Arc::new(&r.b));
-    let mut syncs = vec![(0.0, 0.0)];
-    for &(sa, sb) in &r.sync {
-        let (pa, pb) = *syncs.last().unwrap();
-        if sa > pa && sb > pb && sa < a.len() && sb < b.len() {
-            syncs.push((sa, sb));
+/// A column's length along its center, and where on each rail a distance
+/// along it falls. Between sync points (rungs, or the offsets of a
+/// centerline) each rail is followed in proportion, so stitches stay square
+/// to the column even where one rail is much longer than the other (round
+/// a bend).
+struct Along<'a> {
+    a: Arc<'a>,
+    b: Arc<'a>,
+    /// Sync points as arc lengths on (a, b), first to last.
+    syncs: Vec<(f64, f64)>,
+    /// The center distance at each sync point.
+    at: Vec<f64>,
+    closed: bool,
+}
+
+impl<'a> Along<'a> {
+    fn new(r: &'a Rails) -> Option<Along<'a>> {
+        if r.a.len() < 2 || r.b.len() < 2 {
+            return None;
         }
+        let (a, b) = (Arc::new(&r.a), Arc::new(&r.b));
+        let mut syncs = vec![(0.0, 0.0)];
+        for &(sa, sb) in &r.sync {
+            let (pa, pb) = *syncs.last().unwrap();
+            if sa > pa && sb > pb && sa < a.len() && sb < b.len() {
+                syncs.push((sa, sb));
+            }
+        }
+        syncs.push((a.len(), b.len()));
+        let mut at = vec![0.0];
+        for w in syncs.windows(2) {
+            let center = ((w[1].0 - w[0].0) + (w[1].1 - w[0].1)) * 0.5;
+            at.push(at.last().unwrap() + center);
+        }
+        Some(Along {
+            a,
+            b,
+            syncs,
+            at,
+            closed: r.closed,
+        })
     }
-    syncs.push((a.len(), b.len()));
-    // The column's center length, window by window.
-    let centers: Vec<f64> = syncs
-        .windows(2)
-        .map(|w| ((w[1].0 - w[0].0) + (w[1].1 - w[0].1)) * 0.5)
-        .collect();
-    let total: f64 = centers.iter().sum();
+
+    fn total(&self) -> f64 {
+        *self.at.last().unwrap()
+    }
+
+    /// The arc lengths on the rails at center distance `s` (past either
+    /// end: the end, or on round a closed column).
+    fn arcs(&self, s: f64) -> (f64, f64) {
+        let total = self.total();
+        let s = if self.closed && total > 0.0 {
+            s.rem_euclid(total)
+        } else {
+            s.clamp(0.0, total)
+        };
+        let i = self
+            .at
+            .partition_point(|&c| c <= s)
+            .clamp(1, self.at.len() - 1);
+        let span = self.at[i] - self.at[i - 1];
+        let t = if span > 1e-12 {
+            (s - self.at[i - 1]) / span
+        } else {
+            0.0
+        };
+        let ((a0, b0), (a1, b1)) = (self.syncs[i - 1], self.syncs[i]);
+        (a0 + t * (a1 - a0), b0 + t * (b1 - b0))
+    }
+
+    /// The matched points on the rails at center distance `s`.
+    fn pair(&self, s: f64) -> (P, P) {
+        let (sa, sb) = self.arcs(s);
+        (self.a.at(sa), self.b.at(sb))
+    }
+}
+
+/// Matched points on both rails, evenly about `step` apart along the column
+/// center.
+pub fn pairs(r: &Rails, step: f64) -> Vec<(P, P)> {
+    let Some(al) = Along::new(r) else {
+        return Vec::new();
+    };
+    let total = al.total();
     let n = (total / step).ceil().max(1.0) as usize;
     let step = total / n as f64;
-    let mut out = Vec::with_capacity(n + 1);
-    let mut s = 0.0; // distance into the current window
-    for (w, &center) in syncs.windows(2).zip(&centers) {
-        let ((a0, b0), (a1, b1)) = (w[0], w[1]);
-        while s < center - 1e-9 && out.len() < n {
-            let t = if center > 1e-12 { s / center } else { 0.0 };
-            out.push((a.at(a0 + t * (a1 - a0)), b.at(b0 + t * (b1 - b0))));
-            s += step;
-        }
-        s -= center;
-    }
-    out.push((a.at(a.len()), b.at(b.len())));
+    let mut out: Vec<(P, P)> = (0..n).map(|k| al.pair(k as f64 * step)).collect();
+    out.push((al.a.at(al.a.len()), al.b.at(al.b.len())));
     out
+}
+
+/// [`pairs`] with each stitch leaning `lean` radians from square across:
+/// its end on rail b is further along the column than its end on rail a by
+/// the column's width there times tan(lean). At an open column's ends the
+/// stitches fan from the corner, so the lean leaves no gap.
+pub fn pairs_leaning(r: &Rails, step: f64, lean: f64) -> Vec<(P, P)> {
+    let t = lean.tan();
+    if t.abs() < 1e-6 {
+        return pairs(r, step);
+    }
+    let Some(al) = Along::new(r) else {
+        return Vec::new();
+    };
+    let total = al.total();
+    // How far apart along the column a stitch's two ends are, where the
+    // column is `s` along.
+    let shift = |s: f64| {
+        let (a, b) = al.pair(s);
+        a.dist(b) * t
+    };
+    let widest = pairs(r, (total / 24.0).max(step))
+        .iter()
+        .map(|(a, b)| a.dist(*b))
+        .fold(0.0, f64::max);
+    // (A closed column has no ends to fan at.)
+    let over = if al.closed {
+        0.0
+    } else {
+        widest * t.abs() * 0.5
+    };
+    let span = total + 2.0 * over;
+    let n = (span / step).ceil().max(1.0) as usize;
+    let step = span / n as f64;
+    (0..=n)
+        .map(|k| {
+            let s = -over + k as f64 * step;
+            let d = shift(s) * 0.5;
+            (al.a.at(al.arcs(s - d).0), al.b.at(al.arcs(s + d).1))
+        })
+        .collect()
 }
 
 /// Sew a column: underlay passes, then the top satin, as one continuous path.
@@ -221,7 +317,7 @@ pub fn column(r: &Rails, p: &SatinParams) -> Polyline {
         SatinStyle::Zigzag => p.spacing * 3.0,
         _ => p.spacing,
     };
-    let ps = pairs(r, spacing);
+    let ps = pairs_leaning(r, spacing, p.lean);
     let mut top: Polyline = Vec::with_capacity(ps.len() * 2);
     for (k, &(a, b)) in ps.iter().enumerate() {
         let dir = (a - b).norm();
@@ -534,7 +630,7 @@ impl std::fmt::Display for AutoSatinError {
 }
 
 /// Widest stitch allowed in an automatic satin, units.
-const AUTO_MAX_WIDTH: f64 = 80.0;
+pub(crate) const AUTO_MAX_WIDTH: f64 = 80.0;
 
 /// Group rings into components: each outer ring with the rings directly inside it.
 pub fn components(rings: &[Polyline], rule: FillRule) -> Vec<Vec<Polyline>> {
@@ -625,7 +721,7 @@ fn resample_ring(ring: &[P], step: f64) -> Polyline {
 }
 
 /// Split a single ring at its two tips into rails running tip to tip.
-fn split_at_tips(ring: &[P]) -> Option<Rails> {
+pub(crate) fn split_at_tips(ring: &[P]) -> Option<Rails> {
     if ring.len() < 3 {
         return None;
     }
@@ -696,7 +792,70 @@ mod tests {
             short_stitches: true,
             split: None,
             style: Default::default(),
+            lean: 0.0,
         }
+    }
+
+    #[test]
+    fn leaning_stitches_slant_across_the_column_and_fan_at_its_ends() {
+        // A straight column 3 mm wide, rail a along y = 15, b along y = −15
+        // (or the other way round: the lean is measured from a to b).
+        let r = rails_from_centerline(&[P::new(0.0, 0.0), P::new(200.0, 0.0)], false, 30.0);
+        let square = pairs(&r, 4.0);
+        assert!(square.iter().all(|(a, b)| (a.x - b.x).abs() < 1e-6));
+        assert_eq!(pairs_leaning(&r, 4.0, 0.0).len(), square.len());
+        for deg in [8.0f64, 30.0, -30.0] {
+            let lean = deg.to_radians();
+            let ps = pairs_leaning(&r, 4.0, lean);
+            // In the body of the column every stitch slants by the angle:
+            // its b end 30·tan further along than its a end.
+            let want = 30.0 * lean.tan();
+            let body: Vec<&(P, P)> = ps
+                .iter()
+                .filter(|(a, b)| a.x.min(b.x) > 1.0 && a.x.max(b.x) < 199.0)
+                .collect();
+            assert!(body.len() > 30, "{deg}");
+            for (a, b) in &body {
+                assert!(((b.x - a.x) - want).abs() < 1e-6, "{deg}: {a:?} {b:?}");
+                assert!((a.dist(*b) - 30.0 / lean.cos()).abs() < 1e-6);
+            }
+            // At each end they fan from the corner: both rails are sewn
+            // right to their ends, and nothing goes past them.
+            let (first, last) = (ps[0], *ps.last().unwrap());
+            assert!(
+                first.0.x.abs() < 1e-6 && first.1.x.abs() < 1e-6,
+                "{deg}: {first:?}"
+            );
+            assert!((last.0.x - 200.0).abs() < 1e-6 && (last.1.x - 200.0).abs() < 1e-6);
+            assert!(ps.iter().all(|(a, b)| a.x >= -1e-6 && b.x <= 200.0 + 1e-6));
+            // Needle points no further apart along either rail than asked.
+            assert!(ps.windows(2).all(|w| w[0].0.dist(w[1].0) <= 4.0 + 1e-6
+                && w[0].1.dist(w[1].1) <= 4.0 + 1e-6));
+        }
+        // The column sews with it, and a ring's stitches lean all the way
+        // round with no ends to fan at.
+        let mut p = params(0);
+        p.lean = 20f64.to_radians();
+        let col = column(&r, &p);
+        assert!(col.windows(2).any(|w| (w[0].x - w[1].x).abs() > 8.0));
+        let ring = Rails {
+            a: (0..=40)
+                .map(|k| {
+                    let t = k as f64 / 40.0 * std::f64::consts::TAU;
+                    P::new(60.0 * t.cos(), 60.0 * t.sin())
+                })
+                .collect(),
+            b: (0..=40)
+                .map(|k| {
+                    let t = k as f64 / 40.0 * std::f64::consts::TAU;
+                    P::new(40.0 * t.cos(), 40.0 * t.sin())
+                })
+                .collect(),
+            closed: true,
+            sync: Vec::new(),
+        };
+        let ps = pairs_leaning(&ring, 4.0, 20f64.to_radians());
+        assert!(ps.iter().all(|(a, b)| a.dist(*b) > 20.5), "all lean");
     }
 
     #[test]

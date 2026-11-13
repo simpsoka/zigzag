@@ -74,6 +74,9 @@ pub fn step(s: &Snapshot, ours: bool) -> Step {
     }
 }
 
+/// The Send card's column of row names.
+const SEND_LABEL_W: f32 = 68.0;
+
 /// Green for done.
 pub(crate) const GOOD: Color32 = Color32::from_rgb(52, 168, 83);
 
@@ -243,6 +246,7 @@ pub struct Thread {
     pub name: String,
 }
 
+/// What the machine is doing, as one heading, for the status line.
 /// Whether the needle can be moved along the design: the machine has it
 /// and isn't moving. (A Skitch paused with its own Start/Stop button says
 /// it's ready to sew, the same as before the first stitch: not paused.)
@@ -253,7 +257,6 @@ fn needle_movable(st: Status) -> bool {
     )
 }
 
-/// What the machine is doing, as one heading, for the status line.
 fn headline(s: &Snapshot) -> String {
     match &s.link {
         Link::Connected => {
@@ -946,8 +949,25 @@ impl Studio {
                     },
                 );
             }
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Where").size(12.5).color(p.secondary));
+            // The two choices as rows of a form (their names in one
+            // column, as in the panels), then the one thing to do, the
+            // card's width.
+            ui.add_space(space::XS);
+            let row = |ui: &mut egui::Ui, label: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = space::S;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(SEND_LABEL_W, crate::theme::ROW_H),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(SEND_LABEL_W);
+                            ui.label(RichText::new(label).size(12.5).color(p.secondary));
+                        },
+                    );
+                    add(ui);
+                });
+            };
+            row(ui, "Placement", &mut |ui| {
                 crate::theme::segmented(
                     ui,
                     "skitch-placement",
@@ -955,12 +975,21 @@ impl Studio {
                     &[(false, "As Placed"), (true, "Centered")],
                 );
             });
-            ui.checkbox(&mut self.machine.trace_first, "Trial run after sending")
-                .on_hover_text(
-                    "The needle goes around the design's outline without sewing, so you can check where it lands",
-                );
+            row(ui, "Trial run", &mut |ui| {
+                ui.checkbox(&mut self.machine.trace_first, "Trace the outline first")
+                    .on_hover_text(
+                        "After sending, the needle goes around the design's outline without sewing, so you can check where it lands",
+                    );
+            });
+            ui.add_space(space::XS);
             ui.add_enabled_ui(total > 0 && !too_big, |ui| {
-                send = primary(ui, "Send Design").clicked();
+                send = ui
+                    .add_sized(
+                        [ui.available_width(), 30.0],
+                        egui::Button::new(RichText::new("Send Design").color(Color32::WHITE))
+                            .fill(p.accent),
+                    )
+                    .clicked();
             });
         });
         if send {
@@ -1277,40 +1306,48 @@ impl Studio {
             "Hoop on the machine".into(),
             "Needle up".into(),
         ];
-        let done = self.machine.checked.iter().filter(|c| **c).count();
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = space::XS + 2.0;
-            section_label(ui, "Before you sew", &format!("{done} of {}", items.len()));
-            for (k, t) in items.iter().enumerate() {
-                ui.checkbox(&mut self.machine.checked[k], RichText::new(t).size(12.0));
-            }
-        });
+        // Open for a first stitch-out; folded by someone who knows the
+        // drill, it stays folded (as every section that folds does).
+        let open = self.prefs.fold_open("before-you-sew", true);
+        if crate::theme::fold_header(ui, "Before you sew", open).clicked() {
+            self.prefs.set_fold("before-you-sew", !open);
+        }
+        if open {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = space::XS + 2.0;
+                for (k, t) in items.iter().enumerate() {
+                    ui.checkbox(&mut self.machine.checked[k], RichText::new(t).size(12.0));
+                }
+            });
+        }
     }
 
     fn details(&mut self, ui: &mut egui::Ui, s: &Snapshot) {
         let Some(i) = &s.info else { return };
-        egui::CollapsingHeader::new(RichText::new("Machine details").size(12.5))
-            .id_salt("machine-details")
-            .show(ui, |ui| {
-                crate::theme::form(ui, "machine-details-form", |f| {
-                    let mut row = |label: &str, value: String| {
-                        f.row(label, |ui, _| {
-                            ui.label(RichText::new(value).size(12.0));
-                        });
-                    };
-                    row("Model", i.model.trim().to_string());
-                    row("Serial", i.serial.clone());
-                    row("Firmware", i.software_version.clone());
-                    row(
-                        "Sewing area",
-                        crate::units::fmt_size(i.max_width as f64, i.max_height as f64),
-                    );
-                    if let Some((since, ever)) = s.counts {
-                        row("Stitches sewn", n(ever as usize));
-                        row("Since service", n(since as usize));
-                    }
-                });
+        let open = self.prefs.fold_open("machine-details", false);
+        if crate::theme::fold_header(ui, "Machine details", open).clicked() {
+            self.prefs.set_fold("machine-details", !open);
+        }
+        if open {
+            crate::theme::form(ui, "machine-details-form", |f| {
+                let mut row = |label: &str, value: String| {
+                    f.row(label, |ui, _| {
+                        ui.label(RichText::new(value).size(12.0));
+                    });
+                };
+                row("Model", i.model.trim().to_string());
+                row("Serial", i.serial.clone());
+                row("Firmware", i.software_version.clone());
+                row(
+                    "Sewing area",
+                    crate::units::fmt_size(i.max_width as f64, i.max_height as f64),
+                );
+                if let Some((since, ever)) = s.counts {
+                    row("Stitches sewn", n(ever as usize));
+                    row("Since service", n(since as usize));
+                }
             });
+        }
         self.settings_probe(ui, s);
     }
 
@@ -1319,9 +1356,14 @@ impl Studio {
     /// bytes that changed are marked.
     fn settings_probe(&mut self, ui: &mut egui::Ui, s: &Snapshot) {
         let p = pal_ui(ui);
-        egui::CollapsingHeader::new(RichText::new("Settings bytes").size(12.5))
-            .id_salt("settings-probe")
-            .show(ui, |ui| {
+        let open = self.prefs.fold_open("settings-bytes", false);
+        if crate::theme::fold_header(ui, "Settings bytes", open).clicked() {
+            self.prefs.set_fold("settings-bytes", !open);
+        }
+        if !open {
+            return;
+        }
+        ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = space::XS + 2.0;
                 caption(
                     ui,
@@ -1378,7 +1420,7 @@ impl Studio {
                 if let Some(path) = crate::machine::settings_log_path() {
                     caption(ui, format!("Kept in {}", path.display()));
                 }
-            });
+        });
     }
 
     /// The machine at the right of the status bar, always there: its icon,
@@ -1664,7 +1706,7 @@ const HOW_TO: &str =
     "https://sewingcraft.brother.eu/en/inspiration-and-events/video-gallery/sewing-videos/pp1";
 
 /// Open a web page in the browser.
-fn open_url(url: &str) {
+pub(crate) fn open_url(url: &str) {
     let cmd = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(target_os = "windows") {
@@ -1764,6 +1806,15 @@ mod tests {
         until(&mut h, "homed", status(Status::Idle));
         // What to have ready, before sending.
         assert!(h.query_by_label("Threads to have ready").is_some());
+        // The checklist for a first stitch-out is open until it's closed,
+        // and then stays closed (it's kept with the settings).
+        assert!(h.state().prefs.fold_open("before-you-sew", true));
+        assert!(h.query_by_label("Bobbin wound and in").is_some());
+        h.get_by_label("Before you sew").click();
+        h.run_steps(8);
+        assert!(h.query_by_label("Bobbin wound and in").is_none());
+        assert!(!h.state().prefs.fold_open("before-you-sew", true));
+        assert!(h.query_by_label("Before you sew").is_some());
         h.get_by_label("Send Design").click();
         // Sent, then the outline traced (after Accept on the machine).
         until(&mut h, "sent", |s| s.uuid.is_some() && s.upload.is_none());

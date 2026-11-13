@@ -295,6 +295,7 @@ impl Studio {
         std::mem::swap(&mut self.tabs.list[at], &mut fresh);
         self.swap_live(at);
         self.enter_tab();
+        self.start_on_machine();
     }
 
     /// Before opening a document: use the tab in front if it's blank, else
@@ -357,7 +358,7 @@ impl Studio {
         };
         if self.tab_count() == 1 {
             self.leave_tab();
-            self.set_document(Document::empty());
+            self.set_document(self.blank_document());
             self.session.forget_recovery(rec);
             self.status = "Closed.".into();
             return;

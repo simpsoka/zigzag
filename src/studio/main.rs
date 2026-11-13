@@ -2,6 +2,7 @@
 //! MCP server so agents can work on the same canvas.
 
 mod agent;
+mod agent_log;
 mod app;
 mod app_icon;
 mod brush;
@@ -20,6 +21,7 @@ mod kits;
 mod layout;
 mod lettering;
 mod machine;
+mod machines;
 mod mcp;
 mod mcp_chip;
 mod native_menu;
@@ -31,6 +33,7 @@ mod perf_bench;
 mod planner;
 mod profile;
 mod session;
+mod settings;
 mod sew;
 mod shapes;
 mod snap;
@@ -42,6 +45,7 @@ mod threads;
 mod tools;
 mod trace_ui;
 mod units;
+mod update;
 mod view_tools;
 mod widgets;
 
@@ -50,11 +54,14 @@ const USAGE: &str = "usage: zigzag-studio [design.svg] [--select N] [--mcp-port 
 fn main() -> eframe::Result {
     let mut path = None;
     let mut select = None;
+    // The agent server's port: as the command line says, else the
+    // environment, else Settings (which can also turn it off).
     let mut mcp_port = std::env::var("ZIGZAG_MCP_PORT")
         .or_else(|_| std::env::var("THREADLINE_MCP_PORT"))
         .ok()
         .and_then(|v| v.parse().ok())
-        .or(Some(mcp::DEFAULT_PORT));
+        .map(Some)
+        .unwrap_or_else(|| settings::Prefs::load().agent_port());
     let mut headless = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
@@ -82,12 +89,18 @@ fn main() -> eframe::Result {
     if headless {
         // No window: the same tools, on a document only the agent sees.
         let mut studio = app::Studio::with_file(path, select);
+        studio.load_machines();
+        studio.prefs = settings::Prefs::load();
+        studio.apply_agent_log();
         let instructions = format!(
             "{} Headless: no one is watching this document and nothing is kept unless you save or export it.",
             tools::INSTRUCTIONS
         );
         mcp::serve_stdio(&tools::tool_specs(), &instructions, |name, args| {
-            studio.run_tool(name, args)
+            let at = std::time::Instant::now();
+            let result = studio.run_tool(name, args);
+            studio.log_call(name, args, at, &result);
+            result
         });
         return Ok(());
     }

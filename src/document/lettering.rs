@@ -469,6 +469,13 @@ impl TextSpec {
         s
     }
 
+    /// The scale the glyphs are drawn at, if not 1: h_scale and v_scale as
+    /// factors. (Text on a path isn't scaled: it would leave the path.)
+    fn glyph_scale(&self) -> Option<(f64, f64)> {
+        (self.path.is_none() && (self.h_scale != 100.0 || self.v_scale != 100.0))
+            .then_some((self.h_scale / 100.0, self.v_scale / 100.0))
+    }
+
     /// The `<text>` element (plus its baseline path, if any), in mm around
     /// the origin.
     fn element(&self, id: &str, arc_id: &str, transform: Option<&str>) -> String {
@@ -478,20 +485,23 @@ impl TextSpec {
             "#{:02x}{:02x}{:02x}",
             self.color[0], self.color[1], self.color[2]
         );
-        let t = transform
-            .map(|t| format!(" transform=\"{}\"", xml_escape(t)))
-            .unwrap_or_default();
-        // Horizontal and vertical scale: the glyphs scaled about the origin
-        // (the scale sits inside the object's own transform).
-        let scaled = self.h_scale != 100.0 || self.v_scale != 100.0;
-        let scale_attr = if scaled {
-            format!(
-                " transform=\"scale({} {})\"",
-                n(self.h_scale / 100.0),
-                n(self.v_scale / 100.0)
-            )
-        } else {
-            String::new()
+        // Horizontal and vertical scale: the glyphs scaled about the origin,
+        // innermost in the element's one transform (after where it's been
+        // put: `transform`, which [`Document::set_lettering`] hands back
+        // without the scale that was in it).
+        let t = match (transform, self.glyph_scale()) {
+            (None, None) => String::new(),
+            (t, scale) => format!(
+                " transform=\"{}\"",
+                [
+                    t.map(xml_escape),
+                    scale.map(|(h, v)| format!("scale({} {})", n(h), n(v)))
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+            ),
         };
         let common = format!(
             "id=\"{}\"{t} data-tl-lettering=\"{}\" {} font-size=\"{}\" letter-spacing=\"{}\"{} fill=\"{fill}\" text-anchor=\"{}\"",
@@ -552,9 +562,6 @@ impl TextSpec {
                     format!("<tspan x=\"{}\" y=\"{}\">{}</tspan>", n(x), n(y), body(l))
                 })
                 .collect();
-            if scaled {
-                return format!("<text {common}{scale_attr}>{spans}</text>");
-            }
             return format!("<text {common}>{spans}</text>");
         }
         let r = self.arc_mm.abs();
@@ -572,7 +579,7 @@ impl TextSpec {
             Align::Right => 100.0,
         };
         format!(
-            "<path id=\"{arc_id}\" d=\"{d}\" fill=\"none\" stroke=\"none\"/><text {common}{scale_attr}><textPath href=\"#{arc_id}\" startOffset=\"{}%\">{}</textPath></text>",
+            "<path id=\"{arc_id}\" d=\"{d}\" fill=\"none\" stroke=\"none\"/><text {common}><textPath href=\"#{arc_id}\" startOffset=\"{}%\">{}</textPath></text>",
             n(offset),
             body(&text)
         )
@@ -775,7 +782,21 @@ impl Document {
                     && n.attribute("id") == Some(id.as_str())
             })
             .ok_or_else(|| anyhow!("that object isn't lettering"))?;
-        let transform = n.attribute("transform").map(str::to_string);
+        // Where it's been put: its transform, less the glyph scale it was
+        // written with (which a move or a turn since has folded into one
+        // matrix with the rest).
+        let was = lettering_of(n, s).and_then(|l| l.glyph_scale());
+        let transform = n.attribute("transform").and_then(|t| {
+            let mut m = super::edit::parse_transform(t);
+            if let Some((h, v)) = was {
+                m = affine_mul(m, [1.0 / h, 0.0, 0.0, 1.0 / v, 0.0, 0.0]);
+            }
+            let same = m
+                .iter()
+                .zip(crate::geom::IDENTITY)
+                .all(|(a, b)| (a - b).abs() < 1e-9);
+            (!same).then(|| super::edit::fmt_matrix(m))
+        });
         // The arc path sits right before the text, sharing its group.
         let mut range = n.range();
         let mut arc_id = None;
@@ -1503,6 +1524,57 @@ mod tests {
         let e = Document::from_svg(&saved, "t", None).unwrap();
         assert!(e.lettering(0).is_some());
         assert_eq!(e.shapes[0].params.kind, Some(Kind::Satin));
+    }
+
+    #[test]
+    fn scaled_lettering_can_be_edited_and_moved_and_edited_again() {
+        // The glyph scale and where the lettering has been put are one
+        // transform on the element; an edit takes them apart again. (It
+        // wrote two transforms, which no longer parsed.)
+        let mut d = Document::empty();
+        let mut spec = TextSpec {
+            text: "CAMP".into(),
+            size_mm: 10.0,
+            ..TextSpec::default()
+        };
+        let i = d.add_lettering(&spec, (0.0, 0.0)).unwrap();
+        let size = |d: &Document, i: usize| {
+            let b = svg::shapes_bounds(&d.shapes[i..=i]);
+            (b.width(), b.height(), b.center())
+        };
+        let (w, h, _) = size(&d, i);
+        spec.h_scale = 150.0;
+        d.set_lettering(i, &spec).unwrap();
+        let (w1, h1, _) = size(&d, i);
+        assert!((w1 / w - 1.5).abs() < 0.02 && (h1 / h - 1.0).abs() < 0.02);
+        // Edited again: still once and a half as wide, not more.
+        spec.text = "CAMP".into();
+        spec.color = [0, 170, 0];
+        d.set_lettering(i, &spec).unwrap();
+        let (w2, h2, _) = size(&d, i);
+        assert!((w2 - w1).abs() < 1.0 && (h2 - h1).abs() < 1.0, "{w1} {w2}");
+        // Moved (the move and the scale become one matrix), then edited:
+        // it stays where it was moved to, at the scale it's set to.
+        d.transform(&[i], crate::geom::translation(P::new(200.0, -100.0)))
+            .unwrap();
+        let (_, _, c) = size(&d, i);
+        spec.v_scale = 50.0;
+        d.set_lettering(i, &spec).unwrap();
+        let (w3, h3, c3) = size(&d, i);
+        assert!((w3 - w1).abs() < 1.0, "{w1} {w3}");
+        assert!((h3 / h - 0.5).abs() < 0.03, "{h} {h3}");
+        assert!((c3.x - c.x).abs() < 2.0, "{c:?} {c3:?}");
+        // And back to no scale at all.
+        spec.h_scale = 100.0;
+        spec.v_scale = 100.0;
+        d.set_lettering(i, &spec).unwrap();
+        let (w4, h4, c4) = size(&d, i);
+        assert!((w4 - w).abs() < 1.0 && (h4 - h).abs() < 1.0);
+        assert!((c4.x - c.x).abs() < 2.0, "{c:?} {c4:?}");
+        // Saved and opened again, it's the same.
+        let saved = d.to_svg().unwrap();
+        let e = Document::from_svg(&saved, "t", None).unwrap();
+        assert!(e.lettering(0).is_some());
     }
 
     #[test]

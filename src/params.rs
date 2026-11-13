@@ -23,6 +23,7 @@
 //!   sett=LIST  tartan stripes: COLOR:MM+COLOR:MM… (mirrored to a symmetric sett)
 //!   cell=MM    cross-stitch cell size
 //!   ss=0|1     short stitches on tight satin curves
+//!   lean=DEG   satin stitches lean this far from square across (−60 to 60)
 //!   t=RRGGBB   thread color (overrides the SVG paint)
 //!   o=N        sewing order
 //!   st=T       start sewing at this point of the outline (0–1 along it)
@@ -128,6 +129,9 @@ pub mod underlay {
     }
 }
 
+/// The most a satin's stitches can lean from square across, degrees.
+pub const MAX_LEAN: f64 = 60.0;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Params {
     pub kind: Option<Kind>,
@@ -145,6 +149,9 @@ pub struct Params {
     pub order: Option<u32>,
     /// Satin auto-split: stitches longer than this (mm) are split; 0 = off.
     pub split: Option<f64>,
+    /// How far a satin's stitches lean from square across the column,
+    /// degrees (−60 to 60).
+    pub lean: Option<f64>,
     /// Where on the outline sewing starts and ends (0–1 along it; see
     /// [`crate::design::outline_at`]), like Ink/Stitch's start and end
     /// commands.
@@ -162,6 +169,13 @@ pub struct Params {
     pub cell: Option<f64>,
     /// Cut the thread after this object, whatever comes next.
     pub trim: Option<bool>,
+    /// Hidden: not shown and not sewn (its stitch settings are kept for
+    /// when it's shown again). `hide=1` in an id.
+    pub hide: Option<bool>,
+    /// Locked: it can't be selected or moved on the canvas (a background,
+    /// so dragging over it selects what's on it). It sews as usual.
+    /// `lock=1` in an id.
+    pub lock: Option<bool>,
     /// Pause the machine after this object (same thread, new color block).
     pub stop: Option<bool>,
 }
@@ -273,6 +287,16 @@ pub mod defaults {
 }
 
 impl Params {
+    /// Hidden: not shown, not sewn.
+    pub fn hidden(&self) -> bool {
+        self.hide == Some(true)
+    }
+
+    /// Locked: not to be selected or moved on the canvas.
+    pub fn locked(&self) -> bool {
+        self.lock == Some(true)
+    }
+
     pub fn fill_angle(&self) -> f64 {
         self.angle.unwrap_or(defaults::FILL_ANGLE)
     }
@@ -314,6 +338,10 @@ impl Params {
             1.0
         };
         f.satin_spacing * k
+    }
+    /// How far a satin's stitches lean from square across, degrees.
+    pub fn satin_lean(&self) -> f64 {
+        self.lean.unwrap_or(0.0).clamp(-MAX_LEAN, MAX_LEAN)
     }
     /// Longest satin stitch before it's split, mm (`None` = never split).
     pub fn satin_split(&self) -> Option<f64> {
@@ -397,6 +425,7 @@ impl Params {
             thread: child.thread.or(self.thread),
             order: child.order.or(self.order),
             split: child.split.or(self.split),
+            lean: child.lean.or(self.lean),
             start: child.start.or(self.start),
             end: child.end.or(self.end),
             spiral: child.spiral.or(self.spiral),
@@ -405,6 +434,8 @@ impl Params {
             sett: child.sett.clone().or_else(|| self.sett.clone()),
             cell: child.cell.or(self.cell),
             trim: child.trim.or(self.trim),
+            hide: child.hide.or(self.hide),
+            lock: child.lock.or(self.lock),
             stop: child.stop.or(self.stop),
         }
     }
@@ -483,9 +514,12 @@ impl Params {
             "t" | "thread" => self.thread = parse_hex(v),
             "o" | "order" => self.order = num.filter(|v| *v >= 0.0).map(|v| v as u32),
             "split" => self.split = num.filter(|v| *v >= 0.0),
+            "lean" => self.lean = num.map(|v| v.clamp(-MAX_LEAN, MAX_LEAN)),
             "st" | "start" => self.start = num.map(|v| v.rem_euclid(1.0)),
             "en" | "end" => self.end = num.map(|v| v.rem_euclid(1.0)),
             "trim" => self.trim = flag,
+            "hide" => self.hide = flag.filter(|&on| on),
+            "lock" => self.lock = flag.filter(|&on| on),
             "spiral" => self.spiral = flag,
             "style" => self.style = crate::stitch::satin::SatinStyle::parse(v),
             "colors" => {
@@ -527,6 +561,12 @@ impl Params {
         if self.stop == Some(true) {
             t.push("stop".into());
         }
+        if self.hide == Some(true) {
+            t.push("hide=1".into());
+        }
+        if self.lock == Some(true) {
+            t.push("lock=1".into());
+        }
         let mut num = |k: &str, v: Option<f64>| {
             if let Some(v) = v {
                 t.push(format!("{k}={}", fmt_num(v)));
@@ -539,6 +579,7 @@ impl Params {
         num("w", self.width);
         num("r", self.repeats.map(|r| r as f64));
         num("split", self.split);
+        num("lean", self.lean.filter(|l| *l != 0.0));
         num("st", self.start);
         num("en", self.end);
         num("cell", self.cell);
@@ -672,6 +713,7 @@ mod tests {
             order: Some(4),
             repeats: Some(3),
             split: Some(0.0),
+            lean: Some(-8.0),
             start: Some(0.25),
             end: Some(0.875),
             trim: Some(true),

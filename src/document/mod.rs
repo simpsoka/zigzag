@@ -7,6 +7,7 @@
 //! anything. Document-wide settings live in a `data-zigzag` attribute on
 //! the root `<svg>`. Everything else in the file is preserved byte for byte.
 
+use crate::formats::Lock;
 use crate::geom::P;
 use crate::params::{Fabric, Kind, Params};
 use crate::svg::{self, Geometry, PX_TO_UNITS, Part, Shape};
@@ -44,13 +45,72 @@ pub struct Settings {
     pub fabric: String,
     pub remove_overlaps: bool,
     pub hat_order: bool,
-    /// Index into the editor's hoop list.
-    pub hoop: usize,
+    /// The hoop's sewing field, width and height in mm: one of the editor's
+    /// standard hoops or any other size.
+    pub hoop: (f64, f64),
     /// Sew across gaps between objects up to this long (mm) with running
     /// stitches instead of cutting the thread (0: always cut).
     pub connect_mm: f64,
+    /// Where the thread can't get from one part of an object to the next
+    /// out of sight, sew it over the fill already there instead of
+    /// cutting it (fewer cuts; the running stitch shows on top).
+    pub over_sewn: bool,
     /// The fabric's color, for previewing the stitches on it.
     pub cloth: [u8; 3],
+    /// The machine the design is set up for: the id of a profile
+    /// ([`crate::machine::profile`]), kept as a label. What the machine
+    /// decides (the hoop) is in the settings themselves, so a design reads
+    /// the same where the profile isn't known.
+    pub machine: Option<String>,
+    /// No stitch shorter than this, mm: some machines drop the ones that
+    /// are. Short stitches are merged into their neighbours, in the plan
+    /// and in the files written.
+    pub min_stitch_mm: f64,
+    /// The lock stitches where sewing starts and before the thread is cut.
+    pub lock: Lock,
+    /// Satins narrower than this on average (mm) get a warning. How narrow
+    /// a column still sews cleanly depends on the fabric and the thread.
+    pub narrow_satin_mm: f64,
+}
+
+/// The narrowest satin that isn't warned about when a design doesn't say, mm.
+pub const DEFAULT_NARROW_SATIN_MM: f64 = 1.0;
+
+/// What the narrowest satin can be set to (mm; 0 never warns).
+pub const NARROW_SATIN_MM: std::ops::RangeInclusive<f64> = 0.0..=3.0;
+
+/// The shortest stitch when a design doesn't say, mm: what ZigZag has
+/// always kept.
+pub const DEFAULT_MIN_STITCH_MM: f64 = 0.1;
+
+/// The shortest stitches a design can ask for (mm).
+pub const MIN_STITCH_MM: std::ops::RangeInclusive<f64> = 0.1..=1.0;
+
+/// The hoop when a design doesn't say: 4×4 in.
+pub const DEFAULT_HOOP: (f64, f64) = (100.0, 100.0);
+
+/// The sides a hoop can have (mm).
+pub const HOOP_SIDE_MM: std::ops::RangeInclusive<f64> = 10.0..=1000.0;
+
+/// Files up to 0.1.2 named the hoop by its place in the editor's list of
+/// three.
+const OLD_HOOPS: [(f64, f64); 3] = [DEFAULT_HOOP, (70.0, 70.0), (130.0, 180.0)];
+
+/// A hoop size as written in files and by agents: `130x180`, width by
+/// height in mm. `None` if it isn't one or a side is out of range.
+pub fn parse_hoop(v: &str) -> Option<(f64, f64)> {
+    let (w, h) = v.trim().split_once(['x', 'X', '×'])?;
+    let (w, h): (f64, f64) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (HOOP_SIDE_MM.contains(&w) && HOOP_SIDE_MM.contains(&h)).then_some((w, h))
+}
+
+/// [`parse_hoop`]'s inverse.
+pub fn format_hoop((w, h): (f64, f64)) -> String {
+    format!(
+        "{}x{}",
+        crate::params::fmt_num(w),
+        crate::params::fmt_num(h)
+    )
 }
 
 /// The preview fabric color when a design doesn't say.
@@ -62,9 +122,14 @@ impl Default for Settings {
             fabric: "standard".into(),
             remove_overlaps: true,
             hat_order: false,
-            hoop: 0,
+            hoop: DEFAULT_HOOP,
             connect_mm: 0.0,
+            over_sewn: false,
             cloth: DEFAULT_CLOTH,
+            machine: None,
+            min_stitch_mm: DEFAULT_MIN_STITCH_MM,
+            lock: Lock::default(),
+            narrow_satin_mm: DEFAULT_NARROW_SATIN_MM,
         }
     }
 }
@@ -80,11 +145,28 @@ impl Settings {
                 "fabric" if Fabric::by_id(v).is_some() => s.fabric = v.into(),
                 "overlaps" => s.remove_overlaps = v == "1",
                 "hat" => s.hat_order = v == "1",
-                "hoop" => s.hoop = v.parse().unwrap_or(0),
+                "hoop" => {
+                    let old = || OLD_HOOPS.get(v.parse::<usize>().ok()?).copied();
+                    s.hoop = parse_hoop(v).or_else(old).unwrap_or(DEFAULT_HOOP);
+                }
                 "connect" => s.connect_mm = v.parse().unwrap_or(0.0),
+                "oversewn" => s.over_sewn = v == "1",
                 "cloth" if v.len() == 6 => {
                     if let Ok(n) = u32::from_str_radix(v, 16) {
                         s.cloth = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+                    }
+                }
+                "machine" if crate::machine::profile::is_id(v) => s.machine = Some(v.into()),
+                "minst" => {
+                    if let Some(m) = v.parse::<f64>().ok().filter(|m| m.is_finite()) {
+                        s.min_stitch_mm = m.clamp(*MIN_STITCH_MM.start(), *MIN_STITCH_MM.end());
+                    }
+                }
+                "lock" => s.lock = Lock::parse(v).unwrap_or_default(),
+                "narrowsatin" => {
+                    if let Some(m) = v.parse::<f64>().ok().filter(|m| m.is_finite()) {
+                        s.narrow_satin_mm =
+                            m.clamp(*NARROW_SATIN_MM.start(), *NARROW_SATIN_MM.end());
                     }
                 }
                 _ => {}
@@ -95,7 +177,10 @@ impl Settings {
     fn format(&self) -> String {
         let mut s = format!(
             "fabric={} overlaps={} hat={} hoop={}",
-            self.fabric, self.remove_overlaps as u8, self.hat_order as u8, self.hoop
+            self.fabric,
+            self.remove_overlaps as u8,
+            self.hat_order as u8,
+            format_hoop(self.hoop)
         );
         if self.connect_mm > 0.0 {
             s.push_str(&format!(
@@ -103,14 +188,52 @@ impl Settings {
                 crate::params::fmt_num(self.connect_mm)
             ));
         }
+        if self.over_sewn {
+            s.push_str(" oversewn=1");
+        }
         if self.cloth != DEFAULT_CLOTH {
             let [r, g, b] = self.cloth;
             s.push_str(&format!(" cloth={r:02x}{g:02x}{b:02x}"));
+        }
+        if let Some(m) = self
+            .machine
+            .as_deref()
+            .filter(|m| crate::machine::profile::is_id(m))
+        {
+            s.push_str(&format!(" machine={m}"));
+        }
+        if self.min_stitch_mm != DEFAULT_MIN_STITCH_MM {
+            s.push_str(&format!(
+                " minst={}",
+                crate::params::fmt_num(self.min_stitch_mm)
+            ));
+        }
+        if self.lock != Lock::default() {
+            s.push_str(&format!(" lock={}", self.lock.format()));
+        }
+        if self.narrow_satin_mm != DEFAULT_NARROW_SATIN_MM {
+            s.push_str(&format!(
+                " narrowsatin={}",
+                crate::params::fmt_num(self.narrow_satin_mm)
+            ));
         }
         s
     }
     pub fn fabric(&self) -> Fabric {
         *Fabric::by_id(&self.fabric).unwrap_or(Fabric::standard())
+    }
+    /// What the machine file is written with.
+    pub fn export_options(&self) -> crate::formats::ExportOptions {
+        crate::formats::ExportOptions {
+            lock: self.lock,
+            // (The usual shortest stitch is what a file's whole units give
+            // anyway: nothing more to merge.)
+            min_stitch: if self.min_stitch_mm > DEFAULT_MIN_STITCH_MM {
+                self.min_stitch_mm * 10.0
+            } else {
+                0.0
+            },
+        }
     }
 }
 
@@ -152,6 +275,9 @@ pub struct Document {
     /// by element id, each for the revision (and the shape's color and
     /// stitch type) it was read at: the panel asks every frame.
     lettering_memo: lettering::SpecMemo,
+    /// A name being given to an element (its id as it is now, and the
+    /// words of the name), for the next [`Document::sync`] to write.
+    renaming: Option<(String, Vec<String>)>,
     /// Changes whenever `xml` (and so the shapes read from it) does: a value
     /// never used before, so caches keyed by it can't mistake one version
     /// for another (an undone document keeps the revision it had).
@@ -209,8 +335,18 @@ impl Document {
                 .with_context(|| format!("tracing {}", path.display()))?;
             return Document::from_svg(&t.svg, &name, None);
         }
-        let xml =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        // Anything else is taken for an SVG; what isn't even text is a
+        // kind of file ZigZag doesn't open (a VP3, say: written, not read).
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let Ok(xml) = String::from_utf8(bytes) else {
+            bail!(
+                "{} isn't a file ZigZag can open: it opens SVG, images to trace, and {} machine files",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                crate::formats::READABLE_FORMATS.join(", ")
+            );
+        };
         Document::from_svg(&xml, &name, Some(path.to_path_buf()))
     }
 
@@ -232,6 +368,7 @@ impl Document {
             tree: None,
             root_ts: Default::default(),
             lettering_memo: Default::default(),
+            renaming: None,
             rev: next_rev(),
         };
         d.import(&HashMap::new())?;
@@ -316,6 +453,51 @@ impl Document {
             .map(|(id, p)| (renames.get(id).cloned().unwrap_or(id.clone()), *p))
             .collect();
         self.import(&uids)
+    }
+
+    /// The words of a name someone typed for an object, as they go into
+    /// its id: letters, digits and the like, with the characters ids keep
+    /// for other things (`_ , ;` between words, `=` in a setting, `#`
+    /// before a number) read as spaces. An error if nothing's left, or if
+    /// a word is a stitch setting (`satin`, `trim`, `a=45`): in an id that
+    /// would change how the object sews, not what it's called.
+    pub fn name_words_typed(name: &str) -> Result<Vec<String>> {
+        let words: Vec<String> = name
+            .split(|c: char| c.is_whitespace() || matches!(c, '_' | ',' | ';' | '=' | '#' | '"'))
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect();
+        if words.is_empty() {
+            bail!("a name needs at least one letter or number");
+        }
+        if let Some(w) = words.iter().find(|w| {
+            crate::params::is_param_token(w)
+                || Params::parse(w) != Params::default()
+                || w.to_ascii_lowercase().starts_with("tl-")
+        }) {
+            bail!("\"{w}\" is a stitch setting, so it can't be part of a name");
+        }
+        Ok(words)
+    }
+
+    /// Give the object at `index` a name (see [`Document::name_words_typed`]
+    /// for what a name can be). The name is the element's: a fill and its
+    /// outline share it, and its settings stay as they are.
+    pub fn rename(&mut self, index: usize, name: &str) -> Result<()> {
+        let words = Self::name_words_typed(name)?;
+        let Some(shape) = self.shapes.get(index) else {
+            bail!("no such object");
+        };
+        if shape.id.is_empty() {
+            bail!("this object can't be named");
+        }
+        if svg::name_words(&shape.id) == words {
+            return Ok(());
+        }
+        self.renaming = Some((shape.id.clone(), words));
+        let done = self.sync();
+        self.renaming = None;
+        done
     }
 
     /// The SVG with every object's settings written into its id.
@@ -624,7 +806,10 @@ impl Document {
                     tokens.extend(toks);
                 }
             }
-            let words = svg::name_words(id);
+            let words = match &self.renaming {
+                Some((of, words)) if of == id => words.clone(),
+                _ => svg::name_words(id),
+            };
             let mut parts: Vec<String> = words;
             parts.extend(tokens);
             // Text records itself in its id too (it outlives Illustrator
@@ -702,8 +887,68 @@ impl Document {
             remove_overlaps: self.settings.remove_overlaps,
             hat_order: self.settings.hat_order,
             connect: self.settings.connect_mm * 10.0,
+            over_sewn: self.settings.over_sewn,
+            // (A hair under, so a stitch that's exactly the shortest
+            // allowed isn't dropped for a rounding error in its length.)
+            min_stitch: self.settings.min_stitch_mm * 10.0 - 1e-6,
+            narrow_satin: self.settings.narrow_satin_mm,
             ..Default::default()
         }
+    }
+
+    /// A map from the commands of the machine file `file` (written from
+    /// `d`, this document's plan, in format `ext`) to the objects they're
+    /// for, so a checker can name the shape behind a stitch: the objects,
+    /// and the runs of commands for each. `None` for a format that has no
+    /// such map (the Skitch's PEN).
+    pub fn object_map(
+        &self,
+        d: &crate::design::Design,
+        ext: &str,
+        file: &str,
+    ) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let ranges = crate::formats::object_ranges(d, ext, &self.settings.export_options())?;
+        let names = svg::display_names(&self.shapes);
+        let mut commands = vec![0usize; self.shapes.len()];
+        let mut stitches = vec![0usize; self.shapes.len()];
+        for r in &ranges {
+            if let Some(i) = r.shape.filter(|&i| i < self.shapes.len()) {
+                commands[i] += r.last - r.first + 1;
+                stitches[i] += r.stitches.map_or(0, |(a, b)| b - a + 1);
+            }
+        }
+        let mm = |v: f64| (v * 10.0).round() / 100.0;
+        Some(json!({
+            "file": file,
+            "format": ext.to_ascii_lowercase(),
+            "numbering": "Commands are numbered from 0 in the order the file has them: every stitch, jump, trim, change of thread and the end. first_stitch and last_stitch number the stitches (needle points) alone. The locks and the jump that begin an object's stitches, and the lock and trim that end them, count as that object's; travel to an object counts as its.",
+            "coordinates": "at_mm is where a range begins: millimetres, +x right, +y down, as the design is planned",
+            "objects": self.shapes.iter().enumerate().filter(|(i, _)| commands[*i] > 0).map(|(i, s)| json!({
+                "index": i,
+                "name": names.get(i),
+                "id": s.id,
+                "kind": s.params.kind.unwrap_or(Kind::Fill).name(),
+                "commands": commands[i],
+                "stitches": stitches[i],
+            })).collect::<Vec<_>>(),
+            "ranges": ranges.iter().map(|r| json!({
+                "first": r.first,
+                "last": r.last,
+                "first_stitch": r.stitches.map(|s| s.0),
+                "last_stitch": r.stitches.map(|s| s.1),
+                "object": r.shape,
+                "at_mm": [mm(r.at.x), mm(r.at.y)],
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Where the object map for a machine file goes: beside it, as
+    /// `<file>.objects.json`.
+    pub fn object_map_path(file: &Path) -> PathBuf {
+        let mut name = file.file_name().unwrap_or_default().to_os_string();
+        name.push(".objects.json");
+        file.with_file_name(name)
     }
 
     pub fn plan(&self) -> crate::design::Design {
@@ -997,6 +1242,88 @@ mod tests {
     }
 
     #[test]
+    fn an_object_can_be_renamed_and_keeps_everything_else() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+          <path id="leaf_satin_w_x3D_2" d="M0 0h20v20h-20z" fill="#0a0" stroke="#050" stroke-width="2"/>
+          <use href="#leaf_satin_w_x3D_2" x="40"/>
+          <rect x="60" y="60" width="20" height="20" fill="#00a"/>
+        </svg>"##;
+        let mut d = Document::from_svg(svg, "t", None).unwrap();
+        let names = |d: &Document| svg::display_names(&d.shapes);
+        let before = d.shapes.len();
+        let leaf = d
+            .shapes
+            .iter()
+            .position(|s| s.label.contains("leaf"))
+            .unwrap();
+        let (kind, width, uid) = (
+            d.shapes[leaf].params.kind,
+            d.shapes[leaf].params.width,
+            d.shapes[leaf].uid,
+        );
+        d.rename(leaf, "Oak Leaf").unwrap();
+        // The name changed (for the fill and its outline alike); the
+        // settings, the copy that points at it and its place didn't.
+        assert_eq!(d.shapes.len(), before);
+        assert_eq!(d.shapes[leaf].uid, uid);
+        assert!(names(&d)[leaf].starts_with("Oak Leaf"), "{:?}", names(&d));
+        assert_eq!(
+            (d.shapes[leaf].params.kind, d.shapes[leaf].params.width),
+            (kind, width)
+        );
+        assert_eq!(
+            names(&d).iter().filter(|n| n.contains("Oak Leaf")).count(),
+            names(&d).iter().filter(|n| !n.contains("Shape")).count()
+        );
+        assert!(!names(&d).iter().any(|n| n.contains("leaf")));
+        // It's in the file, and reads back.
+        let out = d.to_svg().unwrap();
+        assert!(out.contains("id=\"Oak_Leaf_"), "{out}");
+        let again = Document::from_svg(&out, "t", None).unwrap();
+        assert_eq!(again.shapes.len(), before);
+        assert!(svg::display_names(&again.shapes)[leaf].starts_with("Oak Leaf"));
+        // An object with no name of its own gets one. (By its uid: with
+        // copies about, a sync can move objects in the list.)
+        let rect_uid = d
+            .shapes
+            .iter()
+            .find(|s| s.color == [0, 0, 0xaa])
+            .unwrap()
+            .uid;
+        let at = |d: &Document| d.shapes.iter().position(|s| s.uid == rect_uid).unwrap();
+        let rect = at(&d);
+        d.rename(rect, "  back, panel ").unwrap();
+        assert_eq!(names(&d)[at(&d)], "back panel");
+        // The same name again changes nothing.
+        let xml = d.xml.clone();
+        let rect = at(&d);
+        d.rename(rect, "back panel").unwrap();
+        assert_eq!(d.xml, xml);
+        // A name can't be nothing, or a stitch setting (which in an id
+        // would change how the object sews).
+        for bad in ["", "   ", "_;,", "satin", "Front Fill", "trim"] {
+            let rect = at(&d);
+            assert!(d.rename(rect, bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(names(&d)[at(&d)], "back panel");
+        // (An `=` can't make a setting of it: it's read as a space.)
+        assert_eq!(Document::name_words_typed("a=45").unwrap(), ["a", "45"]);
+        // Two objects can have the same name: the ids are told apart.
+        let rect = at(&d);
+        d.rename(rect, "Oak Leaf").unwrap();
+        assert_eq!(d.shapes.len(), before);
+        assert_eq!(
+            names(&d)
+                .iter()
+                .filter(|n| n.starts_with("Oak Leaf"))
+                .count(),
+            3
+        );
+        let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
+        assert_eq!(again.shapes.len(), before);
+    }
+
+    #[test]
     fn placing_artwork_twice_makes_two_groups() {
         let art = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">
           <g id="pair"><rect width="10" height="10"/><rect x="20" width="10" height="10"/></g>
@@ -1269,6 +1596,199 @@ mod tests {
         assert!(out.contains("cloth=1a2b3c"), "{out}");
         let back = Document::from_svg(&out, "t", None).unwrap();
         assert_eq!(back.settings.cloth, [0x1a, 0x2b, 0x3c]);
+    }
+
+    #[test]
+    fn the_hoop_is_saved_as_a_size_and_old_files_still_read() {
+        let mut d = Document::empty();
+        assert_eq!(d.settings.hoop, DEFAULT_HOOP);
+        d.settings.hoop = (152.5, 220.0);
+        let out = d.to_svg().unwrap();
+        assert!(out.contains("hoop=152.5x220"), "{out}");
+        let back = Document::from_svg(&out, "t", None).unwrap();
+        assert_eq!(back.settings.hoop, (152.5, 220.0));
+        // Up to 0.1.2 the hoop was its place in a list of three.
+        for (old, size) in [
+            ("0", (100.0, 100.0)),
+            ("1", (70.0, 70.0)),
+            ("2", (130.0, 180.0)),
+            ("9", DEFAULT_HOOP),
+            ("5x20000", DEFAULT_HOOP),
+            ("junk", DEFAULT_HOOP),
+        ] {
+            let s = Settings::parse(&format!("fabric=standard hoop={old}"));
+            assert_eq!(s.hoop, size, "hoop={old}");
+        }
+        assert_eq!(parse_hoop("130 × 180"), Some((130.0, 180.0)));
+        assert_eq!(parse_hoop("130"), None);
+    }
+
+    #[test]
+    fn the_machine_is_saved_as_a_label_only_when_one_is_chosen() {
+        let mut d = Document::empty();
+        assert_eq!(d.settings.machine, None);
+        // No machine, no token: files written before stay as they were.
+        assert!(!d.to_svg().unwrap().contains("machine="));
+        let melco = crate::machine::profile::builtin_named("melco-summit").unwrap();
+        melco.apply(&mut d.settings, false);
+        let out = d.to_svg().unwrap();
+        assert!(out.contains("hoop=410x393 machine=melco-summit"), "{out}");
+        let back = Document::from_svg(&out, "t", None).unwrap();
+        assert_eq!(back.settings, d.settings);
+        // A machine this computer has no profile for is still the label,
+        // and the hoop it chose is still the hoop.
+        let s = Settings::parse("fabric=standard hoop=300x210 machine=shop-barudan");
+        assert_eq!(s.machine.as_deref(), Some("shop-barudan"));
+        assert_eq!(s.hoop, (300.0, 210.0));
+        // Not a name a file can hold: no machine.
+        assert_eq!(Settings::parse("machine=Bad_Name").machine, None);
+    }
+
+    #[test]
+    fn the_shortest_stitch_and_the_locks_are_saved_when_they_are_not_the_usual() {
+        use crate::formats::LockStyle;
+        let mut d = Document::empty();
+        let out = d.to_svg().unwrap();
+        assert!(!out.contains("minst=") && !out.contains("lock="), "{out}");
+        assert_eq!(d.settings.export_options(), Default::default());
+        d.settings.min_stitch_mm = 0.4;
+        d.settings.lock = Lock::new(LockStyle::Triangle, 0.5, 3);
+        let out = d.to_svg().unwrap();
+        assert!(out.contains("minst=0.4 lock=triangle:0.5:3"), "{out}");
+        let back = Document::from_svg(&out, "t", None).unwrap();
+        assert_eq!(back.settings, d.settings);
+        assert_eq!(back.settings.export_options().min_stitch, 4.0);
+        assert!(back.plan_options().min_stitch < 4.0 && back.plan_options().min_stitch > 3.99);
+        // How narrow a satin may be before it's warned about, likewise.
+        assert!(!out.contains("narrowsatin="), "{out}");
+        d.settings.narrow_satin_mm = 0.8;
+        let out = d.to_svg().unwrap();
+        assert!(out.contains(" narrowsatin=0.8"), "{out}");
+        let back = Document::from_svg(&out, "t", None).unwrap();
+        assert_eq!(back.plan_options().narrow_satin, 0.8);
+        assert_eq!(Settings::parse("narrowsatin=9").narrow_satin_mm, 3.0);
+        // Out of range is brought in; nonsense is the usual.
+        let s = Settings::parse("minst=30 lock=knot");
+        assert_eq!((s.min_stitch_mm, s.lock), (1.0, Lock::default()));
+        assert_eq!(Settings::parse("lock=none").lock.style, LockStyle::None);
+    }
+
+    #[test]
+    fn a_shortest_stitch_holds_through_the_plan_and_the_file() {
+        // Fills (0.25 mm rows), a satin that narrows to nothing, objects a
+        // short hop apart: all sources of stitches under 0.4 mm.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="60mm" viewBox="0 0 60 60">
+            <circle cx="15" cy="15" r="10" fill="#203040"/>
+            <rect id="fill_a_x3D_45" x="30" y="5" width="12" height="12" fill="#203040"/>
+            <rect x="42.5" y="5" width="12" height="12" fill="#203040"/>
+            <path id="satin" d="M10 40 Q30 30 50 40 Q30 50 10 40 Z" fill="#203040"/>
+            <path d="M5 55 L55 55" fill="none" stroke="#203040" stroke-width="0.3"/>
+        </svg>"##;
+        let mut doc = Document::from_svg(svg, "t", None).unwrap();
+        let shortest = |doc: &Document| {
+            let d = doc.plan();
+            let plan = d
+                .blocks
+                .iter()
+                .flat_map(|b| &b.runs)
+                .flat_map(|r| r.pts.windows(2).map(|w| w[0].dist(w[1])))
+                .fold(f64::INFINITY, f64::min);
+            let cmds = crate::formats::dst::stream_with(&d, &doc.settings.export_options());
+            let file = cmds
+                .windows(2)
+                .filter(|w| {
+                    w[0].op == crate::formats::Op::Stitch && w[1].op == crate::formats::Op::Stitch
+                })
+                .map(|w| P::new(w[0].x, w[0].y).dist(P::new(w[1].x, w[1].y)))
+                .fold(f64::INFINITY, f64::min);
+            (plan, file, d.stitch_count())
+        };
+        let (plan, file, usual) = shortest(&doc);
+        assert!(
+            plan < 3.0 && file < 3.0,
+            "the usual plan has short stitches"
+        );
+        for mm in [0.4, 0.6] {
+            doc.settings.min_stitch_mm = mm;
+            let (plan, file, n) = shortest(&doc);
+            assert!(plan >= mm * 10.0 - 1e-6, "{mm}: {plan} in the plan");
+            assert!(file >= mm * 10.0, "{mm}: {file} in the file");
+            // Merged or sewn in another order, not thinned out.
+            assert!(n as f64 > usual as f64 * 0.97, "{mm}: {n} of {usual}");
+        }
+    }
+
+    #[test]
+    fn the_object_map_says_which_object_every_command_is_for() {
+        // Two squares in one thread (joined: the second begins where the
+        // first ends, near enough to sew across) and a line in another.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="30mm" viewBox="0 0 60 30">
+            <rect id="left" x="5" y="5" width="12" height="12" fill="#203040"/>
+            <rect id="right" x="17.5" y="5" width="12" height="12" fill="#203040"/>
+            <path id="line" d="M35 5 L55 25" fill="none" stroke="#c00000" stroke-width="0.3"/>
+        </svg>"##;
+        let doc = Document::from_svg(svg, "t", None).unwrap();
+        let d = doc.plan();
+        for ext in ["dst", "exp", "pes", "jef", "vp3"] {
+            let map = doc.object_map(&d, ext, &format!("t.{ext}")).unwrap();
+            let ranges = map["ranges"].as_array().unwrap();
+            // Every command once, in order, none left out.
+            let mut next = 0;
+            for r in ranges {
+                assert_eq!(r["first"], next, "{ext}");
+                next = r["last"].as_u64().unwrap() + 1;
+            }
+            // (The same stream the writers write.)
+            if ext == "dst" {
+                let cmds = crate::formats::dst::stream_with(&d, &doc.settings.export_options());
+                assert_eq!(next as usize, cmds.len());
+                let n = cmds
+                    .iter()
+                    .filter(|c| c.op == crate::formats::Op::Stitch)
+                    .count() as u64;
+                let last = ranges
+                    .iter()
+                    .filter_map(|r| r["last_stitch"].as_u64())
+                    .max()
+                    .unwrap();
+                assert_eq!(last + 1, n);
+            }
+            // Left, right, a change of thread, the line, the end.
+            let who: Vec<Option<u64>> = ranges.iter().map(|r| r["object"].as_u64()).collect();
+            assert_eq!(who, [Some(0), Some(1), None, Some(2), None], "{ext}");
+            // Each object by name, with its share of the stitches.
+            let objects = map["objects"].as_array().unwrap();
+            let names: Vec<&str> = objects
+                .iter()
+                .map(|o| o["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["left", "right", "line"]);
+            assert_eq!(objects[2]["kind"], "run");
+            for (o, r) in objects.iter().zip([&ranges[0], &ranges[1], &ranges[3]]) {
+                assert_eq!(
+                    o["commands"],
+                    r["last"].as_u64().unwrap() - r["first"].as_u64().unwrap() + 1
+                );
+                assert!(
+                    o["stitches"].as_u64().unwrap()
+                        >= d.per_shape[o["index"].as_u64().unwrap() as usize] as u64 - 2
+                );
+            }
+            // The line's stitches begin (with the jump to them) after the
+            // change of thread, where the squares ended; all on the cloth.
+            for r in ranges {
+                let (x, y) = (
+                    r["at_mm"][0].as_f64().unwrap(),
+                    r["at_mm"][1].as_f64().unwrap(),
+                );
+                assert!(x.abs() <= 30.0 && y.abs() <= 15.0, "{ext}: {r}");
+            }
+        }
+        assert!(doc.object_map(&d, "pen", "t.pen").is_none());
+        assert_eq!(
+            Document::object_map_path(Path::new("/tmp/a b/logo.exp")),
+            Path::new("/tmp/a b/logo.exp.objects.json")
+        );
     }
 
     #[test]

@@ -21,15 +21,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Convert an SVG (or a PNG/JPEG logo, traced first). Output format comes from each file extension:
+    /// Convert an SVG (or a PNG, JPEG, WebP, GIF, BMP or TIFF logo, traced first). Output format comes from each file extension:
     /// .pes .dst .exp .jef .vp3 .pec .pen (Skitch stream), .svg or .png (stitch preview), .html (worksheet).
     Convert {
         input: PathBuf,
         #[arg(short, long = "out", required = true)]
         out: Vec<PathBuf>,
-        /// Draw a square hoop of this size (mm) in previews.
-        #[arg(long, default_value_t = 100.0)]
-        hoop: f64,
+        /// The hoop for previews and checks, in mm: WIDTHxHEIGHT (130x180)
+        /// or one number for a square. Default: the hoop saved in the file
+        /// (100 × 100 if none).
+        #[arg(long, value_parser = parse_hoop)]
+        hoop: Option<(f64, f64)>,
+        /// Beside each machine file, write FILE.objects.json: which object
+        /// each stitch, jump and trim in it is for.
+        #[arg(long)]
+        objects: bool,
         #[command(flatten)]
         settings: SettingsArgs,
     },
@@ -41,6 +47,8 @@ enum Cmd {
     },
     /// List fabric presets.
     Fabrics,
+    /// List the machines a design can be set up for (`--machine`).
+    Machines,
     /// List the Skitch conversation in a Bluetooth recording of Artspira
     /// (iPhone PacketLogger .pklg, or Android btsnoop_hci.log), to work out
     /// undocumented commands such as the machine settings.
@@ -72,9 +80,31 @@ struct SettingsArgs {
     /// Fabric preset (see `zigzag fabrics`).
     #[arg(long)]
     fabric: Option<String>,
+    /// The machine the design is for (see `zigzag machines`): the design
+    /// goes in the machine's default hoop unless it's already in one of
+    /// its hoops.
+    #[arg(long)]
+    machine: Option<String>,
+    /// No stitch shorter than this, mm (0.1 to 1): for machines that drop
+    /// short stitches. Default: what the file or the machine says.
+    #[arg(long, value_name = "MM")]
+    min_stitch: Option<f64>,
+    /// Lock stitches: none, or STYLE:MM:COUNT with style back or triangle
+    /// (back:0.4:4 is the usual). Default: what the file or the machine says.
+    #[arg(long, value_name = "LOCK")]
+    lock: Option<String>,
+    /// Warn about satins narrower than this on average, mm (0 to 3; 0
+    /// never warns). Default: what the file says, or 1.
+    #[arg(long, value_name = "MM")]
+    narrow_satin: Option<f64>,
     /// Cap sewing order: center-out, bottom-up.
     #[arg(long)]
     hat: bool,
+    /// Where the thread can't get from one part of an object to the next
+    /// out of sight, sew it over the fill already there instead of
+    /// cutting it: fewer cuts, and running stitch on top of the fill.
+    #[arg(long)]
+    over_sewn: bool,
     /// Keep fill stitches underneath overlapping objects.
     #[arg(long)]
     keep_overlaps: bool,
@@ -89,8 +119,37 @@ impl SettingsArgs {
             }
             doc.settings.fabric = f.clone();
         }
+        if let Some(m) = &self.machine {
+            let Some(p) = zigzag::machine::profile::builtin_named(m) else {
+                bail!("unknown machine '{m}' (see `zigzag machines`)");
+            };
+            p.apply(&mut doc.settings, true);
+        }
+        if let Some(m) = self.min_stitch {
+            if !zigzag::document::MIN_STITCH_MM.contains(&m) {
+                bail!("--min-stitch must be from 0.1 to 1 (mm)");
+            }
+            doc.settings.min_stitch_mm = m;
+        }
+        if let Some(l) = &self.lock {
+            let Some(lock) = zigzag::formats::Lock::parse(l) else {
+                bail!(
+                    "--lock must be none, back, triangle, or STYLE:MM:COUNT (e.g. triangle:0.5:3)"
+                );
+            };
+            doc.settings.lock = lock;
+        }
+        if let Some(m) = self.narrow_satin {
+            if !zigzag::document::NARROW_SATIN_MM.contains(&m) {
+                bail!("--narrow-satin must be from 0 to 3 (mm)");
+            }
+            doc.settings.narrow_satin_mm = m;
+        }
         if self.hat {
             doc.settings.hat_order = true;
+        }
+        if self.over_sewn {
+            doc.settings.over_sewn = true;
         }
         if self.keep_overlaps {
             doc.settings.remove_overlaps = false;
@@ -133,15 +192,24 @@ fn main() -> Result<()> {
             input,
             out,
             hoop,
+            objects,
             settings,
         } => {
             let t0 = Instant::now();
             let doc = settings.open(&input)?;
+            let hoop = hoop.unwrap_or(doc.settings.hoop);
             let t_load = t0.elapsed();
             let d = doc.plan();
             let t_plan = t0.elapsed() - t_load;
             for path in &out {
                 write_output(&doc, &d, path, hoop)?;
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let file = path.file_name().unwrap_or_default().to_string_lossy();
+                if objects && let Some(map) = doc.object_map(&d, ext, &file) {
+                    let to = Document::object_map_path(path);
+                    std::fs::write(&to, serde_json::to_string_pretty(&map)?)?;
+                    eprintln!("wrote {}", to.display());
+                }
             }
             summary(&d);
             print_checks(&doc, &d, hoop);
@@ -170,11 +238,31 @@ fn main() -> Result<()> {
                 }
             );
             summary(&d);
-            print_checks(&doc, &d, 100.0);
+            print_checks(&doc, &d, doc.settings.hoop);
         }
         Cmd::Fabrics => {
             for f in FABRICS {
                 println!("{:<15} {}\n{:<15} {}", f.id, f.name, "", f.about);
+            }
+        }
+        Cmd::Machines => {
+            for p in zigzag::machine::profile::builtin() {
+                let hoops: Vec<String> = p
+                    .hoops
+                    .iter()
+                    .map(|&h| zigzag::document::format_hoop(h))
+                    .collect();
+                println!(
+                    "{:<15} {}\n{:<15} hoops {} mm{}{}",
+                    p.id,
+                    p.name,
+                    "",
+                    hoops.join(", "),
+                    p.format
+                        .map(|f| format!("; reads .{f}"))
+                        .unwrap_or_default(),
+                    if p.tested { "; sewn from ZigZag" } else { "" }
+                );
             }
         }
         Cmd::Skitch { cmd, name, scan } => skitch(cmd, name, scan)?,
@@ -213,7 +301,15 @@ fn ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-fn write_output(doc: &Document, d: &Design, path: &Path, hoop: f64) -> Result<()> {
+/// `--hoop`: `130x180`, or `100` for a square.
+fn parse_hoop(v: &str) -> std::result::Result<(f64, f64), String> {
+    let square = || v.parse::<f64>().ok().map(|s| format!("{s}x{s}"));
+    zigzag::document::parse_hoop(v)
+        .or_else(|| zigzag::document::parse_hoop(&square()?))
+        .ok_or_else(|| "use WIDTHxHEIGHT in mm, e.g. 130x180, each side 10 to 1000".to_string())
+}
+
+fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Result<()> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -224,16 +320,24 @@ fn write_output(doc: &Document, d: &Design, path: &Path, hoop: f64) -> Result<()
             let info = zigzag::formats::worksheet::WorksheetInfo {
                 title: doc.name.clone(),
                 fabric: doc.settings.fabric().name.to_string(),
-                hoop: Some((format!("{hoop:.0} × {hoop:.0} mm"), hoop, hoop)),
+                hoop: Some((
+                    format!(
+                        "{} × {} mm",
+                        zigzag::params::fmt_num(hoop.0),
+                        zigzag::params::fmt_num(hoop.1)
+                    ),
+                    hoop.0,
+                    hoop.1,
+                )),
                 background: [255, 255, 255],
                 names: zigzag::svg::display_names(&doc.shapes),
                 spm: 400.0,
             };
             zigzag::formats::worksheet::html(d, &info)?.into_bytes()
         }
-        "svg" => preview::write_svg(d, &preview::PreviewOptions { hoop_mm: Some((hoop, hoop)), ..Default::default() }).into_bytes(),
-        "png" => preview::render_png(d, &preview::PreviewOptions { hoop_mm: Some((hoop, hoop)), ..Default::default() }, 1200)?,
-        other => zigzag::formats::write_format(d, other)
+        "svg" => preview::write_svg(d, &preview::PreviewOptions { hoop_mm: Some(hoop), ..Default::default() }).into_bytes(),
+        "png" => preview::render_png(d, &preview::PreviewOptions { hoop_mm: Some(hoop), ..Default::default() }, 1200)?,
+        other => zigzag::formats::write_format_with(d, other, &doc.settings.export_options())
             .map_err(|_| anyhow::anyhow!("unknown output format '.{other}' (use .pes .dst .exp .jef .vp3 .pec .pen .svg .png, or .html for a worksheet)"))?,
     };
     std::fs::write(path, bytes)?;
@@ -241,9 +345,9 @@ fn write_output(doc: &Document, d: &Design, path: &Path, hoop: f64) -> Result<()
     Ok(())
 }
 
-fn print_checks(doc: &Document, d: &Design, hoop: f64) {
+fn print_checks(doc: &Document, d: &Design, hoop: (f64, f64)) {
     let names = zigzag::svg::display_names(&doc.shapes);
-    for issue in checks::check(&doc.shapes, d, &doc.plan_options(), Some((hoop, hoop))) {
+    for issue in checks::check(&doc.shapes, d, &doc.plan_options(), Some(hoop)) {
         let level = match issue.level {
             Level::Error => "error",
             Level::Warning => "warning",

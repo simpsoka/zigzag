@@ -65,9 +65,12 @@ mod imp {
             Key::Equals => Code::Equal,
             Key::Minus => Code::Minus,
             Key::Num0 => Code::Digit0,
+            Key::Num2 => Code::Digit2,
+            Key::Num3 => Code::Digit3,
             Key::OpenBracket => Code::BracketLeft,
             Key::CloseBracket => Code::BracketRight,
             Key::Quote => Code::Quote,
+            Key::Comma => Code::Comma,
             _ => return None,
         })
     }
@@ -139,16 +142,21 @@ mod imp {
                 state: HashMap::new(),
             };
             let app = Submenu::new("ZigZag", true);
+            app.append_items(&[&PredefinedMenuItem::about(
+                None,
+                Some(AboutMetadata {
+                    name: Some("ZigZag".into()),
+                    version: Some(env!("CARGO_PKG_VERSION").into()),
+                    comments: Some("SVG to machine embroidery".into()),
+                    ..Default::default()
+                }),
+            )])?;
+            // Check for Updates…, under About as Mac apps have it.
+            me.fill(&app, &[crate::commands::UPDATES_ITEM], studio)?;
+            app.append_items(&[&PredefinedMenuItem::separator()])?;
+            // Settings…, where a Mac app has it.
+            me.fill(&app, &[crate::commands::SETTINGS_ITEM], studio)?;
             app.append_items(&[
-                &PredefinedMenuItem::about(
-                    None,
-                    Some(AboutMetadata {
-                        name: Some("ZigZag".into()),
-                        version: Some(env!("CARGO_PKG_VERSION").into()),
-                        comments: Some("SVG to machine embroidery".into()),
-                        ..Default::default()
-                    }),
-                ),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::services(None),
                 &PredefinedMenuItem::separator(),
@@ -179,6 +187,11 @@ mod imp {
                     ])?;
                     #[cfg(target_os = "macos")]
                     sub.set_as_windows_menu_for_nsapp();
+                }
+                // (The Mac puts its search of the menus at the top of Help.)
+                #[cfg(target_os = "macos")]
+                if title == "Help" {
+                    sub.set_as_help_menu_for_nsapp();
                 }
                 me._menu.append(&sub)?;
             }

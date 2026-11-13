@@ -61,24 +61,35 @@ pub fn kind_help(k: Kind, on_filled_shape: bool) -> &'static str {
     }
 }
 
+/// Every stitch type, in the order the Stitch panel shows them.
+pub const ALL_KINDS: [Kind; 12] = [
+    Kind::Fill,
+    Kind::Satin,
+    Kind::Run,
+    Kind::Contour,
+    Kind::Blanket,
+    Kind::Applique,
+    Kind::Meander,
+    Kind::Ripple,
+    Kind::Cross,
+    Kind::Tartan,
+    Kind::Manual,
+    Kind::Skip,
+];
+
+/// Why a stitch type an object can't take is dimmed in the Stitch panel
+/// (only a line can't take one: the types that cover an area).
+pub fn kind_unavailable(k: Kind) -> String {
+    format!(
+        "{}\n{} covers an area, so it needs a filled shape. This object is a line.",
+        kind_blurb(k),
+        kind_name(k)
+    )
+}
+
 pub fn allowed_kinds(s: &Shape) -> Vec<Kind> {
     match s.geometry {
-        Geometry::Fill { .. } => {
-            vec![
-                Kind::Fill,
-                Kind::Satin,
-                Kind::Run,
-                Kind::Contour,
-                Kind::Blanket,
-                Kind::Applique,
-                Kind::Meander,
-                Kind::Ripple,
-                Kind::Cross,
-                Kind::Tartan,
-                Kind::Manual,
-                Kind::Skip,
-            ]
-        }
+        Geometry::Fill { .. } => ALL_KINDS.to_vec(),
         Geometry::Stroke { .. } => vec![
             Kind::Satin,
             Kind::Run,
@@ -161,14 +172,48 @@ pub fn kind_button(ui: &mut egui::Ui, k: Kind, selected: bool, enabled: bool) ->
 }
 
 /// The larger stitch-type tile for a selected object: the same icon, with
-/// its name under it. `w` × `h` points.
-pub fn kind_tile(ui: &mut egui::Ui, k: Kind, selected: bool, w: f32, h: f32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+/// its name under it. `w` × `h` points. Dimmed, and not to be clicked,
+/// when the object can't take that type (`enabled` false).
+pub fn kind_tile(
+    ui: &mut egui::Ui,
+    k: Kind,
+    selected: bool,
+    enabled: bool,
+    w: f32,
+    h: f32,
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense);
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, selected, kind_name(k))
+        egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, kind_name(k))
     });
     let p = crate::theme::pal_ui(ui);
     let painter = ui.painter();
+    if !enabled {
+        painter.rect_stroke(
+            rect,
+            6.0,
+            Stroke::new(1.0, p.separator.gamma_multiply(0.6)),
+            egui::StrokeKind::Inside,
+        );
+        let icon = Rect::from_center_size(
+            Pos2::new(rect.center().x, rect.top() + crate::theme::space::S + 9.0),
+            Vec2::splat(18.0),
+        );
+        draw_kind_icon(painter, icon, k, p.tertiary);
+        painter.text(
+            Pos2::new(rect.center().x, rect.bottom() - crate::theme::space::S),
+            egui::Align2::CENTER_BOTTOM,
+            kind_name(k),
+            egui::FontId::proportional(11.0),
+            p.tertiary,
+        );
+        return resp;
+    }
     let (bg, border) = if selected {
         (
             p.accent.gamma_multiply(if p.dark { 0.28 } else { 0.14 }),

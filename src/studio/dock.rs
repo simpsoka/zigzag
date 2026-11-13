@@ -5,7 +5,8 @@
 //! flies out beside the strip. Panels can also be collapsed, hidden, and
 //! shown again from the Window menu. The layout is remembered.
 
-use crate::app::{HOOPS, Studio, Tool};
+use crate::app::{Studio, Tool};
+use crate::commands::Flag;
 use crate::icons::{self, Icon};
 use crate::theme::{self, Form, callout, caption, form, icon_button, pal_ui, value_row};
 use crate::widgets::*;
@@ -1650,9 +1651,25 @@ impl Studio {
         let toggle = ui.input(|i| i.modifiers.shift || i.modifiers.command);
         let mut clicked = None;
         let mut group_click: Option<Vec<usize>> = None;
+        // A name being typed for an object that's no longer there (another
+        // document, an undo) is dropped.
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| !self.doc.shapes.iter().any(|s| s.uid == r.0))
+        {
+            self.renaming = None;
+        }
+        // The name typed, when it's done with: (uid, name), or `None` for
+        // the name left as it was.
+        let mut renamed: Option<Option<(usize, String)>> = None;
         // Only the rows in view are laid out and painted (a traced design
         // has hundreds; each row is text, an icon and a hover check).
         const ROW: f32 = 26.0;
+        // An eye or a lock clicked: whose, which, and with Option held
+        // (then it's everything else's).
+        let mut flag_click: Option<(Vec<usize>, Flag, bool)> = None;
+        let others = ui.input(|i| i.modifiers.alt);
         egui::ScrollArea::vertical()
             .id_salt("objects")
             .max_height(list_h)
@@ -1668,10 +1685,20 @@ impl Studio {
                 for row in &rows[range] {
                     let (i, depth) = match row {
                         ObjRow::Group { id, depth, members } => {
-                            let indent = *depth as f32 * 14.0;
+                            let indent = *depth as f32 * 14.0 + GUTTER;
                             let (rect, resp) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), ROW),
                                 Sense::click(),
+                            );
+                            let body = row_body(rect);
+                            let gutter = gutter_flag(rect, resp.interact_pointer_pos());
+                            eye_and_lock(
+                                ui.painter(),
+                                rect,
+                                resp.hover_pos(),
+                                self.flagged(members, Flag::Hide),
+                                self.flagged(members, Flag::Lock),
+                                &p,
                             );
                             let open = self.layout.expanded.contains(id);
                             let label = Studio::group_label(id);
@@ -1682,11 +1709,11 @@ impl Studio {
                             });
                             let painter = ui.painter();
                             if all {
-                                painter.rect_filled(rect, 5.0, p.accent);
+                                painter.rect_filled(body, 5.0, p.accent);
                             } else if resp.hovered() {
-                                painter.rect_filled(rect, 5.0, p.hover);
+                                painter.rect_filled(body, 5.0, p.hover);
                             } else if some {
-                                painter.rect_filled(rect, 5.0, p.accent.gamma_multiply(0.18));
+                                painter.rect_filled(body, 5.0, p.accent.gamma_multiply(0.18));
                             }
                             let fg = if all { Color32::WHITE } else { p.text };
                             let fg2 = if all {
@@ -1756,7 +1783,11 @@ impl Studio {
                             let on_chevron = resp
                                 .interact_pointer_pos()
                                 .is_some_and(|q| q.x < rect.left() + indent + 18.0);
-                            if (resp.clicked() && on_chevron) || resp.double_clicked() {
+                            if let Some(flag) = gutter {
+                                if resp.clicked() {
+                                    flag_click = Some((members.clone(), flag, others));
+                                }
+                            } else if (resp.clicked() && on_chevron) || resp.double_clicked() {
                                 if open {
                                     self.layout.expanded.remove(id);
                                 } else {
@@ -1775,10 +1806,15 @@ impl Studio {
                         }
                         ObjRow::Item { i, depth } => (*i, *depth),
                     };
-                    let indent = depth as f32 * 14.0;
-                    let (kind, color) = {
+                    let indent = depth as f32 * 14.0 + GUTTER;
+                    let (kind, color, hidden, locked) = {
                         let s = &self.doc.shapes[i];
-                        (s.params.kind.unwrap_or(Kind::Fill), s.color)
+                        (
+                            s.params.kind.unwrap_or(Kind::Fill),
+                            s.color,
+                            s.params.hidden(),
+                            s.params.locked(),
+                        )
                     };
                     let count = self.design.per_shape.get(i).copied().unwrap_or(0);
                     let (rect, resp) = ui
@@ -1789,15 +1825,18 @@ impl Studio {
                         egui::WidgetInfo::selected(egui::Role::ListItem, true, selected, &label)
                     });
                     let painter = ui.painter();
+                    let body = row_body(rect);
+                    let gutter = gutter_flag(rect, resp.interact_pointer_pos());
+                    eye_and_lock(painter, rect, resp.hover_pos(), hidden, locked, &p);
                     if selected {
                         let c = if Some(i) == sel {
                             p.accent
                         } else {
                             p.accent.gamma_multiply(0.55)
                         };
-                        painter.rect_filled(rect, 5.0, c);
+                        painter.rect_filled(body, 5.0, c);
                     } else if resp.hovered() || self.hovered == Some(i) {
-                        painter.rect_filled(rect, 5.0, p.hover);
+                        painter.rect_filled(body, 5.0, p.hover);
                     }
                     let fg = if selected { Color32::WHITE } else { p.text };
                     let fg2 = if selected {
@@ -1817,9 +1856,16 @@ impl Studio {
                         Vec2::splat(13.0),
                     );
                     draw_kind_icon(painter, icon, kind, fg2);
-                    let name_color = if kind == Kind::Skip { fg2 } else { fg };
+                    // (Off, or hidden: dimmed, and saying which.)
+                    let name_color = if kind == Kind::Skip || hidden {
+                        fg2
+                    } else {
+                        fg
+                    };
                     let right = rect.right() - 8.0;
-                    let count_text = if kind == Kind::Skip {
+                    let count_text = if hidden {
+                        "hidden".to_string()
+                    } else if kind == Kind::Skip {
                         "off".to_string()
                     } else {
                         fmt_int(count)
@@ -1851,18 +1897,80 @@ impl Studio {
                         Pos2::new(rect.left() + indent + 42.0, rect.top()),
                         Pos2::new(name_right, rect.bottom()),
                     );
-                    painter.with_clip_rect(name_rect).text(
-                        Pos2::new(name_rect.left(), rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        &label,
-                        egui::FontId::proportional(13.0),
-                        name_color,
-                    );
-                    if resp.clicked() {
-                        clicked = Some(i);
+                    let uid = self.doc.shapes[i].uid;
+                    let editing = self.renaming.as_ref().is_some_and(|r| r.0 == uid);
+                    if let Some((_, text, fresh)) = self.renaming.as_mut().filter(|_| editing) {
+                        // The name as a field to type in, where it was.
+                        let field = Rect::from_min_max(
+                            Pos2::new(name_rect.left() - 4.0, rect.top() + 2.0),
+                            Pos2::new(name_rect.right(), rect.bottom() - 2.0),
+                        );
+                        let out = ui
+                            .scope_builder(egui::UiBuilder::new().max_rect(field), |ui| {
+                                egui::TextEdit::singleline(text)
+                                    .font(egui::FontId::proportional(13.0))
+                                    .desired_width(field.width())
+                                    .margin(egui::Margin::symmetric(4, 2))
+                                    .show(ui)
+                            })
+                            .inner;
+                        out.response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Object name")
+                        });
+                        if *fresh {
+                            // Just opened: the keyboard, and the whole name
+                            // selected, so typing replaces it.
+                            *fresh = false;
+                            out.response.request_focus();
+                            let mut state = out.state;
+                            let end = egui::text::CCursor::new(text.chars().count());
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(0),
+                                    end,
+                                )));
+                            state.store(ui.ctx(), out.response.id);
+                        } else if out.response.lost_focus() {
+                            // Enter, or a click somewhere else, keeps the
+                            // name; Escape leaves the old one.
+                            let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            renamed = Some((!escaped).then(|| (uid, text.clone())));
+                        }
+                    } else {
+                        painter.with_clip_rect(name_rect).text(
+                            Pos2::new(name_rect.left(), rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &label,
+                            egui::FontId::proportional(13.0),
+                            name_color,
+                        );
                     }
-                    if resp.secondary_clicked() && !selected {
-                        clicked = Some(i);
+                    // A double-click on the name itself renames it (as in
+                    // Illustrator's Layers). One click only selects, however
+                    // soon after another; so does a double-click anywhere
+                    // else on the row, or one with Shift or ⌘ held.
+                    let on_name = resp
+                        .interact_pointer_pos()
+                        .is_some_and(|q| name_rect.contains(q));
+                    if resp.double_clicked() && on_name && !toggle && !editing && gutter.is_none() {
+                        let name = label.strip_suffix(" (outline)").unwrap_or(&label);
+                        self.renaming = Some((uid, name.to_string(), true));
+                    }
+                    // What's locked or hidden can't be selected, here
+                    // either (as in Illustrator's Layers): its eye and
+                    // lock are what a click on its row is for.
+                    if let Some(flag) = gutter {
+                        if resp.clicked() {
+                            flag_click = Some((vec![i], flag, others));
+                        }
+                    } else if !hidden && !locked {
+                        if resp.clicked() {
+                            clicked = Some(i);
+                        }
+                        if resp.secondary_clicked() && !selected {
+                            clicked = Some(i);
+                        }
                     }
                     resp.context_menu(|ui| self.object_menu_items(ui));
                 }
@@ -1872,6 +1980,26 @@ impl Studio {
                 self.toggle_selected(i);
             } else if !(ui.input(|i| i.pointer.secondary_released()) && all_sel.contains(&i)) {
                 self.set_selection(&[i]);
+            }
+        }
+        if let Some((of, flag, others)) = flag_click {
+            // Option-click: every other object instead (Illustrator's Hide
+            // Others and Lock Others), or all of them back when they
+            // already are.
+            let of: Vec<usize> = if others {
+                (0..self.doc.shapes.len())
+                    .filter(|i| !of.contains(i))
+                    .collect()
+            } else {
+                of
+            };
+            let on = !self.flagged(&of, flag);
+            self.set_flag(&of, flag, on);
+        }
+        if let Some(done) = renamed {
+            self.renaming = None;
+            if let Some((uid, name)) = done {
+                self.rename_object(uid, &name);
             }
         }
         if let Some(members) = group_click {
@@ -1923,6 +2051,30 @@ impl Studio {
     }
 
     /// Stitch type and editing commands for the selection (context menus).
+    /// Give the object with this uid the name typed for it in the Objects
+    /// list (one undo step). Nothing typed, or the name it has: no change.
+    pub(crate) fn rename_object(&mut self, uid: usize, name: &str) {
+        let Some(i) = self.doc.shapes.iter().position(|s| s.uid == uid) else {
+            return;
+        };
+        let name = name.trim();
+        let had = self.names.get(i).cloned().unwrap_or_default();
+        if name.is_empty() || name == had.strip_suffix(" (outline)").unwrap_or(&had) {
+            return;
+        }
+        match self.structural(|d| d.rename(i, name)) {
+            Ok(()) => {
+                // (Writing the name can move objects in the list.)
+                if let Some(at) = self.doc.shapes.iter().position(|s| s.uid == uid) {
+                    self.set_selection(&[at]);
+                }
+                self.names = zigzag::svg::display_names(&self.doc.shapes);
+                self.status = format!("Renamed to {name}.");
+            }
+            Err(e) => self.status = format!("Couldn't rename it: {e}."),
+        }
+    }
+
     pub fn object_menu_items(&mut self, ui: &mut egui::Ui) {
         use crate::commands::Action as A;
         use crate::flyout::{RowIcon, menu_heading, menu_row, menu_separator};
@@ -2086,10 +2238,15 @@ impl Studio {
         let tile_w = ((ui.available_width() - 3.0 * gap) / 4.0).floor();
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(gap);
-            for row in allowed.chunks(4) {
+            // (Every type, always in the same place: the ones this object
+            // can't take are dimmed, and say why.)
+            for row in crate::widgets::ALL_KINDS.chunks(4) {
                 ui.horizontal(|ui| {
                     for &k in row {
-                        if kind_tile(ui, k, k == current, tile_w, 52.0)
+                        if !allowed.contains(&k) {
+                            kind_tile(ui, k, false, false, tile_w, 52.0)
+                                .on_hover_text(crate::widgets::kind_unavailable(k));
+                        } else if kind_tile(ui, k, k == current, true, tile_w, 52.0)
                             .on_hover_text(kind_help(k, filled))
                             .clicked()
                         {
@@ -2351,6 +2508,22 @@ impl Studio {
                         .changed()
                     {
                         pr.short_stitches = Some(short);
+                    }
+                });
+                fm.row("Lean", |ui, lid| {
+                    let mut v = pr.satin_lean();
+                    let r = ui
+                        .add(
+                            egui::DragValue::new(&mut v)
+                                .range(-zigzag::params::MAX_LEAN..=zigzag::params::MAX_LEAN)
+                                .speed(0.5)
+                                .fixed_decimals(0)
+                                .suffix("°"),
+                        )
+                        .labelled_by(lid)
+                        .on_hover_text("How far the stitches lean from square across the column. A few degrees stops them sinking between a knit's rows; more shows a slant, like a leaf's veins.");
+                    if r.changed() {
+                        pr.lean = (v != 0.0).then_some(v);
                     }
                 });
                 fm.row("Auto split", |ui, lid| {
@@ -2622,12 +2795,17 @@ impl Studio {
             };
             callout(ui, c, icon, &issue.message);
         }
-        ui.add_space(theme::space::M - ui.spacing().item_spacing.y);
-        if ui
-            .add(egui::Button::new("Reset to Defaults").small())
-            .on_hover_text("Back to the fabric's defaults for this stitch type")
-            .clicked()
-        {
+        // (In the controls' column, under the rows it resets: not out in
+        // the labels' column.)
+        let reset = ui
+            .horizontal(|ui| {
+                ui.add_space(theme::LABEL_W + theme::space::S);
+                ui.add(egui::Button::new("Reset to Defaults").small())
+                    .on_hover_text("Back to the fabric's defaults for this stitch type")
+                    .clicked()
+            })
+            .inner;
+        if reset {
             let kind = self.doc.shapes[i].params.kind;
             self.doc.shapes[i].params = Params {
                 kind,
@@ -2842,6 +3020,7 @@ impl Studio {
         ui.spacing_mut().item_spacing.y = theme::space::S;
         let fabric = self.doc.settings.fabric();
         form(ui, "doc-form", |fm: &mut Form| {
+            self.machine_rows(fm);
             fm.row("Fabric", |ui, lid| {
                 egui::ComboBox::from_id_salt("fabric")
                     .selected_text(fabric.name)
@@ -2860,18 +3039,63 @@ impl Studio {
                     .labelled_by(lid)
                     .on_hover_text(fabric.about);
             });
+            // The hoops to choose from: the machine's, then the standard
+            // ones. Any other size is a custom hoop.
+            let hoops = self.hoop_menu();
+            let here = self.doc.settings.hoop;
+            let listed = hoops
+                .iter()
+                .position(|x| zigzag::machine::profile::same_hoop(x.0, here));
+            let custom = self.hoop_custom || listed.is_none();
             fm.row("Hoop", |ui, lid| {
                 egui::ComboBox::from_id_salt("hoop")
-                    .selected_text(HOOPS[self.doc.settings.hoop.min(HOOPS.len() - 1)].1)
+                    .selected_text(match listed {
+                        Some(k) if !self.hoop_custom => hoops[k].1.as_str(),
+                        _ => "Custom",
+                    })
                     .width(170.0)
+                    .height(400.0)
                     .show_ui(ui, |ui| {
-                        for (k, h) in HOOPS.iter().enumerate() {
-                            ui.selectable_value(&mut self.doc.settings.hoop, k, h.1);
+                        for (k, (size, name, rule)) in hoops.iter().enumerate() {
+                            if *rule {
+                                ui.separator();
+                            }
+                            let on = !custom && listed == Some(k);
+                            if ui.selectable_label(on, name).clicked() {
+                                self.doc.settings.hoop = *size;
+                                self.hoop_custom = false;
+                            }
+                        }
+                        ui.separator();
+                        if ui
+                            .selectable_label(custom, "Custom")
+                            .on_hover_text(
+                                "Any other frame: type its sewing field's width and height",
+                            )
+                            .clicked()
+                        {
+                            self.hoop_custom = true;
                         }
                     })
                     .response
                     .labelled_by(lid);
             });
+            if custom {
+                // The sewing field of any other frame, width by height.
+                fm.row("Size", |ui, lid| {
+                    let (w, h) = &mut self.doc.settings.hoop;
+                    let side = zigzag::document::HOOP_SIDE_MM;
+                    ui.add(crate::units::drag_mm(w, side.clone(), 1.0))
+                        .labelled_by(lid)
+                        .on_hover_text("Width of the hoop's sewing field");
+                    ui.label("×");
+                    ui.add(crate::units::drag_mm(h, side, 1.0))
+                        .on_hover_text("Height of the hoop's sewing field")
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::SpinButton, true, "Hoop height")
+                        });
+                });
+            }
             fm.row("Layers", |ui, _| {
                 ui.checkbox(&mut self.doc.settings.remove_overlaps, "Remove overlaps")
                     .on_hover_text(
@@ -2881,6 +3105,12 @@ impl Studio {
             fm.row("Order", |ui, _| {
                 ui.checkbox(&mut self.doc.settings.hat_order, "Cap order")
                     .on_hover_text("Sew from the center out and the bottom up, grouping colors, so puckering is pushed away");
+            });
+            fm.row("Travel", |ui, _| {
+                ui.checkbox(&mut self.doc.settings.over_sewn, "Sew over fill")
+                    .on_hover_text(
+                        "Where the thread can't get from one part of an object to the next out of sight (under stitches still to come, or under what's sewn on top): off, it's cut; on, it's sewn over the fill already there. On saves cuts, and the running stitch shows on top of the fill.",
+                    );
             });
             // Connect: gaps this short are sewn across in the open rather
             // than cut. A bar to drag, the cuts it saves beside it, and what
@@ -2925,6 +3155,7 @@ impl Studio {
                     .labelled_by(lid)
                     .on_hover_text("Your hat's color, for the preview (saved with the design; doesn't change the stitches)");
             });
+            self.narrow_satin_row(fm);
         });
     }
 
@@ -2958,11 +3189,236 @@ pub(crate) fn connect_note(connect_mm: f64, cuts: usize, bridged: usize) -> Stri
     }
 }
 
+/// The Objects list's eye and lock columns, at the left of every row (as
+/// in Illustrator's Layers, and VectorCraft's): how wide each is, and
+/// the two together.
+const FLAG_COL: f32 = 18.0;
+const GUTTER: f32 = 2.0 * FLAG_COL + 2.0;
+
+/// The part of a row to the right of its eye and lock.
+fn row_body(row: Rect) -> Rect {
+    Rect::from_min_max(Pos2::new(row.left() + GUTTER, row.top()), row.max)
+}
+
+/// Which column of a row the pointer at `at` is in, if either.
+fn gutter_flag(row: Rect, at: Option<Pos2>) -> Option<Flag> {
+    let x = at?.x - row.left();
+    if !(0.0..2.0 * FLAG_COL).contains(&x) {
+        None
+    } else if x < FLAG_COL {
+        Some(Flag::Hide)
+    } else {
+        Some(Flag::Lock)
+    }
+}
+
+/// A row's eye (there while it's shown) and lock (there while it's
+/// locked; faint under the pointer otherwise, to say it can be).
+fn eye_and_lock(
+    painter: &egui::Painter,
+    row: Rect,
+    pointer: Option<Pos2>,
+    hidden: bool,
+    locked: bool,
+    p: &theme::Pal,
+) {
+    let cell = |k: f32, size: f32| {
+        Rect::from_center_size(
+            Pos2::new(row.left() + (k + 0.5) * FLAG_COL, row.center().y),
+            Vec2::splat(size),
+        )
+    };
+    // (The eye is a wide shape and the padlock a narrow one: drawn in
+    // boxes of these sizes they come out about the same height and
+    // weight, and neither looks the bigger.)
+    const EYE: f32 = 11.0;
+    const LOCK: f32 = 13.0;
+    let over = gutter_flag(row, pointer);
+    if !hidden {
+        icons::paint(painter, cell(0.0, EYE), Icon::Eye, p.secondary);
+    } else if over == Some(Flag::Hide) {
+        icons::paint(painter, cell(0.0, EYE), Icon::Eye, p.tertiary);
+    }
+    if locked {
+        icons::paint(painter, cell(1.0, LOCK), Icon::Lock, p.text);
+    } else if over == Some(Flag::Lock) {
+        icons::paint(painter, cell(1.0, LOCK), Icon::Lock, p.tertiary);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn a_line_shows_every_stitch_type_with_the_ones_for_areas_dimmed() {
+        use crate::widgets::{ALL_KINDS, allowed_kinds, kind_name};
+        use egui_kittest::kittest::NodeT;
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="30mm" viewBox="0 0 60 30">
+            <path id="edge" d="M5 25 L55 25" fill="none" stroke="#203040" stroke-width="2"/>
+            <rect id="patch" x="5" y="5" width="20" height="12" fill="#c00000"/>
+        </svg>"##;
+        let doc = zigzag::document::Document::from_svg(svg, "t", None).unwrap();
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 1000.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(None, None),
+            );
+        h.state_mut().set_document(doc);
+        h.run_steps(4);
+        let line = (0..2)
+            .find(|&i| allowed_kinds(&h.state().doc.shapes[i]).len() < ALL_KINDS.len())
+            .unwrap();
+        let tiles = |h: &Harness<'_, Studio>| -> Vec<(&'static str, bool)> {
+            ALL_KINDS
+                .iter()
+                .map(|&k| {
+                    let name = kind_name(k);
+                    let on = h
+                        .query_all_by_label(name)
+                        .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+                        .any(|n| !n.accesskit_node().is_disabled());
+                    (name, on)
+                })
+                .collect()
+        };
+        // The line: all twelve are there, and the seven that cover an area
+        // can't be chosen.
+        h.state_mut().select_index(Some(line));
+        h.run_steps(4);
+        let on: Vec<&str> = tiles(&h).iter().filter(|t| t.1).map(|t| t.0).collect();
+        assert_eq!(on, ["Satin", "Run", "Blanket", "Manual", "Off"]);
+        for k in ALL_KINDS {
+            assert!(
+                h.query_all_by_label(kind_name(k))
+                    .any(|n| n.accesskit_node().role() == egui::accesskit::Role::Button),
+                "{} has a tile",
+                kind_name(k)
+            );
+        }
+        let was = h.state().doc.shapes[line].params.kind;
+        let fill = h
+            .query_all_by_label("Fill")
+            .find(|n| n.accesskit_node().is_disabled())
+            .unwrap()
+            .rect()
+            .center();
+        h.hover_at(fill);
+        h.run_steps(1);
+        h.drag_at(fill);
+        h.run_steps(1);
+        h.drop_at(fill);
+        h.run_steps(3);
+        assert_eq!(h.state().doc.shapes[line].params.kind, was);
+        // The filled shape: every one can be.
+        h.state_mut().select_index(Some(1 - line));
+        h.run_steps(4);
+        assert!(tiles(&h).iter().all(|t| t.1));
+    }
+
+    #[test]
+    fn a_double_click_on_a_layers_name_renames_it_and_nothing_less_does() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="30mm" viewBox="0 0 60 30">
+            <rect id="patch" x="5" y="5" width="20" height="20" fill="#203040"/>
+            <rect id="stripe_satin" x="30" y="5" width="20" height="3" fill="#c00000"/>
+        </svg>"##;
+        let doc = zigzag::document::Document::from_svg(svg, "t", None).unwrap();
+        // (Frames a sixtieth of a second apart, so two clicks can be a
+        // double-click or not by how many frames lie between them.)
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 900.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(None, None),
+            );
+        h.state_mut().set_document(doc);
+        h.run_steps(4);
+        // Longer than a double-click takes.
+        const A_WHILE: usize = 45;
+        // Where a row's name is, and where its thread dot is.
+        let row = |h: &Harness<'_, Studio>, name: &str| h.get_by_label(name).rect();
+        // (Past the eye and lock columns at the row's left.)
+        let on_name = |r: Rect| Pos2::new(r.left() + GUTTER + 70.0, r.center().y);
+        let on_dot = |r: Rect| Pos2::new(r.left() + GUTTER + 12.0, r.center().y);
+        let click = |h: &mut Harness<'_, Studio>, at: Pos2, times: usize| {
+            h.hover_at(at);
+            h.run_steps(1);
+            for _ in 0..times {
+                h.drag_at(at);
+                h.run_steps(1);
+                h.drop_at(at);
+                h.run_steps(1);
+            }
+            h.run_steps(3);
+        };
+        let patch = on_name(row(&h, "patch"));
+        // One click selects. So does another, a while later: clicking a
+        // selected layer again is not asking to rename it.
+        click(&mut h, patch, 1);
+        assert_eq!(h.state().sel_index(), Some(0));
+        assert!(h.state().renaming.is_none());
+        h.run_steps(A_WHILE);
+        click(&mut h, patch, 1);
+        assert!(h.state().renaming.is_none(), "a slow second click");
+        h.run_steps(A_WHILE);
+        // Nor is a double-click off the name (on the thread dot).
+        let dot = on_dot(row(&h, "patch"));
+        click(&mut h, dot, 2);
+        assert!(h.state().renaming.is_none(), "a double-click on the dot");
+        h.run_steps(A_WHILE);
+        assert!(h.query_by_label("Object name").is_none());
+        // A double-click on the name: a field, with the name in it.
+        click(&mut h, patch, 2);
+        assert_eq!(
+            h.state().renaming.as_ref().map(|r| (r.0, r.1.as_str())),
+            Some((h.state().doc.shapes[0].uid, "patch"))
+        );
+        assert!(h.query_by_label("Object name").is_some());
+        // Typing replaces it (it was selected); Enter keeps the new name.
+        h.get_by_label("Object name").type_text("Front Patch");
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(4);
+        assert!(h.state().renaming.is_none());
+        assert_eq!(h.state().names[0], "Front Patch");
+        assert!(h.state().modified);
+        assert!(h.query_by_label("Front Patch").is_some());
+        assert!(h.state().doc.to_svg().unwrap().contains("id=\"Front_Patch"));
+        // One undo step.
+        assert!(h.state_mut().apply_history(crate::app::History::Undo));
+        h.state_mut().replan();
+        h.run_steps(3);
+        assert_eq!(h.state().names[0], "patch");
+        // Escape leaves the name alone; so does a name that's a stitch
+        // setting, with a word about why.
+        h.run_steps(A_WHILE);
+        let stripe = on_name(row(&h, "stripe"));
+        click(&mut h, stripe, 2);
+        assert!(h.state().renaming.is_some());
+        h.get_by_label("Object name").type_text("Never Mind");
+        h.run_steps(2);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(4);
+        assert!(h.state().renaming.is_none());
+        assert_eq!(h.state().names[1], "stripe");
+        h.run_steps(A_WHILE);
+        click(&mut h, stripe, 2);
+        h.get_by_label("Object name").type_text("fill");
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(4);
+        assert_eq!(h.state().names[1], "stripe");
+        assert_eq!(h.state().doc.shapes[1].params.kind, Some(Kind::Satin));
+        assert!(
+            h.state().status.contains("stitch setting"),
+            "{}",
+            h.state().status
+        );
+    }
 
     #[test]
     fn the_unit_is_remembered() {

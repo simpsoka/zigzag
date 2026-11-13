@@ -51,6 +51,76 @@ and `SHA256SUMS.txt` in GitHub's release editor before publishing it. If only
 the tag was pushed, create the release from that tag in GitHub. The script
 deliberately refuses to overwrite either.
 
+## Updates and Homebrew
+
+Nothing extra is published for either.
+
+**In-app updates.** From 0.1.3, ZigZag reads the latest release through
+GitHub's API and offers it when its tag is a later version than the copy
+that's running. What it reads is what the script above publishes: the tag
+(`vX.Y.Z`), the release notes (shown in the update window), and on a Mac
+`ZigZag-X.Y.Z.dmg` with `SHA256SUMS.txt`. Keep those names. A draft or a
+prerelease is never offered, so a release can be staged without anyone
+being told.
+
+A Mac installs an update only if the download matches `SHA256SUMS.txt` and
+the app in it is signed by the same Developer ID team as the copy doing
+the updating. So a release has to be built with `--release` (signed), as
+the script does; one that isn't would be refused by every signed copy.
+
+To try the whole install without a release:
+
+```sh
+bash packaging/macos/test-update.sh
+```
+
+It makes a pretend installed ZigZag and a pretend release 99.0.0 in a
+scratch folder and has the updater install one over the other. It touches
+nothing else.
+
+**Homebrew.** `brew install --cask simpsoka/zigzag/zigzag` installs from the
+public tap [simpsoka/homebrew-zigzag](https://github.com/simpsoka/homebrew-zigzag),
+which is already created and initialized. The publish script points its
+cask at each release (`packaging/homebrew/update-cask.sh`). The one-time
+repository setup is recorded here for reference; it does not need to be
+repeated:
+
+```sh
+brew install gh
+gh auth login
+gh repo create simpsoka/homebrew-zigzag --public \
+    --description "Homebrew tap for ZigZag, the machine embroidery editor"
+```
+
+and, to fill it in for a release that's already out:
+
+```sh
+bash packaging/homebrew/update-cask.sh <version> <sha256 of ZigZag-<version>.dmg>
+```
+
+Use a **published** version and its checksum from that release's
+`SHA256SUMS.txt`, even if the working tree is already on the next version.
+Add `--print` to preview the cask without publishing it. Releases before
+0.1.3 aren't marked as self-updating, so Homebrew can upgrade them normally.
+
+Check the published cask without installing or replacing the app:
+
+```sh
+brew tap simpsoka/zigzag
+brew info --cask simpsoka/zigzag/zigzag
+brew fetch --cask simpsoka/zigzag/zigzag
+```
+
+If Homebrew refuses to load an untrusted cask, review
+`Casks/zigzag.rb` in the tap first. To allow that cask on this computer,
+run `brew trust --cask simpsoka/zigzag/zigzag`, then repeat the checks.
+This trusts only the ZigZag cask, not every package in the tap.
+
+Future runs of `publish-release.sh` update the tap after the new release
+is published. To upgrade an existing installation through Homebrew,
+including versions with the in-app updater, use
+`brew upgrade --cask --greedy simpsoka/zigzag/zigzag`.
+
 ## Windows
 
 The Windows zip is built by `.github/workflows/windows-release.yml` on GitHub

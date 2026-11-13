@@ -22,6 +22,8 @@ pub struct CallRecord {
     pub ms: f64,
     /// The error text, when the call failed.
     pub error: Option<String>,
+    /// What it was called with, in a line (the log has it whole).
+    pub args: String,
 }
 
 #[derive(Default)]
@@ -39,7 +41,22 @@ pub struct McpUi {
 }
 
 impl McpUi {
-    pub fn note(&mut self, name: &str, at: Instant, result: &crate::mcp::ToolResult) {
+    pub fn note(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+        at: Instant,
+        result: &crate::mcp::ToolResult,
+    ) {
+        let mut said = args.to_string();
+        if said.len() > 300 {
+            let mut end = 300;
+            while !said.is_char_boundary(end) {
+                end -= 1;
+            }
+            said.truncate(end);
+            said.push('…');
+        }
         let error = result.is_error.then(|| {
             result
                 .content
@@ -57,6 +74,7 @@ impl McpUi {
             at,
             ms: at.elapsed().as_secs_f64() * 1000.0,
             error,
+            args: said,
         });
         while self.calls.len() > KEEP {
             self.calls.pop_front();
@@ -362,9 +380,11 @@ impl Studio {
                         .monospace()
                         .color(color),
                 );
-                if let Some(e) = &c.error {
-                    name.on_hover_text(e);
-                }
+                // What it was called with, and what went wrong if it did.
+                name.on_hover_text(match &c.error {
+                    Some(e) => format!("{}\n{e}", c.args),
+                    None => c.args.clone(),
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     caption(ui, ago(c.at));
                     caption(ui, format!("{:.0} ms", c.ms));
@@ -372,16 +392,32 @@ impl Studio {
             });
         }
 
+        // Every call there's been, with what it asked and was told.
+        ui.add_space(space::XS);
+        ui.horizontal(|ui| {
+            let file = self.agent_log.file().map(std::path::Path::to_path_buf);
+            if ui
+                .add_enabled(file.is_some(), egui::Button::new("Show Log").small())
+                .on_hover_text("Every tool call agents have made: when, which tool, what it was asked and what it answered. Kept on this computer.")
+                .on_disabled_hover_text(if self.prefs.agent_log {
+                    "Nothing has been logged yet."
+                } else {
+                    "The log is turned off, in Settings › Agent."
+                })
+                .clicked()
+                && let Some(file) = file
+            {
+                crate::agent_log::open_text(&file);
+            }
+        });
+
         section_break(ui);
         let tools = self.mcp_ui.tools().to_vec();
-        egui::CollapsingHeader::new(
-            egui::RichText::new(format!("Tools ({})", tools.len()))
-                .strong()
-                .size(12.0),
-        )
-        .id_salt("mcp-tools")
-        .default_open(false)
-        .show(ui, |ui| {
+        let open = self.prefs.fold_open("mcp-tools", false);
+        if crate::theme::fold_header(ui, &format!("Tools ({})", tools.len()), open).clicked() {
+            self.prefs.set_fold("mcp-tools", !open);
+        }
+        if open {
             egui::ScrollArea::vertical()
                 .max_height(180.0)
                 .show(ui, |ui| {
@@ -390,7 +426,7 @@ impl Studio {
                             .on_hover_text(about);
                     }
                 });
-        });
+        }
     }
 }
 
@@ -468,9 +504,14 @@ mod tests {
         s.mcp = Some(server);
         let at = Instant::now();
         let r = s.run_mcp_call("get_design", &json!({}));
-        s.mcp_ui.note("get_design", at, &r);
+        s.mcp_ui.note("get_design", &json!({}), at, &r);
         let bad = crate::mcp::ToolResult::error("no such object");
-        s.mcp_ui.note("set_object", Instant::now(), &bad);
+        s.mcp_ui.note(
+            "set_object",
+            &json!({ "object": "nope" }),
+            Instant::now(),
+            &bad,
+        );
         let mut h = Harness::builder()
             .with_size(Vec2::new(1400.0, 900.0))
             .build_ui_state(|ui, s: &mut Studio| s.frame(ui), s);

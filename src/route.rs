@@ -222,9 +222,12 @@ impl Zone {
     }
 
     /// The zone's cell at `p`, or the nearest within a couple of cells (a
-    /// row's end sits on the outline, or just past it with pull added).
-    fn enter(&self, p: P) -> Option<usize> {
-        let reach = 3i32;
+    /// row's end sits on the outline, or just past it with pull added) or
+    /// within `hop` units, whichever is further.
+    fn enter(&self, p: P, hop: f64) -> Option<usize> {
+        // (To a cell's center: a cell further than the hop to its edge.)
+        let limit = (3.0 * self.cell).max(hop + self.cell);
+        let reach = ((limit / self.cell).ceil() as i32).min(16);
         let c = ((p.x - self.min.x) / self.cell).floor() as i32;
         let r = ((p.y - self.min.y) / self.cell).floor() as i32;
         let mut best: Option<(f64, usize)> = None;
@@ -235,7 +238,7 @@ impl Zone {
                     continue;
                 }
                 let d = self.center(k).dist(p);
-                if d <= reach as f64 * self.cell && best.is_none_or(|(bd, _)| d < bd) {
+                if d <= limit && best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, k));
                 }
             }
@@ -273,7 +276,15 @@ impl Zone {
     /// Stitches from `from` to `to` through the zone, when there's a way no
     /// longer than `max_len`: the points after `from`, ending on `to`.
     pub fn route(&self, from: P, to: P, max_len: f64) -> Option<Polyline> {
-        let (start, goal) = (self.enter(from)?, self.enter(to)?);
+        self.route_from(from, to, max_len, 0.0)
+    }
+
+    /// [`Zone::route`] when `from` may be up to `hop` units outside the
+    /// zone: the hop onto hidden ground from where the last piece ended
+    /// (the end of a satin, a corner of its column) is as short as the gaps
+    /// that are sewn straight across anyway.
+    pub fn route_from(&self, from: P, to: P, max_len: f64, hop: f64) -> Option<Polyline> {
+        let (start, goal) = (self.enter(from, hop)?, self.enter(to, 0.0)?);
         if self.piece[start] != self.piece[goal] {
             return None;
         }

@@ -293,6 +293,7 @@ pub fn tartan(
     spacing: f64,
     len: f64,
     angle: f64,
+    min_stitch: f64,
 ) -> Vec<([u8; 3], Vec<Polyline>)> {
     use crate::stitch::fill::{FillParams, tatami};
     if sett.is_empty() {
@@ -374,6 +375,7 @@ pub fn tartan(
                     pull: 0.0,
                     stagger: 4,
                     bottom_up: false,
+                    min_stitch,
                 };
                 let rows: Vec<Polyline> = tatami(&clipped, FillRule::EvenOdd, &fp)
                     .into_iter()
@@ -458,7 +460,7 @@ mod tests {
                 width: 20.0,
             },
         ];
-        let out = tartan(&rings, FillRule::NonZero, &sett, 4.0, 30.0, 0.0);
+        let out = tartan(&rings, FillRule::NonZero, &sett, 4.0, 30.0, 0.0, 0.0);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].0, [200, 0, 0]);
         for (_, rows) in &out {

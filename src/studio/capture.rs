@@ -7,6 +7,11 @@
 //!   time each one stayed on screen, which ffmpeg turns into a video
 //!   (`ffmpeg -f concat -i frames.txt …`).
 //!
+//! For pictures taken by a script, `ZIGZAG_CAPTURE_STILL=<seconds>` saves one
+//! screenshot that long after launch and then quits, and
+//! `ZIGZAG_CAPTURE_SHOW=settings` (or `settings-general`, `settings-agent`)
+//! opens that window first.
+//!
 //! Nothing is drawn on screen for it (it would be in the pictures); what it
 //! did is printed on stderr. PNGs are encoded on worker threads; if they fall
 //! behind, a frame is skipped and the one before stays on screen longer.
@@ -52,6 +57,10 @@ pub struct Capture {
     stopping: Option<(Recording, Duration, Instant)>,
     stills: usize,
     takes: usize,
+    /// When to take a screenshot unasked (`ZIGZAG_CAPTURE_STILL`), and
+    /// whether to quit once it's on disk.
+    auto_still: Option<Instant>,
+    quit_when_written: bool,
 }
 
 impl Capture {
@@ -105,14 +114,38 @@ impl Capture {
             pending,
             recording: None,
             stopping: None,
+            auto_still: std::env::var("ZIGZAG_CAPTURE_STILL")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|s| s.is_finite() && *s >= 0.0)
+                .map(|s| Instant::now() + Duration::from_secs_f64(s)),
+            quit_when_written: false,
         })
     }
 
     /// Call once a frame: the shortcuts, and the next frame of a recording.
     pub fn frame(&mut self, ctx: &egui::Context) {
         let chord = Modifiers::COMMAND | Modifiers::CTRL | Modifiers::ALT;
-        let (still, record) =
+        let (mut still, record) =
             ctx.input_mut(|i| (i.consume_key(chord, Key::S), i.consume_key(chord, Key::R)));
+        // The screenshot a script asked for, when its time comes; then,
+        // once it's written, the app quits.
+        match self.auto_still {
+            Some(at) if Instant::now() >= at => {
+                self.auto_still = None;
+                self.quit_when_written = true;
+                still = true;
+            }
+            Some(_) => ctx.request_repaint_after(Duration::from_millis(50)),
+            None if self.quit_when_written => {
+                if self.pending.load(Ordering::SeqCst) == 0 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(20));
+                }
+            }
+            None => {}
+        }
         if still {
             self.stills += 1;
             let path = self.dir.join(format!("still-{:03}.png", self.stills));

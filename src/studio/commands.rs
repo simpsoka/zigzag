@@ -96,7 +96,19 @@ pub enum Action {
     ToggleOrder,
     /// Draw the stitches on the GPU (off: egui's painter, as before; for
     /// comparing the two, or a GL driver that gets the shader wrong).
-    ToggleGpuStitches,
+    /// ZigZag › Settings… (in Edit where there's no app menu).
+    Settings,
+    /// Object › Lock, Unlock All, Hide, Show All (Illustrator's, with
+    /// its ⌘2 and ⌘3): what's locked can't be selected on the canvas;
+    /// what's hidden isn't shown or sewn.
+    Lock,
+    UnlockAll,
+    Hide,
+    ShowAll,
+    /// ZigZag › Check for Updates… (in Help where there's no app menu).
+    CheckForUpdates,
+    /// Help › Report an Issue…: a new issue on GitHub, in the browser.
+    ReportIssue,
     ZoomIn,
     ZoomOut,
     ZoomFit,
@@ -216,7 +228,15 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::SelectAll, "Select All", cmd(Key::A)),
                 Item(Action::Deselect, "Deselect All", cmd_shift(Key::A)),
                 Item(Action::SelectSameKind, "Select Same Stitch Type", None),
-            ],
+            ]
+            .into_iter()
+            // (On a Mac, Settings is in the ZigZag menu: see `native_menu`.)
+            .chain(if cfg!(target_os = "macos") {
+                vec![]
+            } else {
+                vec![Sep, SETTINGS_ITEM]
+            })
+            .collect(),
         ),
         (
             "Object",
@@ -230,6 +250,11 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::RotateRight, "Rotate Right 90°", None),
                 Item(Action::CenterInHoop, "Center in Hoop", None),
                 Item(Action::FitToHoop, "Fit to Hoop", None),
+                Sep,
+                Item(Action::Lock, "Lock", cmd(Key::Num2)),
+                Item(Action::UnlockAll, "Unlock All", None),
+                Item(Action::Hide, "Hide", cmd(Key::Num3)),
+                Item(Action::ShowAll, "Show All", None),
                 Sep,
                 Sub(
                     "Path",
@@ -351,7 +376,6 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::ToggleJumps, "Jump Stitches", None),
                 Item(Action::ToggleDensity, "Density Map", None),
                 Item(Action::ToggleOrder, "Sewing Order", None),
-                Item(Action::ToggleGpuStitches, "Draw Stitches on GPU", None),
                 Sep,
                 Item(Action::PlayPause, "Play Stitch-Out", plain(Key::Space)),
             ],
@@ -379,7 +403,48 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::Panel(PanelId::Agent), "Agent", None),
             ],
         ),
+        (
+            "Help",
+            // (On a Mac, Check for Updates is in the ZigZag menu: see
+            // `native_menu`.)
+            if cfg!(target_os = "macos") {
+                vec![Item(Action::ReportIssue, "Report an Issue…", None)]
+            } else {
+                vec![
+                    UPDATES_ITEM,
+                    Sep,
+                    Item(Action::ReportIssue, "Report an Issue…", None),
+                ]
+            },
+        ),
     ]
+}
+
+/// Where Help › Report an Issue… goes: a new issue on GitHub, started with
+/// headings to write under and which ZigZag on what this is (the two
+/// things every report gets asked for).
+pub fn issue_url() -> String {
+    let body = format!(
+        "**What happened**\n\n\n**What you expected**\n\n\n**Steps, and the design if you can share it**\n\n\n---\nZigZag {} on {} ({})\n",
+        env!("CARGO_PKG_VERSION"),
+        match std::env::consts::OS {
+            "macos" => "macOS",
+            "windows" => "Windows",
+            "linux" => "Linux",
+            other => other,
+        },
+        std::env::consts::ARCH,
+    );
+    let mut url = String::from("https://github.com/simpsoka/zigzag/issues/new?body=");
+    for b in body.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                url.push(b as char)
+            }
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    url
 }
 
 /// Tools, with their single-key shortcuts (handled with the rest).
@@ -411,14 +476,67 @@ pub fn all_actions() -> Vec<(Action, &'static str, Option<Sc>)> {
     for (_, v) in &menus() {
         walk(v, &mut out);
     }
+    // (In the app menu on a Mac, not in the menus above.)
+    if cfg!(target_os = "macos") {
+        walk(&[UPDATES_ITEM, SETTINGS_ITEM], &mut out);
+    }
     out
 }
 
+/// Check for Updates…: the app menu's on a Mac, the head of Help elsewhere.
+pub const UPDATES_ITEM: Entry = Item(Action::CheckForUpdates, "Check for Updates…", None);
+
+/// Settings…, ⌘, : the app menu's on a Mac, at the foot of Edit elsewhere.
+pub const SETTINGS_ITEM: Entry = Item(Action::Settings, "Settings…", cmd(Key::Comma));
+
+/// Locked, or hidden: the Objects list's two columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    Lock,
+    Hide,
+}
+
 impl Studio {
+    /// Lock or unlock, hide or show, the objects `of`. What's locked or
+    /// hidden isn't selected any more: it can't be on the canvas.
+    pub(crate) fn set_flag(&mut self, of: &[usize], flag: Flag, on: bool) {
+        for &i in of {
+            if let Some(s) = self.doc.shapes.get_mut(i) {
+                let to = on.then_some(true);
+                match flag {
+                    Flag::Lock => s.params.lock = to,
+                    Flag::Hide => s.params.hide = to,
+                }
+            }
+        }
+        if on {
+            let keep: Vec<usize> = self
+                .sel_indices()
+                .into_iter()
+                .filter(|&i| self.free(i))
+                .collect();
+            self.set_selection(&keep);
+        }
+    }
+
+    /// Whether every one of `of` is locked (hidden).
+    pub(crate) fn flagged(&self, of: &[usize], flag: Flag) -> bool {
+        !of.is_empty()
+            && of.iter().all(|&i| {
+                self.doc.shapes.get(i).is_some_and(|s| match flag {
+                    Flag::Lock => s.params.locked(),
+                    Flag::Hide => s.params.hidden(),
+                })
+            })
+    }
+
     pub fn action_enabled(&self, a: Action) -> bool {
         let has_sel = !self.sel_indices().is_empty();
         let has_design = !self.design.blocks.is_empty();
         match a {
+            Action::Lock | Action::Hide => has_sel,
+            Action::UnlockAll => self.doc.shapes.iter().any(|s| s.params.locked()),
+            Action::ShowAll => self.doc.shapes.iter().any(|s| s.params.hidden()),
             Action::Undo => !self.undo.is_empty(),
             Action::Redo => !self.redo.is_empty(),
             Action::Copy | Action::Duplicate | Action::Delete | Action::Deselect => has_sel,
@@ -445,7 +563,9 @@ impl Studio {
             Action::SelectAll | Action::GroupColors | Action::FitToHoop | Action::CleanUp => {
                 !self.doc.shapes.is_empty()
             }
-            Action::Export(_) | Action::SendToSkitch | Action::PlayPause => has_design,
+            Action::Export(_) | Action::PlayPause => has_design,
+            // (Only for a machine ZigZag sends to.)
+            Action::SendToSkitch => has_design && self.sends_direct(),
             Action::FlipH
             | Action::FlipV
             | Action::RotateLeft
@@ -493,7 +613,6 @@ impl Studio {
             Action::ToggleJumps => self.show_jumps,
             Action::ToggleDensity => self.view_tools.density,
             Action::ToggleOrder => self.view_tools.order_labels,
-            Action::ToggleGpuStitches => self.view_tools.gpu_stitches && self.gpu.is_some(),
             Action::Panel(p) => self.dock.visible(p),
             Action::ToggleLeftDock => self.dock.left,
             Action::ToggleRightDock => self.dock.right,
@@ -576,8 +695,9 @@ impl Studio {
             Action::Delete => self.delete_selection(),
             Action::SelectAll => {
                 // Inside a group, Select All means everything in it.
+                // (Not what's locked or hidden.)
                 let idx: Vec<usize> = (0..self.doc.shapes.len())
-                    .filter(|&i| self.in_scope(i))
+                    .filter(|&i| self.in_scope(i) && self.free(i))
                     .collect();
                 self.set_selection(&idx);
             }
@@ -659,15 +779,27 @@ impl Studio {
             }
             Action::TogglePoints => self.view_tools.points = !self.view_tools.points,
             Action::ToggleJumps => self.show_jumps = !self.show_jumps,
-            Action::ToggleGpuStitches => {
-                self.view_tools.gpu_stitches = !self.view_tools.gpu_stitches;
-                self.status = match (self.view_tools.gpu_stitches, self.gpu.is_some()) {
-                    (true, true) => "Stitches drawn on the GPU.".into(),
-                    (true, false) => {
-                        "No GPU stitch renderer on this context: the painter draws them.".into()
-                    }
-                    (false, _) => "Stitches drawn by the painter (slower on big designs).".into(),
-                };
+            Action::Settings => self.open_settings(self.settings_ui.section),
+            Action::ReportIssue => crate::sew::open_url(&issue_url()),
+            Action::Lock => {
+                let sel = self.sel_indices();
+                self.set_flag(&sel, Flag::Lock, true);
+            }
+            Action::Hide => {
+                let sel = self.sel_indices();
+                self.set_flag(&sel, Flag::Hide, true);
+            }
+            Action::UnlockAll => {
+                let all: Vec<usize> = (0..self.doc.shapes.len()).collect();
+                self.set_flag(&all, Flag::Lock, false);
+            }
+            Action::ShowAll => {
+                let all: Vec<usize> = (0..self.doc.shapes.len()).collect();
+                self.set_flag(&all, Flag::Hide, false);
+            }
+            Action::CheckForUpdates => {
+                let ctx = self.egui_ctx.clone().unwrap_or_default();
+                self.updater.check(&ctx, true);
             }
             Action::ToggleDensity => {
                 self.view_tools.density = !self.view_tools.density;
@@ -872,5 +1004,38 @@ impl Studio {
 
     pub fn native_menu_active(&self) -> bool {
         self.native_menu.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_reports_an_issue_on_github_saying_which_zigzag() {
+        let help = menus().pop().unwrap();
+        assert_eq!(help.0, "Help");
+        assert!(matches!(
+            help.1.last(),
+            Some(Item(Action::ReportIssue, "Report an Issue…", None))
+        ));
+        // Check for Updates is there too, where a Mac has it: once.
+        assert_eq!(
+            all_actions()
+                .iter()
+                .filter(|a| a.0 == Action::CheckForUpdates)
+                .count(),
+            1
+        );
+        let url = issue_url();
+        let (page, body) = url.split_once("?body=").unwrap();
+        assert_eq!(page, "https://github.com/simpsoka/zigzag/issues/new");
+        // One word to the browser: nothing in it that ends or splits a URL.
+        assert!(
+            body.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.~%".contains(&b))
+        );
+        assert!(body.contains(&format!("ZigZag%20{}%20on", env!("CARGO_PKG_VERSION"))));
+        assert!(body.starts_with("%2A%2AWhat%20happened%2A%2A%0A"));
     }
 }

@@ -12,17 +12,35 @@ use zigzag::geom::{Bounds, P};
 use zigzag::params::{Kind, Params};
 use zigzag::svg::{self, Geometry, Shape};
 
-/// Hoops the machines we care about use. (id, label, width mm, height mm)
-pub const HOOPS: [(&str, &str, f64, f64); 3] = [
+/// The standard hoops, smallest first; any other size is a custom hoop.
+/// (id, label, width mm, height mm). The id is the size as files and
+/// agents write it.
+pub const HOOPS: [(&str, &str, f64, f64); 10] = [
+    ("20x60", "1×2.5 in (20 × 60 mm)", 20.0, 60.0),
+    ("70x70", "70 × 70 mm · Skitch small frame", 70.0, 70.0),
     (
         "100x100",
         "4×4 in (100 × 100 mm) · Skitch / PE",
         100.0,
         100.0,
     ),
-    ("70x70", "70 × 70 mm · Skitch small frame", 70.0, 70.0),
+    ("110x110", "110 × 110 mm · Janome A", 110.0, 110.0),
     ("130x180", "5×7 in (130 × 180 mm) · PE800", 130.0, 180.0),
+    ("140x200", "140 × 200 mm · Janome B", 140.0, 200.0),
+    ("160x260", "6×10 in (160 × 260 mm)", 160.0, 260.0),
+    ("200x200", "8×8 in (200 × 200 mm)", 200.0, 200.0),
+    ("200x300", "8×12 in (200 × 300 mm)", 200.0, 300.0),
+    ("240x360", "9.5×14 in (240 × 360 mm)", 240.0, 360.0),
 ];
+
+/// The standard hoop of this size, if it is one.
+pub fn standard_hoop(
+    (w, h): (f64, f64),
+) -> Option<&'static (&'static str, &'static str, f64, f64)> {
+    HOOPS
+        .iter()
+        .find(|x| (x.2 - w).abs() < 0.005 && (x.3 - h).abs() < 0.005)
+}
 
 /// Typical single-needle home machine speed, for time estimates.
 pub const SPM: f64 = 400.0;
@@ -93,6 +111,13 @@ pub struct Studio {
     pub(crate) drag: Option<crate::layout::Drag>,
     /// Pan instead of moving objects (drag started on empty canvas).
     pub(crate) panning: bool,
+    /// The Selection tool's box, dragged out over empty canvas: where it
+    /// began and where the pointer is (design units). Let go, what it
+    /// touches is selected.
+    pub(crate) marquee: Option<(P, P)>,
+    /// The last scrolling came from a wheel (which zooms), not a trackpad
+    /// (which pans).
+    pub(crate) wheel: bool,
     /// Space held (Illustrator's temporary Hand): Some(true) once it panned.
     /// A tap without dragging plays the stitch-out instead.
     pub(crate) space_pan: Option<bool>,
@@ -108,6 +133,11 @@ pub struct Studio {
     /// A drag with Smooth, Path Eraser or Join.
     pub(crate) gesture: crate::path_tools::Gesture,
     pub(crate) palettes: crate::palettes::Palettes,
+    /// The machines to choose from, and the one new documents start with.
+    pub(crate) machines: crate::machines::Machines,
+    /// Settings kept for this computer, and the Settings window.
+    pub(crate) prefs: crate::settings::Prefs,
+    pub(crate) settings_ui: crate::settings::SettingsUi,
     /// The in-app agent (Claude Code or Codex) and its prompt bar.
     pub(crate) agent: crate::agent::AgentState,
     /// Room taken from the bottom of the canvas for its HUD (none now).
@@ -152,6 +182,13 @@ pub struct Studio {
     /// The gaps Connect sews across are lit up on the canvas until then
     /// (while its bar is being dragged, and a moment after).
     pub(crate) bridges_peek: Option<Instant>,
+    /// The Document panel shows the hoop's width and height fields: Custom
+    /// was chosen (a hoop that isn't a standard one shows them anyway).
+    pub(crate) hoop_custom: bool,
+    /// An object being renamed in the Objects list: its uid, the name as
+    /// typed so far, and whether the field has just appeared (to be given
+    /// the keyboard, its text selected).
+    pub(crate) renaming: Option<(usize, String, bool)>,
 
     pub(crate) player: Option<usize>,
     pub(crate) playing: bool,
@@ -168,6 +205,12 @@ pub struct Studio {
     pub mcp: Option<crate::mcp::Server>,
     /// The status bar's MCP chip: recent calls, and why the server is off.
     pub(crate) mcp_ui: crate::mcp_chip::McpUi,
+    /// Updates: the latest release, and installing it.
+    pub(crate) updater: crate::update::Updater,
+    /// Looking for updates by itself (not in tests, nor headless).
+    pub(crate) updates_on: bool,
+    /// The file agents' tool calls are logged to (none in tests).
+    pub(crate) agent_log: crate::agent_log::AgentLog,
     /// The UI context, for waking the window from background work.
     pub egui_ctx: Option<egui::Context>,
     /// The Skitch: the connection, and what was sent to it.
@@ -199,6 +242,7 @@ impl Studio {
         crate::theme::install(&cc.egui_ctx);
         let reopen = path.is_none();
         let mut s = Self::with_file(path, select);
+        s.load_machines();
         // Kept from now on; reopened unless a file was asked for.
         s.session = crate::session::SessionState::in_config();
         if reopen {
@@ -211,7 +255,51 @@ impl Studio {
         s.agent = crate::agent::AgentState::load();
         s.dock_saved = s.dock.clone();
         s.egui_ctx = Some(cc.egui_ctx.clone());
+        s.prefs = crate::settings::Prefs::load();
+        s.apply_prefs();
+        s.apply_agent_log();
+        // (Not while a script is taking pictures.)
+        s.updates_on = std::env::var_os("ZIGZAG_CAPTURE").is_none();
         s.capture = crate::capture::Capture::from_env();
+        // (For screenshots taken by a script: see `capture`.)
+        if s.capture.is_some() {
+            use crate::settings::Section;
+            match std::env::var("ZIGZAG_CAPTURE_SHOW").as_deref() {
+                Ok("settings") => s.open_settings(Section::Machines),
+                Ok("settings-general") => s.open_settings(Section::General),
+                Ok("settings-agent") => s.open_settings(Section::Agent),
+                Ok("select") => s.select_index(Some(0)),
+                // (A selection box, part way through being dragged out.)
+                Ok("marquee") => s.marquee = Some((P::new(-220.0, -120.0), P::new(60.0, 90.0))),
+                // (The update window, offering a release that isn't out.)
+                Ok("update") => {
+                    let mut v = crate::update::this_version();
+                    v[2] += 1;
+                    s.updater
+                        .show(crate::update::Status::Available(crate::update::Release {
+                            version: v,
+                            notes: std::env::var("ZIGZAG_CAPTURE_NOTES")
+                                .ok()
+                                .and_then(|f| std::fs::read_to_string(f).ok())
+                                .unwrap_or_default(),
+                            page: crate::update::DOWNLOAD_PAGE.into(),
+                            asset: Some(crate::update::Asset {
+                                name: "ZigZag.dmg".into(),
+                                url: String::new(),
+                                size: 25_000_000,
+                            }),
+                            sums: None,
+                        }));
+                    s.updater.open = true;
+                }
+                // (The machine window, on a simulated machine.)
+                Ok("skitch") => {
+                    s.machine.open = true;
+                    s.machine.connect(true, &cc.egui_ctx);
+                }
+                _ => {}
+            }
+        }
         if std::env::var_os("TL_NO_GPU").is_none()
             && let Some(gl) = cc.gl.clone()
         {
@@ -282,6 +370,8 @@ impl Studio {
             angle_drag: None,
             drag: None,
             panning: false,
+            marquee: None,
+            wheel: false,
             space_pan: None,
             layout: Default::default(),
             path_edit: Default::default(),
@@ -293,6 +383,9 @@ impl Studio {
             flyouts: Default::default(),
             gesture: Default::default(),
             palettes: Default::default(),
+            machines: Default::default(),
+            prefs: Default::default(),
+            settings_ui: Default::default(),
             picker: None,
             agent: Default::default(),
             hud_lift: 0.0,
@@ -315,6 +408,8 @@ impl Studio {
             native_menu: None,
             show_jumps: true,
             bridges_peek: None,
+            hoop_custom: false,
+            renaming: None,
             player: None,
             playing: false,
             speed: 400.0,
@@ -327,6 +422,9 @@ impl Studio {
             title: String::new(),
             mcp: None,
             mcp_ui: Default::default(),
+            agent_log: Default::default(),
+            updater: Default::default(),
+            updates_on: false,
             egui_ctx: None,
             machine: Default::default(),
             sew_mesh: Default::default(),
@@ -393,6 +491,7 @@ impl Studio {
 
     /// Replace the whole document (open, new). Clears history.
     pub fn set_document(&mut self, doc: Document) {
+        self.hoop_custom = false;
         self.doc = doc;
         self.stable = self.doc.clone();
         self.selected = None;
@@ -661,8 +760,19 @@ impl Studio {
     }
 
     pub fn hoop_dims(&self) -> (f64, f64) {
-        let h = HOOPS[self.doc.settings.hoop.min(HOOPS.len() - 1)];
-        (h.2, h.3)
+        self.doc.settings.hoop
+    }
+
+    /// The hoop's name: a standard hoop's, one of the machine's by its
+    /// size and the machine, or a custom one's size.
+    pub fn hoop_label(&self) -> String {
+        let (w, h) = self.doc.settings.hoop;
+        let size = || crate::units::fmt_size(w * 10.0, h * 10.0);
+        match (standard_hoop((w, h)), self.machine()) {
+            (Some(x), _) => x.1.to_string(),
+            (None, Some(p)) if p.has_hoop((w, h)) => format!("{} · {}", size(), p.name),
+            _ => format!("Custom · {}", size()),
+        }
     }
 
     pub(crate) fn design_over_hoop(&self) -> bool {
@@ -711,7 +821,11 @@ impl Studio {
         let bytes = if ext == "html" {
             self.worksheet_html()?.into_bytes()
         } else {
-            zigzag::formats::write_format(&self.design, ext)?
+            zigzag::formats::write_format_with(
+                &self.design,
+                ext,
+                &self.doc.settings.export_options(),
+            )?
         };
         std::fs::write(path, bytes)?;
         Ok(())
@@ -964,7 +1078,8 @@ impl Studio {
                 continue;
             }
             let result = self.run_mcp_call(&call.name, &call.args);
-            self.mcp_ui.note(&call.name, at, &result);
+            self.mcp_ui.note(&call.name, &call.args, at, &result);
+            self.log_call(&call.name, &call.args, at, &result);
             let _ = call.reply.send(result);
         }
         true
@@ -1096,6 +1211,9 @@ impl Studio {
         self.shape_window(&ctx);
         self.trace_window(&ctx);
         self.close_prompt(&ctx);
+        self.settings_window(&ctx);
+        self.update_tick(&ctx);
+        self.update_window(&ctx);
 
         // (Not on every frame of dragging a panel or a divider: when it's let go.)
         if self.dock != self.dock_saved && !ctx.input(|i| i.pointer.any_down()) {
@@ -1223,13 +1341,41 @@ impl Studio {
     }
 
     /// The object under `p`: inside the entered group first, then anywhere.
+    /// (Not a locked or hidden one: the pointer goes through those to what's
+    /// under them.)
     pub(crate) fn pick(&self, p: P, tol: f64) -> Option<usize> {
         if self.scope().is_some()
-            && let Some(i) = canvas::hit_test_where(&self.doc.shapes, p, tol, |i| self.in_scope(i))
+            && let Some(i) = canvas::hit_test_where(&self.doc.shapes, p, tol, |i| {
+                self.in_scope(i) && self.free(i)
+            })
         {
             return Some(i);
         }
-        canvas::hit_test(&self.doc.shapes, p, tol)
+        canvas::hit_test_where(&self.doc.shapes, p, tol, |i| self.free(i))
+    }
+
+    /// The objects a selection box from `a` to `b` touches: any part of
+    /// their outline or fill inside it, among those that can be selected
+    /// (in the entered group, if one is; not locked, not hidden).
+    pub(crate) fn in_box(&self, a: P, b: P) -> Vec<usize> {
+        let (lo, hi) = (
+            P::new(a.x.min(b.x), a.y.min(b.y)),
+            P::new(a.x.max(b.x), a.y.max(b.y)),
+        );
+        (0..self.doc.shapes.len())
+            .filter(|&i| {
+                self.in_scope(i) && self.free(i) && touches_box(&self.doc.shapes[i], lo, hi)
+            })
+            .collect()
+    }
+
+    /// Whether object `i` can be selected and moved: not locked, not
+    /// hidden.
+    pub(crate) fn free(&self, i: usize) -> bool {
+        self.doc
+            .shapes
+            .get(i)
+            .is_some_and(|s| !s.params.locked() && !s.params.hidden())
     }
 
     /// The gaps Connect sews across in the open, lit up while its bar is
@@ -1396,12 +1542,30 @@ impl Studio {
             self.fit_pending = false;
         }
 
-        // Zoom (wheel / pinch) and pan (drag; middle/right drag always pans).
+        // Zoom: a mouse's wheel, a pinch, or ⌘ and a scroll. Pan: a
+        // trackpad's two-finger scroll (as in Illustrator), the Hand tool,
+        // Space and a drag, or a middle or right drag. (Dragging the
+        // Selection tool over empty canvas is its selection box.)
         if let Some(hover) = resp.hover_pos() {
-            let (scroll, zoom) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
-            let factor = zoom * (scroll.y * 0.0015).exp();
+            let (scroll, zoom) = ctx.input(|i| {
+                for e in &i.events {
+                    if let egui::Event::MouseWheel { unit, .. } = e {
+                        self.wheel = !matches!(unit, egui::MouseWheelUnit::Point);
+                    }
+                }
+                (i.smooth_scroll_delta, i.zoom_delta())
+            });
+            let factor = if self.wheel {
+                zoom * (scroll.y * 0.0015).exp()
+            } else {
+                zoom
+            };
             if (factor - 1.0).abs() > 1e-4 {
                 self.view.zoom_at(rect, hover, factor);
+            }
+            if !self.wheel && scroll != Vec2::ZERO {
+                self.view.center = self.view.center
+                    - P::new(scroll.x as f64, scroll.y as f64) * (10.0 / self.view.scale as f64);
             }
         }
         let tol = 6.0 * 10.0 / self.view.scale as f64;
@@ -1508,8 +1672,16 @@ impl Studio {
                     }
                     self.begin_drag(None, p);
                 } else {
-                    self.panning = true;
+                    // Over nothing: a box to select with.
+                    self.marquee = Some((p, p));
                 }
+            }
+            if let Some((_, to)) = &mut self.marquee
+                && resp.dragged_by(egui::PointerButton::Primary)
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                *to = self.view.to_design(rect, pos);
+                ctx.request_repaint();
             }
             if self.drag.is_some()
                 && resp.dragged_by(egui::PointerButton::Primary)
@@ -1530,6 +1702,21 @@ impl Studio {
             if resp.drag_stopped() {
                 self.end_drag();
                 self.panning = false;
+                if let Some((a, b)) = self.marquee.take() {
+                    // Everything the box touches that can be selected;
+                    // with Shift, as well as what already is.
+                    let mut hit: Vec<usize> = if shift {
+                        self.sel_indices()
+                    } else {
+                        Vec::new()
+                    };
+                    for i in self.in_box(a, b) {
+                        if !hit.contains(&i) {
+                            hit.push(i);
+                        }
+                    }
+                    self.set_selection(&hit);
+                }
             }
             let text_under = self.hovered.filter(|&i| self.doc.lettering(i).is_some());
             if let Some(i) = text_under
@@ -1651,7 +1838,7 @@ impl Studio {
             &self.view,
             hw,
             hh,
-            HOOPS[self.doc.settings.hoop.min(2)].1,
+            &self.hoop_label(),
             over,
             color32(self.doc.settings.cloth),
         );
@@ -1748,6 +1935,26 @@ impl Studio {
         if self.tool == Tool::Select && !self.playing {
             self.draw_selection_box(&painter, rect);
             self.draw_guides(&painter, rect);
+        }
+        // The selection box being dragged out, and what it would select.
+        if let Some((a, b)) = self.marquee {
+            for i in self.in_box(a, b) {
+                canvas::draw_outline(
+                    &painter,
+                    rect,
+                    &self.view,
+                    &self.doc.shapes[i],
+                    Stroke::new(1.2, pal.accent),
+                );
+            }
+            let r = Rect::from_two_pos(self.view.to_screen(rect, a), self.view.to_screen(rect, b));
+            painter.rect_filled(r, 0.0, pal.accent.gamma_multiply(0.12));
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, pal.accent),
+                egui::StrokeKind::Inside,
+            );
         }
         if let (Some(label), Some(pos)) = (self.drag_label(), resp.interact_pointer_pos()) {
             let galley =
@@ -1897,6 +2104,40 @@ pub(crate) fn snapshot_of(d: &Document) -> Snap {
             .collect(),
         d.settings.clone(),
     )
+}
+
+/// Whether any of a shape is inside the box from `lo` to `hi`: a stretch of
+/// its outline, or (the box being inside a filled shape) its fill.
+pub fn touches_box(s: &Shape, lo: P, hi: P) -> bool {
+    let b = shape_bounds(s);
+    if b.is_empty() || b.max.x < lo.x || b.min.x > hi.x || b.max.y < lo.y || b.min.y > hi.y {
+        return false;
+    }
+    let corners = [lo, P::new(hi.x, lo.y), hi, P::new(lo.x, hi.y)];
+    let side = |a: P, b: P, c: P| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    let within = |q: P, by: f64| {
+        q.x >= lo.x - by && q.x <= hi.x + by && q.y >= lo.y - by && q.y <= hi.y + by
+    };
+    // (A line as wide as `by` reaches that much further.)
+    let crosses = |a: P, b: P, by: f64| {
+        within(a, by)
+            || within(b, by)
+            || (0..4).any(|k| {
+                let (c, d) = (corners[k], corners[(k + 1) % 4]);
+                side(a, b, c) * side(a, b, d) <= 0.0 && side(c, d, a) * side(c, d, b) <= 0.0
+            })
+    };
+    match &s.geometry {
+        Geometry::Fill { rings, rule } => {
+            rings
+                .iter()
+                .any(|r| (0..r.len()).any(|k| crosses(r[k], r[(k + 1) % r.len()], 0.0)))
+                || zigzag::geom::point_inside(rings, *rule, lo)
+        }
+        Geometry::Stroke { lines, width } => lines
+            .iter()
+            .any(|(l, _)| l.windows(2).any(|w| crosses(w[0], w[1], width / 2.0))),
+    }
 }
 
 pub fn shape_bounds(s: &Shape) -> Bounds {
