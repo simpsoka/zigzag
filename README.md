@@ -61,6 +61,17 @@ double-click **ZigZag.exe**. Windows SmartScreen warns on apps without a
 Microsoft-trusted signature the first time they run; click *More info* →
 *Run anyway*. No Rust installation is needed.
 
+## Download for Linux
+
+**[Download ZigZag for Linux](https://github.com/simpsoka/zigzag/releases/latest)**
+— the `ZigZag-<version>-x86_64-linux.tar.gz` asset on the latest release.
+
+For x86-64 Linux desktops with glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+),
+X11 or Wayland, and OpenGL. Extract the archive and run `./zigzag-studio`
+inside the extracted folder. It also includes the `zigzag` CLI and
+`zigzag-mcp` bridge; no Rust installation is needed. See the included
+`README.txt` for runtime dependencies and Bluetooth setup.
+
 [Release notes and checksums](https://github.com/simpsoka/zigzag/releases/latest)
 · [Changelog](CHANGELOG.md)
 · [Publishing a release](RELEASE.md)

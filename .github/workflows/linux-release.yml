@@ -1,0 +1,154 @@
+name: Linux release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (e.g. v0.1.3).
+        required: true
+        type: string
+      publish:
+        description: Attach the tested binaries to the existing GitHub release.
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and test x86-64 Linux binaries
+    runs-on: ubuntu-24.04
+    # Keep the glibc baseline at 2.35 without relying on an old hosted runner.
+    container: ubuntu:22.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Install build and smoke-test dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config python3 \
+            libssl-dev libx11-dev libx11-xcb-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev \
+            libegl1-mesa-dev libgl1-mesa-dri xvfb xauth dbus-x11 fonts-dejavu-core
+
+      # Packaging comes from the workflow revision so manual runs can add
+      # Linux downloads to older tags that do not contain these scripts.
+      - name: Checkout packaging
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Expected an existing vX.Y.Z release tag.' >&2
+            exit 1
+          }
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          path: source
+          persist-credentials: false
+
+      - name: Verify source version
+        working-directory: source
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          [[ "$version" == "$RELEASE_VERSION" ]] || {
+            echo "Cargo.toml version ($version) does not match $RELEASE_VERSION." >&2
+            exit 1
+          }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source -> target
+          key: linux-x86_64-ubuntu-22.04
+
+      - name: Build release binaries
+        working-directory: source
+        run: >
+          cargo build --locked --release --features gui,ble
+          --target x86_64-unknown-linux-gnu
+          --bin zigzag-studio --bin zigzag --bin zigzag-mcp
+
+      - name: Package and test the download
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: bash packaging/linux/package.sh source "$RELEASE_VERSION"
+
+      - name: Save tested release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZigZag-${{ steps.release.outputs.version }}-x86_64-linux
+          path: |
+            source/dist/ZigZag-${{ steps.release.outputs.version }}-x86_64-linux.tar.gz
+            source/dist/SHA256SUMS-linux.txt
+          if-no-files-found: error
+
+      - name: Save smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-smoke-${{ steps.release.outputs.version }}
+          path: source/dist/linux-smoke/
+          if-no-files-found: ignore
+
+  publish:
+    name: Attach Linux downloads to the release
+    needs: build
+    if: github.event_name == 'release' || inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested release files
+        uses: actions/download-artifact@v4
+        with:
+          name: ZigZag-${{ needs.build.outputs.version }}-x86_64-linux
+          path: dist
+
+      - name: Verify and upload
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          sha256sum --check SHA256SUMS-linux.txt
+          # Require the release to exist; never create or move its tag.
+          gh release view "$RELEASE_TAG" >/dev/null
+          gh release upload "$RELEASE_TAG" --clobber \
+            "ZigZag-$RELEASE_VERSION-x86_64-linux.tar.gz" SHA256SUMS-linux.txt

@@ -3,8 +3,8 @@
 Downloads live in [GitHub Releases](https://github.com/simpsoka/zigzag/releases).
 The README uses a stable `releases/latest/download/ZigZag.dmg` link for the
 Mac download; every release includes that filename, a versioned DMG, and
-`SHA256SUMS.txt`. The Windows zip is attached to the same release by a
-GitHub Actions workflow — one release page, one tag, two platforms.
+`SHA256SUMS.txt`. GitHub Actions attach the Windows zip and Linux tarball
+to the same release — one release page and one source tag for all platforms.
 Build products stay in the ignored `dist/` directory, outside Git history.
 
 ## Mac
@@ -166,6 +166,33 @@ bash packaging/windows/make-icon.sh    # needs Python + Pillow
 The CI workflow regenerates the `.ico` every build too, so a stale commit is
 harmless as long as the source PNG is up to date.
 
+## Linux
+
+`.github/workflows/linux-release.yml` builds the editor, CLI, and MCP bridge
+with `gui,ble` from the published release tag. It runs on `ubuntu-24.04`
+inside an Ubuntu 22.04 container, keeping the glibc requirement at 2.35.
+The first supported architecture is x86-64 (`x86_64-unknown-linux-gnu`).
+
+The workflow uploads `ZigZag-<version>-x86_64-linux.tar.gz` and
+`SHA256SUMS-linux.txt`. The archive includes all three executable files,
+licenses, dependency notices, and Linux installation instructions. Before
+uploading, it extracts the archive, checks shared libraries, tests CLI
+conversion and import, initializes the headless MCP bridge, and launches
+the graphical editor under Xvfb with software OpenGL to capture a screenshot.
+The screenshot and logs are saved as a separate Actions artifact.
+
+To add Linux binaries to an existing release or retry a build:
+
+```sh
+gh workflow run linux-release.yml --ref main -f tag=v0.1.3 -f publish=true
+```
+
+The release must already exist. The build always checks out its tag, while
+the packaging scripts come from the workflow revision, so it can also
+build releases made before this workflow existed. Re-running replaces only
+the Linux archive and checksum file. Set `publish=false` to build and test
+without uploading to the release; the archive remains an Actions artifact.
+
 ## Verify a download
 
 Download a DMG and `SHA256SUMS.txt` from the same release, then run:
@@ -181,4 +208,10 @@ For the Windows zip:
 ```sh
 shasum -a 256 --ignore-missing -c SHA256SUMS-windows.txt   # on Mac or Linux
 certutil -hashfile ZigZag-<version>-x86_64-windows.zip SHA256   # on Windows
+```
+
+For the Linux tarball, download its checksum file alongside it and run:
+
+```sh
+sha256sum --check SHA256SUMS-linux.txt
 ```
