@@ -72,10 +72,13 @@ PY
 
 # Start the real OpenGL editor under Xvfb and require a rendered screenshot.
 mkdir -m 700 "$work/runtime"
-timeout 60s xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
+if ! timeout 60s xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
     env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR="$work/runtime" LIBGL_ALWAYS_SOFTWARE=1 \
     ZIGZAG_CAPTURE="$evidence" ZIGZAG_CAPTURE_STILL=2 ZIGZAG_CAPTURE_SHOW=settings \
     "$app/zigzag-studio" "$source_dir/examples/badge.svg" --no-mcp \
-    > "$evidence/studio-launch.log" 2>&1
+    > "$evidence/studio-launch.log" 2>&1; then
+    cat "$evidence/studio-launch.log" >&2
+    exit 1
+fi
 test -s "$evidence/still-001.png"
 echo "Verified $name.tar.gz: CLI, imports/exports, MCP, and graphical launch."

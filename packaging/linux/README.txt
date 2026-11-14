@@ -20,7 +20,7 @@ Update checks use curl; opening the download page uses xdg-open.
 
 On Ubuntu, install the runtime dependencies if they are missing:
 
-  sudo apt install libgl1 libegl1 libx11-6 libx11-xcb1 libxcb1 \
+  sudo apt install libgl1 libegl1 libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxcb1 \
     libxcb-render0 libxcb-shape0 libxcb-xfixes0 libxkbcommon0 \
     libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 libwayland-egl1 \
     libdbus-1-3 curl xdg-utils xdg-desktop-portal zenity bluez

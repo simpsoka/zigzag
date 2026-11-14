@@ -45,12 +45,13 @@ jobs:
             libssl-dev libx11-dev libx11-xcb-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
             libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev \
-            libegl1-mesa-dev libgl1-mesa-dri xvfb xauth dbus-x11 fonts-dejavu-core
+            libegl1-mesa-dev libgl1-mesa-dri libxcursor1 libxrandr2 libxi6 \
+            xvfb xauth dbus-x11 fonts-dejavu-core
 
       # Packaging comes from the workflow revision so manual runs can add
       # Linux downloads to older tags that do not contain these scripts.
       - name: Checkout packaging
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -67,7 +68,7 @@ jobs:
           echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ steps.release.outputs.tag }}
           path: source
@@ -94,6 +95,7 @@ jobs:
         with:
           workspaces: source -> target
           key: linux-x86_64-ubuntu-22.04
+          cache-on-failure: true
 
       - name: Build release binaries
         working-directory: source
@@ -108,7 +110,7 @@ jobs:
         run: bash packaging/linux/package.sh source "$RELEASE_VERSION"
 
       - name: Save tested release files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ZigZag-${{ steps.release.outputs.version }}-x86_64-linux
           path: |
@@ -118,7 +120,7 @@ jobs:
 
       - name: Save smoke-test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-smoke-${{ steps.release.outputs.version }}
           path: source/dist/linux-smoke/
@@ -134,7 +136,7 @@ jobs:
       contents: write
     steps:
       - name: Download tested release files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ZigZag-${{ needs.build.outputs.version }}-x86_64-linux
           path: dist
