@@ -720,6 +720,152 @@ impl Document {
     }
 }
 
+impl Document {
+    /// Whether Simplify Design may unite object `i` with its neighbors: a
+    /// filled shape of its own (not lettering, not half of an element with
+    /// an outline too), sewn, not locked, and sewn as stitches that one
+    /// bigger shape could be (not an appliqué or a pattern of threads).
+    fn unitable(&self, i: usize) -> bool {
+        let s = &self.shapes[i];
+        matches!(s.geometry, Geometry::Fill { .. })
+            && !matches!(
+                s.params.kind,
+                Some(Kind::Skip | Kind::Applique | Kind::Cross | Kind::Tartan | Kind::Manual)
+            )
+            && !s.params.hidden()
+            && !s.params.locked()
+            && self.lettering(i).is_none()
+            && self.shapes.iter().filter(|o| o.id == s.id).count() == 1
+    }
+
+    /// The next layers to unite: filled shapes in one thread that sew one
+    /// after another (nothing in another thread between them) and touch,
+    /// as indices in sewing order; with `alike`, only ones sewn as the
+    /// same stitch type. `None` when there are none left.
+    fn touching_run(&self, alike: bool) -> Option<Vec<usize>> {
+        let sewn = |s: &svg::Shape| s.params.kind != Some(Kind::Skip) && !s.params.hidden();
+        let n = self.shapes.len();
+        let mut start = 0;
+        while start < n {
+            // A run: up to the next sewn layer in another thread.
+            let color = self.shapes[start].color;
+            let mut end = start;
+            while end < n && (!sewn(&self.shapes[end]) || self.shapes[end].color == color) {
+                end += 1;
+            }
+            let run: Vec<usize> = (start..end)
+                .filter(|&i| sewn(&self.shapes[i]) && self.unitable(i))
+                .collect();
+            if run.len() >= 2 {
+                let areas: Vec<(Vec<Polyline>, FillRule)> =
+                    run.iter().map(|&i| self.area(i)).collect();
+                let boxes: Vec<crate::geom::Bounds> = areas
+                    .iter()
+                    .map(|(rings, _)| {
+                        let mut b = crate::geom::Bounds::empty();
+                        rings.iter().flatten().for_each(|&p| b.add(p));
+                        b
+                    })
+                    .collect();
+                // Touching: within a tenth of a millimetre of overlapping.
+                let kind = |k: usize| self.shapes[run[k]].params.kind.unwrap_or(Kind::Fill);
+                let near = |a: usize, b: usize| {
+                    let (x, y) = (&boxes[a], &boxes[b]);
+                    if (alike && kind(a) != kind(b))
+                        || x.is_empty()
+                        || y.is_empty()
+                        || x.min.x > y.max.x + 1.0
+                        || y.min.x > x.max.x + 1.0
+                        || x.min.y > y.max.y + 1.0
+                        || y.min.y > x.max.y + 1.0
+                    {
+                        return false;
+                    }
+                    let grown = boolean::offset(&areas[a].0, areas[a].1, 1.0);
+                    !boolean::pathfinder(
+                        &[(grown, FillRule::NonZero), areas[b].clone()],
+                        PathOp::Intersect,
+                    )
+                    .is_empty()
+                };
+                // The first layer, and everything it reaches through
+                // layers that touch.
+                for first in 0..run.len() {
+                    let mut group = vec![first];
+                    let mut k = 0;
+                    while k < group.len() {
+                        for other in 0..run.len() {
+                            if !group.contains(&other) && near(group[k], other) {
+                                group.push(other);
+                            }
+                        }
+                        k += 1;
+                    }
+                    if group.len() >= 2 {
+                        group.sort_unstable();
+                        return Some(group.into_iter().map(|k| run[k]).collect());
+                    }
+                }
+            }
+            start = end.max(start + 1);
+        }
+        None
+    }
+
+    /// Simplify Design's unite: layers that touch, sew one after another
+    /// and share a thread become one shape. It's the biggest of them, grown
+    /// to cover the rest (so it keeps its name, its group and its stitch
+    /// settings), where the first of them was in the sewing order. They're
+    /// one color already, so nothing looks different from a distance; what
+    /// goes is the stitching under and between them. Returns how many
+    /// layers went. With `alike`, only layers sewn as the same stitch type
+    /// unite (a satin on a fill stays a satin on a fill).
+    pub(super) fn unite_touching(&mut self, alike: bool) -> Result<usize> {
+        self.sync()?;
+        let mut gone = 0;
+        // (Each pass unites one group, so this ends: layers only go.)
+        while let Some(idx) = self.touching_run(alike) {
+            let parts: Vec<(Vec<Polyline>, FillRule)> = idx.iter().map(|&i| self.area(i)).collect();
+            let size = |(rings, _): &(Vec<Polyline>, FillRule)| {
+                let mut b = crate::geom::Bounds::empty();
+                rings.iter().flatten().for_each(|&p| b.add(p));
+                if b.is_empty() {
+                    0.0
+                } else {
+                    b.width() * b.height()
+                }
+            };
+            let biggest = (0..idx.len())
+                .max_by(|&a, &b| size(&parts[a]).total_cmp(&size(&parts[b])))
+                .map_or(idx[0], |k| idx[k]);
+            let path = bezier::from_rings(&boolean::pathfinder(&parts, PathOp::Unite), RESULT_TOL);
+            if path.is_empty() {
+                break;
+            }
+            let keep = self.shapes[biggest].uid;
+            let rest: Vec<usize> = idx
+                .iter()
+                .filter(|&&i| i != biggest)
+                .map(|&i| self.shapes[i].uid)
+                .collect();
+            let slot = idx[0];
+            self.set_paths(&[(biggest, path)])?;
+            let doomed = self.uid_indices(&rest);
+            self.delete_many(&doomed)?;
+            // Where the first of them was.
+            if let Some(at) = self.shapes.iter().position(|s| s.uid == keep)
+                && at != slot.min(self.shapes.len() - 1)
+            {
+                let made = self.shapes.remove(at);
+                self.shapes.insert(slot.min(self.shapes.len()), made);
+            }
+            self.sync()?;
+            gone += rest.len();
+        }
+        Ok(gone)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,7 +22,7 @@ An object is named for its id without the settings (id=\"Face_mask_fill\" is \"F
 list_machines and set_document's machine set a document up for a machine: its hoop, the file it reads, its shortest stitch and its lock stitches. \
 Hat designs are small (about 50 × 50 mm on the front of a cap): keep satin columns under 7 mm wide, letters at least 5 mm tall, and details at least 1.5 mm. \
 open_file also opens machine files (pes, pec, dst, exp, jef) as manual stitches. \
-trace_image turns a logo (PNG, JPEG, WebP, GIF, BMP or TIFF) into shapes (snap colors to Brother or Janome threads with `threads`). round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
+trace_image turns a logo (PNG, JPEG, WebP, GIF, BMP or TIFF) into shapes (snap colors to Brother or Janome threads with `threads`). simplify_design makes the whole design quicker to sew (fewer threads, no details too small to sew, fewer trims; try it with dry_run first to see what it comes to). round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
 Use batch to make several changes in one call: it is all or nothing and one undo step, each step is {\"tool\": name, \"arguments\": {…}}, and later steps can use earlier results (\"$0.added.0.name\"). \
 Tools that change the design return the whole object or document; pass terse: true (on a tool, or on a batch for all its steps) for a short answer instead: ok, the names of objects added, and new_problems, the design problems that weren't there before.";
 
@@ -455,6 +455,21 @@ pub fn tool_specs() -> Value {
                     "tiny_mm": { "type": "number", "description": "With tiny_objects: remove objects smaller than this across. Default 1." },
                     "extra_points": { "type": "boolean", "description": "Default true." },
                     "dry_run": { "type": "boolean", "description": "Only count what it would remove. Default false." }
+                }
+            }
+        }),
+        json!({
+            "name": "simplify_design",
+            "description": "Simplify the whole design so it is quicker and easier to sew (Object > Simplify Design): merge the threads most alike down to a number, take out details too small to sew well, sew across short gaps instead of trimming, and sew each thread together. Give only what you want changed. Returns what the design costs to sew before and after (threads, thread changes, trims, stitches, minutes) and what was merged or removed. One undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threads": { "type": "integer", "minimum": 1, "description": "Merge the threads most alike until this many are left. Each pair becomes the one that sews more (a real thread, not a blend). Default: keep them all." },
+                    "min_size_mm": { "type": "number", "description": "Remove objects smaller than this across, 0–10 mm (lettering is left alone). Default 0: none." },
+                    "connect_mm": { "type": "number", "description": "Sew across gaps up to this long instead of cutting the thread, 0–10 mm (the document's connect_mm; never lowered). Default: leave it." },
+                    "group_colors": { "type": "boolean", "description": "Reorder so each thread sews in as few goes as the layering allows. Default true." },
+                    "unite": { "type": "string", "enum": ["off", "similar", "all"], "description": "Make one shape of objects that touch, sew one after another and share a thread (after any merging and regrouping), so nothing is sewn under or between them. similar: only objects with the same stitch type (fill with fill, satin with satin), so a satin detail on a fill stays. all: whatever they are sewn as; fewest stitches, but detail in the same thread is lost. Lettering and locked objects are left alone. Default off." },
+                    "dry_run": { "type": "boolean", "description": "Only report what it would come to. Default false." }
                 }
             }
         }),
@@ -983,6 +998,7 @@ impl Studio {
             "round_corners" => self.tool_round_corners(args),
             "simplify" => self.tool_simplify(args),
             "clean_up" => self.tool_clean_up(args),
+            "simplify_design" => self.tool_simplify_design(args),
             "get_design" => Ok(ToolResult::json(&self.design_json())),
             "add_svg" => self.tool_add_svg(args),
             "set_object" => self.tool_set_object(args),
@@ -1634,6 +1650,97 @@ impl Studio {
             self.replan_soon();
         }
         Ok(ToolResult::text(crate::path_tools::cleanup_summary(&r)))
+    }
+
+    fn tool_simplify_design(&mut self, args: &Value) -> Result<ToolResult, String> {
+        use crate::simplify::Figures;
+        use zigzag::document::SimplifyDesign;
+        let threads = match args.get("threads") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .filter(|&n| n >= 1)
+                    .ok_or("`threads` must be a whole number, 1 or more")? as usize,
+            ),
+        };
+        let mm = |key: &str, most: f64| match args.get(key) {
+            None | Some(Value::Null) => Ok(0.0),
+            Some(v) => v
+                .as_f64()
+                .filter(|m| m.is_finite() && (0.0..=most).contains(m))
+                .ok_or(format!("`{key}` must be a number from 0 to {most}")),
+        };
+        let flag = |key: &str, default: bool| match args.get(key) {
+            None | Some(Value::Null) => Ok(default),
+            Some(v) => v.as_bool().ok_or(format!("`{key}` must be true or false")),
+        };
+        let opt = SimplifyDesign {
+            threads,
+            min_size_mm: mm("min_size_mm", SimplifyDesign::MAX_SIZE_MM)?,
+            connect_mm: mm("connect_mm", SimplifyDesign::MAX_CONNECT_MM)?,
+            group: flag("group_colors", true)?,
+            unite: match args.get("unite") {
+                None | Some(Value::Null) => zigzag::document::Unite::Off,
+                Some(v) => v
+                    .as_str()
+                    .and_then(zigzag::document::Unite::by_id)
+                    .ok_or("`unite` must be \"off\", \"similar\" or \"all\"")?,
+            },
+        };
+        let dry = flag("dry_run", false)?;
+        if self.doc.shapes.is_empty() {
+            return Err("there is nothing in the design to simplify".into());
+        }
+        if self.dirty_needs_plan() {
+            self.replan();
+        }
+        let before = Figures::of(&self.design);
+        let (report, after) = if dry {
+            let mut doc = self.doc.clone();
+            let r = doc.simplify_design(&opt).map_err(|e| format!("{e:#}"))?;
+            (r, Figures::of(&doc.plan()))
+        } else {
+            let mut r = zigzag::document::SimplifyReport::default();
+            let redo = self.redo.clone();
+            self.structural(|d| {
+                r = d.simplify_design(&opt)?;
+                Ok(())
+            })
+            .map_err(|e| format!("{e:#}"))?;
+            if r.changed() {
+                self.replan();
+            } else {
+                // Nothing to undo.
+                self.undo.pop();
+                self.redo = redo;
+            }
+            (r, Figures::of(&self.design))
+        };
+        let figures = |f: &Figures| {
+            json!({
+                "threads": f.threads,
+                "thread_changes": f.changes,
+                "trims": f.trims,
+                "stitches": f.stitches,
+                "minutes": f.minutes,
+            })
+        };
+        let hex = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        Ok(ToolResult::json(&json!({
+            "changed": report.changed() && !dry,
+            "dry_run": dry,
+            "before": figures(&before),
+            "after": figures(&after),
+            "merged_threads": report
+                .merged
+                .iter()
+                .map(|(from, into)| json!({ "from": hex(*from), "into": hex(*into) }))
+                .collect::<Vec<_>>(),
+            "removed_objects": report.removed,
+            "united_objects": report.united,
+            "reordered": report.reordered,
+            "connect_mm": report.connect_mm.1,
+        })))
     }
 
     fn tool_round_corners(&mut self, args: &Value) -> Result<ToolResult, String> {
@@ -3008,6 +3115,96 @@ mod tests {
     }
 
     #[test]
+    fn simplify_design_reports_what_it_comes_to() {
+        let mut s = Studio::with_file(None, None);
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="40mm" viewBox="0 0 80 40">
+            <rect id="Red" x="2" y="2" width="20" height="20" fill="#c80000"/>
+            <rect id="Blue" x="26" y="2" width="20" height="20" fill="#0000c8"/>
+            <rect id="Light_red" x="50" y="2" width="8" height="8" fill="#d7140a"/>
+            <rect id="Speck" x="70" y="2" width="0.6" height="0.6" fill="#00a000"/>
+        </svg>"##;
+        let ok = |r: ToolResult| -> Value {
+            assert!(!r.is_error, "{}", text(&r));
+            serde_json::from_str(&text(&r)).unwrap()
+        };
+        let no = |r: ToolResult, why: &str| {
+            assert!(r.is_error && text(&r).contains(why), "{}", text(&r));
+        };
+        ok(s.run_tool("add_svg", &json!({ "svg": svg })));
+        let undo = s.undo.len();
+        // A dry run says what it would come to, and changes nothing.
+        let args = json!({ "threads": 2, "min_size_mm": 1, "dry_run": true });
+        let v = ok(s.run_tool("simplify_design", &args));
+        assert_eq!(v["before"]["threads"], 4);
+        assert_eq!(v["after"]["threads"], 2);
+        assert_eq!(v["removed_objects"], 1);
+        assert_eq!(v["changed"], false);
+        assert_eq!((s.doc.shapes.len(), s.undo.len()), (4, undo));
+        // For real: the speck goes, the light red sews in the red, each
+        // thread once; one step to undo.
+        let v = ok(s.run_tool(
+            "simplify_design",
+            &json!({ "threads": 2, "min_size_mm": 1 }),
+        ));
+        assert_eq!(v["changed"], true);
+        assert_eq!(v["after"]["threads"], 2);
+        assert_eq!(v["after"]["thread_changes"], 1);
+        assert_eq!(
+            v["merged_threads"],
+            json!([{ "from": "#d7140a", "into": "#c80000" }])
+        );
+        assert_eq!(s.doc.shapes.len(), 3);
+        assert_eq!(s.undo.len(), undo + 1);
+        assert!(v["after"]["stitches"].as_u64() < v["before"]["stitches"].as_u64());
+        // Uniting: the light red square doesn't touch the red, so nothing
+        // to unite; with one over the red's edge there is.
+        let v = ok(s.run_tool("simplify_design", &json!({ "unite": "all" })));
+        assert_eq!(
+            (v["united_objects"].as_u64(), v["changed"].as_bool()),
+            (Some(0), Some(false))
+        );
+        let more = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="20mm" viewBox="0 0 20 20">
+            <rect id="Patch" width="20" height="20" fill="#c80000"/>
+        </svg>"##;
+        ok(s.run_tool("add_svg", &json!({ "svg": more, "x_mm": -30, "y_mm": 5 })));
+        let n = s.doc.shapes.len();
+        let v = ok(s.run_tool("simplify_design", &json!({ "unite": "all" })));
+        assert!(v["united_objects"].as_u64() >= Some(1), "{v}");
+        assert!(s.doc.shapes.len() < n);
+        assert!(!s.run_tool("undo", &json!({})).is_error);
+        assert!(!s.run_tool("undo", &json!({})).is_error);
+        assert_eq!(s.doc.shapes.len(), 3);
+        // Nothing more to do: nothing to undo either.
+        let v = ok(s.run_tool("simplify_design", &json!({ "threads": 2 })));
+        assert_eq!(v["changed"], false);
+        assert_eq!(s.undo.len(), undo + 1);
+        // What it's asked has to make sense.
+        no(
+            s.run_tool("simplify_design", &json!({ "threads": 0 })),
+            "threads",
+        );
+        no(
+            s.run_tool("simplify_design", &json!({ "min_size_mm": 50 })),
+            "min_size_mm",
+        );
+        no(
+            s.run_tool("simplify_design", &json!({ "connect_mm": -1 })),
+            "connect_mm",
+        );
+        no(
+            s.run_tool("simplify_design", &json!({ "group_colors": "yes" })),
+            "group_colors",
+        );
+        no(
+            s.run_tool("simplify_design", &json!({ "unite": true })),
+            "unite",
+        );
+        // Undone: the design as it was.
+        assert!(!s.run_tool("undo", &json!({})).is_error);
+        assert_eq!(s.doc.shapes.len(), 4);
+    }
+
+    #[test]
     fn tools_do_what_they_say_at_the_edges() {
         // What a sweep of every tool against its description turned up.
         let mut s = Studio::with_file(None, None);
@@ -3145,9 +3342,29 @@ mod tests {
         let mut out = String::new();
         sock.read_to_string(&mut out).unwrap();
         let (head, body) = out.split_once("\r\n\r\n").unwrap();
+        // (A long reply, the tool list for one, comes in chunks: a length
+        // in hex, that much text, and so on until a length of zero.)
+        let chunked = head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked");
+        let body = if chunked {
+            let mut text = String::new();
+            let mut rest = body;
+            while let Some((len, after)) = rest.split_once("\r\n") {
+                let n = usize::from_str_radix(len.trim(), 16).unwrap();
+                if n == 0 {
+                    break;
+                }
+                text.push_str(&after[..n]);
+                rest = after[n..].trim_start_matches("\r\n");
+            }
+            text
+        } else {
+            body.to_string()
+        };
         (
             head.split_whitespace().nth(1).unwrap().parse().unwrap(),
-            body.to_string(),
+            body,
         )
     }
 

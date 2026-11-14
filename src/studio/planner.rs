@@ -76,7 +76,7 @@ impl Planner {
                         job = newer;
                     }
                     let t = std::time::Instant::now();
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let result = zigzag::design::caught(|| {
                         let design = zigzag::design::plan_cached(
                             &job.name,
                             &job.shapes,
@@ -85,7 +85,7 @@ impl Planner {
                         );
                         let issues = checks::check(&job.shapes, &design, &job.opt, Some(job.hoop));
                         (design, issues)
-                    }))
+                    })
                     .map_err(|e| panic_text(&e));
                     let ms = t.elapsed().as_secs_f64() * 1000.0;
                     if done_tx

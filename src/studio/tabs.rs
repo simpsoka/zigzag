@@ -735,10 +735,11 @@ impl Studio {
                     if dialog::secondary(ui, "Cancel").clicked() {
                         choice = Some(Close::Cancel);
                     }
-                    dialog::apart(ui);
-                    if dialog::secondary(ui, "Don't Save").clicked() {
-                        choice = Some(Close::Discard);
-                    }
+                    dialog::apart(ui, |ui| {
+                        if dialog::secondary(ui, "Don't Save").clicked() {
+                            choice = Some(Close::Discard);
+                        }
+                    });
                 });
             },
         );

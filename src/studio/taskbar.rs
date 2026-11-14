@@ -149,34 +149,52 @@ impl Studio {
                                 }
                             });
                             // The thread: click for the picker.
-                            let color = self.doc.shapes[idx[0]].color;
+                            use crate::threads::SelThread;
+                            let thread = self.selection_thread();
                             let (r, resp) =
                                 ui.allocate_exact_size(Vec2::splat(BUTTON), Sense::click());
                             resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, "Thread color")
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::Button,
+                                    true,
+                                    if thread == SelThread::Mixed {
+                                        "Thread color: several"
+                                    } else {
+                                        "Thread color"
+                                    },
+                                )
                             });
                             if resp.hovered() {
                                 ui.painter().rect_filled(r, 6.0, p.hover);
                             }
                             let sw = Rect::from_center_size(r.center(), Vec2::splat(16.0));
-                            ui.painter().rect_filled(
-                                sw,
-                                4.0,
-                                Color32::from_rgb(color[0], color[1], color[2]),
-                            );
-                            ui.painter().rect_stroke(
-                                sw,
-                                4.0,
-                                Stroke::new(1.0, p.separator),
-                                egui::StrokeKind::Inside,
-                            );
-                            if resp
-                                .on_hover_text(format!(
-                                    "Thread: {}",
-                                    crate::threads::nearest(self.view_tools.brand, color).1
-                                ))
-                                .clicked()
-                            {
+                            let tip = match thread {
+                                SelThread::One(color) => {
+                                    ui.painter().rect_filled(
+                                        sw,
+                                        4.0,
+                                        Color32::from_rgb(color[0], color[1], color[2]),
+                                    );
+                                    ui.painter().rect_stroke(
+                                        sw,
+                                        4.0,
+                                        Stroke::new(1.0, p.separator),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    format!(
+                                        "Thread: {}",
+                                        crate::threads::nearest(self.view_tools.brand, color).1
+                                    )
+                                }
+                                // Layers in different threads (or, never
+                                // here, none): no one color to show.
+                                _ => {
+                                    crate::threads::paint_mixed(ui.painter(), sw, 4.0, &p);
+                                    "Several threads · click to pick one for all the selected layers"
+                                        .to_string()
+                                }
+                            };
+                            if resp.on_hover_text(tip).clicked() {
                                 picker_at = Some(r.left_top());
                             }
                             // Text: its font, size, style and alignment right here.

@@ -8,8 +8,9 @@ use crate::theme::{caption, icon_button, pal_ui};
 use crate::widgets::fmt_int;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
-/// Room for the traffic-light buttons when the title bar is transparent.
-const TRAFFIC_LIGHTS: f32 = 70.0;
+/// The toolbar's height. On the Mac the window's close, minimise and zoom
+/// buttons are centred in it too (`lights`).
+pub const TITLEBAR_H: f32 = 48.0;
 
 impl Studio {
     pub fn titlebar(&mut self, ui: &mut egui::Ui) {
@@ -34,12 +35,13 @@ impl Studio {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if cfg!(target_os = "macos") {
-                ui.add_space(TRAFFIC_LIGHTS);
+                // Past the window's own buttons, which share this strip.
+                ui.add_space((crate::lights::room() - ui.cursor().min.x).max(0.0));
             } else {
                 self.menu_bar(ui);
                 ui.add_space(4.0);
             }
-            if icon_button(ui, Icon::LeftPanel, "Show or Hide Objects", false, 28.0).clicked() {
+            if icon_button(ui, Icon::LeftPanel, "Show or Hide Layers", false, 28.0).clicked() {
                 self.run_action(Action::ToggleLeftDock);
             }
             ui.add_space(4.0);
@@ -199,18 +201,27 @@ impl Studio {
             // The selection's thread, like Illustrator's fill swatch: click
             // it for the color picker.
             ui.add_space(10.0);
-            let color = self.sel_index().map(|i| self.doc.shapes[i].color);
-            let sense = if color.is_some() {
-                Sense::click()
-            } else {
+            use crate::threads::SelThread;
+            let thread = self.selection_thread();
+            let sense = if thread == SelThread::None {
                 Sense::hover()
+            } else {
+                Sense::click()
             };
             let (r, resp) = ui.allocate_exact_size(Vec2::splat(24.0), sense);
             resp.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Button, color.is_some(), "Thread Color")
+                egui::WidgetInfo::labeled(
+                    egui::Role::Button,
+                    thread != SelThread::None,
+                    if thread == SelThread::Mixed {
+                        "Thread Color: several"
+                    } else {
+                        "Thread Color"
+                    },
+                )
             });
-            match color {
-                Some(c) => {
+            match thread {
+                SelThread::One(c) => {
                     ui.painter().rect_filled(r, 5.0, crate::canvas::color32(c));
                     ui.painter().rect_stroke(
                         r,
@@ -219,7 +230,9 @@ impl Studio {
                         egui::StrokeKind::Inside,
                     );
                 }
-                None => {
+                // Layers in different threads: no one color to show.
+                SelThread::Mixed => crate::threads::paint_mixed(ui.painter(), r, 5.0, &p),
+                SelThread::None => {
                     // No selection: an empty swatch with a slash, like "None".
                     ui.painter().rect_stroke(
                         r,
@@ -236,12 +249,15 @@ impl Studio {
                     );
                 }
             }
-            let resp = resp.on_hover_text(match color {
-                Some(c) => format!(
+            let resp = resp.on_hover_text(match thread {
+                SelThread::One(c) => format!(
                     "Thread: {} · click to change",
                     crate::threads::nearest(self.view_tools.brand, c).1
                 ),
-                None => "Select objects to set their thread color".into(),
+                SelThread::Mixed => {
+                    "Several threads · click to pick one for all the selected layers".into()
+                }
+                SelThread::None => "Select layers to set their thread color".into(),
             });
             if resp.clicked() {
                 self.picker = match self.picker {

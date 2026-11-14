@@ -105,7 +105,9 @@ fn points(doc: &Document, indices: &[usize]) -> usize {
 impl Studio {
     /// A dialog is previewing into the document: nothing else may edit it.
     pub fn previewing(&self) -> bool {
-        self.layout.corner_dialog.is_some() || self.layout.simplify_dialog.is_some()
+        self.layout.corner_dialog.is_some()
+            || self.layout.simplify_dialog.is_some()
+            || self.layout.design_dialog.is_some()
     }
 
     /// Canvas input and drawing for Smooth, Path Eraser and Join.
@@ -523,6 +525,10 @@ impl Studio {
             self.dirty = true;
         }
         if let Some(d) = self.layout.simplify_dialog.take() {
+            self.doc = d.base;
+            self.dirty = true;
+        }
+        if let Some(d) = self.layout.design_dialog.take() {
             self.doc = d.base;
             self.dirty = true;
         }

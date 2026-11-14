@@ -185,7 +185,7 @@ pub struct Studio {
     /// The Document panel shows the hoop's width and height fields: Custom
     /// was chosen (a hoop that isn't a standard one shows them anyway).
     pub(crate) hoop_custom: bool,
-    /// An object being renamed in the Objects list: its uid, the name as
+    /// An object being renamed in the Layers list: its uid, the name as
     /// typed so far, and whether the field has just appeared (to be given
     /// the keyboard, its text selected).
     pub(crate) renaming: Option<(usize, String, bool)>,
@@ -209,6 +209,11 @@ pub struct Studio {
     pub(crate) updater: crate::update::Updater,
     /// Looking for updates by itself (not in tests, nor headless).
     pub(crate) updates_on: bool,
+    /// The log of a crash last time that nobody has been told about yet:
+    /// the window offering to report it is up.
+    pub(crate) crash: Option<std::path::PathBuf>,
+    /// The About window is open.
+    pub(crate) about: bool,
     /// The file agents' tool calls are logged to (none in tests).
     pub(crate) agent_log: crate::agent_log::AgentLog,
     /// The UI context, for waking the window from background work.
@@ -260,6 +265,9 @@ impl Studio {
         s.apply_agent_log();
         // (Not while a script is taking pictures.)
         s.updates_on = std::env::var_os("ZIGZAG_CAPTURE").is_none();
+        if s.updates_on {
+            s.crash = crate::crash::dir().and_then(|d| crate::crash::unreported(&d));
+        }
         s.capture = crate::capture::Capture::from_env();
         // (For screenshots taken by a script: see `capture`.)
         if s.capture.is_some() {
@@ -271,6 +279,40 @@ impl Studio {
                 Ok("select") => s.select_index(Some(0)),
                 // (A selection box, part way through being dragged out.)
                 Ok("marquee") => s.marquee = Some((P::new(-220.0, -120.0), P::new(60.0, 90.0))),
+                // The windows about ZigZag itself.
+                Ok("about") => s.about = true,
+                Ok("crash") => s.crash = Some(std::path::PathBuf::from("crash.txt")),
+                // Simplify Design, part way: half the threads, no small details.
+                Ok(
+                    show
+                    @ ("simplify-design" | "simplify-design-similar" | "simplify-design-unite"),
+                ) => {
+                    s.open_design_dialog();
+                    let half = s.doc.threads().len().div_ceil(2).max(1);
+                    if let Some(d) = &mut s.layout.design_dialog {
+                        d.opt.threads = Some(half);
+                        d.opt.min_size_mm = 1.5;
+                        d.opt.connect_mm = 2.0;
+                        d.opt.unite = match show {
+                            "simplify-design-unite" => zigzag::document::Unite::All,
+                            "simplify-design-similar" => zigzag::document::Unite::Similar,
+                            _ => zigzag::document::Unite::Off,
+                        };
+                    }
+                }
+                // An agent at work: on everything, selected (as it is when
+                // a prompt is sent with it all selected), or (`agent-one`)
+                // on the last object alone.
+                Ok(show @ ("agent" | "agent-one")) => {
+                    let n = if show == "agent" { usize::MAX } else { 1 };
+                    let uids: Vec<usize> =
+                        s.doc.shapes.iter().rev().map(|x| x.uid).take(n).collect();
+                    s.agent.work.pose(&uids);
+                    if show == "agent" {
+                        let all: Vec<usize> = (0..s.doc.shapes.len()).collect();
+                        s.set_selection(&all);
+                    }
+                }
                 // (The update window, offering a release that isn't out.)
                 Ok("update") => {
                     let mut v = crate::update::this_version();
@@ -425,6 +467,8 @@ impl Studio {
             agent_log: Default::default(),
             updater: Default::default(),
             updates_on: false,
+            crash: None,
+            about: false,
             egui_ctx: None,
             machine: Default::default(),
             sew_mesh: Default::default(),
@@ -511,7 +555,7 @@ impl Studio {
         // An internal error planning (a panic on some odd geometry) keeps
         // the last plan on screen and says so, rather than ending the app
         // (and then again on the next launch, when the document comes back).
-        let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let planned = zigzag::design::caught(|| {
             let design = self.doc.plan_cached(&mut self.plan_cache);
             let issues = checks::check(
                 &self.doc.shapes,
@@ -520,7 +564,7 @@ impl Studio {
                 Some(self.hoop_dims()),
             );
             (design, issues)
-        }));
+        });
         match planned {
             Ok((design, issues)) => {
                 self.design = design;
@@ -1042,6 +1086,7 @@ impl eframe::App for Studio {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         crate::app_icon::sync(ui.ctx());
+        crate::lights::sync(crate::chrome::TITLEBAR_H);
         crate::profile::whole_frame(frame.info().cpu_usage);
         self.frame(ui);
         // A copy from a panel button, this frame.
@@ -1133,7 +1178,7 @@ impl Studio {
 
         let pal = crate::theme::pal(&ctx);
         egui::Panel::top("titlebar")
-            .exact_size(48.0)
+            .exact_size(crate::chrome::TITLEBAR_H)
             .resizable(false)
             .show_separator_line(false)
             .frame(
@@ -1205,6 +1250,7 @@ impl Studio {
         self.offset_window(&ctx);
         self.corner_window(&ctx);
         self.simplify_window(&ctx);
+        self.design_window(&ctx);
         self.machine_window(&ctx);
         self.cleanup_window(&ctx);
         self.swatch_window(&ctx);
@@ -1214,6 +1260,8 @@ impl Studio {
         self.settings_window(&ctx);
         self.update_tick(&ctx);
         self.update_window(&ctx);
+        self.crash_window(&ctx);
+        self.about_window(&ctx);
 
         // (Not on every frame of dragging a panel or a divider: when it's let go.)
         if self.dock != self.dock_saved && !ctx.input(|i| i.pointer.any_down()) {
@@ -1224,8 +1272,13 @@ impl Studio {
         // Coalesce a slider drag (or any burst of edits) into one undo step.
         let after = self.snapshot();
         // Structural edits (delete, move, paste…) push their own undo step and
-        // update `stable`; only in-place edits are coalesced here.
-        if after != before && after != snapshot_of(&self.stable) && self.drag.is_none() {
+        // update `stable`; only in-place edits are coalesced here. (Not a
+        // dialog's preview: that isn't an edit until it's kept.)
+        if after != before
+            && after != snapshot_of(&self.stable)
+            && self.drag.is_none()
+            && !self.previewing()
+        {
             if !self.editing {
                 self.push_undo(self.stable.clone());
                 self.redo.clear();
@@ -2414,7 +2467,7 @@ mod tests {
             "⌘-click picks one object"
         );
 
-        // The Objects panel lists the groups.
+        // The Layers panel lists the groups.
         h.get_by_label("flower");
         h.get_by_label("Group");
     }

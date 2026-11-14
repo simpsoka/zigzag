@@ -92,7 +92,7 @@ pub struct LayoutState {
     pub rotate_by: f64,
     /// Pastes since the last copy, to cascade them.
     pub pastes: usize,
-    /// Groups shown open in the Objects panel.
+    /// Groups shown open in the Layers panel.
     pub expanded: std::collections::HashSet<String>,
     /// Groups entered by double-clicking (Illustrator's isolation mode),
     /// outermost first. Clicks select inside the innermost one.
@@ -105,6 +105,8 @@ pub struct LayoutState {
     pub corner_dialog: Option<CornerDialog>,
     /// The Simplify window, when open.
     pub simplify_dialog: Option<crate::path_tools::SimplifyDialog>,
+    /// The Simplify Design window, when open.
+    pub design_dialog: Option<crate::simplify::DesignDialog>,
     /// The Clean Up window, when open.
     pub cleanup_dialog: Option<crate::path_tools::CleanUpDialog>,
     /// The Test Swatches window, when open.
@@ -625,7 +627,7 @@ impl Studio {
     }
 
     /// Object › Path › Release Compound Path: the new group opens in the
-    /// Objects list so its pieces show.
+    /// Layers list so its pieces show.
     pub fn release_compound_selected(&mut self) {
         let idx = self.sel_indices();
         let mut new = Vec::new();

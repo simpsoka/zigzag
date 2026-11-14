@@ -65,6 +65,8 @@ pub enum Action {
     /// Object › Path › Release Compound Path: one object per separate shape.
     ReleaseCompound,
     SimplifyPath,
+    /// Object › Simplify Design…: fewer threads, small details and trims.
+    SimplifyDesign,
     RoundCorners,
     /// Edit › Copy / Paste Stitch Settings (Ink/Stitch's Duplicate Params).
     CopySettings,
@@ -109,6 +111,12 @@ pub enum Action {
     CheckForUpdates,
     /// Help › Report an Issue…: a new issue on GitHub, in the browser.
     ReportIssue,
+    /// Help › ZigZag on GitHub: its page there, in the browser.
+    GitHub,
+    /// Help › Show Crash Logs: the folder they're kept in.
+    CrashLogs,
+    /// About ZigZag (the app menu's on a Mac, Help's elsewhere).
+    About,
     ZoomIn,
     ZoomOut,
     ZoomFit,
@@ -294,6 +302,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                         Item(Action::GroupColors, "Group Colors", None),
                     ],
                 ),
+                Item(Action::SimplifyDesign, "Simplify Design…", None),
                 Sep,
                 Item(Action::TestSwatches, "Test Swatches…", None),
             ],
@@ -393,7 +402,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::NextTab, "Next Document", None),
                 Item(Action::PreviousTab, "Previous Document", None),
                 Sep,
-                Item(Action::Panel(PanelId::Objects), "Objects", None),
+                Item(Action::Panel(PanelId::Objects), "Layers", None),
                 Item(Action::ShowIssues, "Issues", None),
                 Item(Action::Panel(PanelId::Stitch), "Stitch", None),
                 Item(Action::Panel(PanelId::Transform), "Transform", None),
@@ -407,14 +416,22 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
             "Help",
             // (On a Mac, Check for Updates is in the ZigZag menu: see
             // `native_menu`.)
-            if cfg!(target_os = "macos") {
-                vec![Item(Action::ReportIssue, "Report an Issue…", None)]
-            } else {
-                vec![
-                    UPDATES_ITEM,
-                    Sep,
+            {
+                let mut help = if cfg!(target_os = "macos") {
+                    Vec::new()
+                } else {
+                    vec![UPDATES_ITEM, Sep]
+                };
+                help.extend([
+                    Item(Action::GitHub, "ZigZag on GitHub", None),
                     Item(Action::ReportIssue, "Report an Issue…", None),
-                ]
+                    Item(Action::CrashLogs, "Show Crash Logs", None),
+                ]);
+                // (On a Mac, About is in the ZigZag menu too.)
+                if !cfg!(target_os = "macos") {
+                    help.extend([Sep, ABOUT_ITEM]);
+                }
+                help
             },
         ),
     ]
@@ -478,10 +495,13 @@ pub fn all_actions() -> Vec<(Action, &'static str, Option<Sc>)> {
     }
     // (In the app menu on a Mac, not in the menus above.)
     if cfg!(target_os = "macos") {
-        walk(&[UPDATES_ITEM, SETTINGS_ITEM], &mut out);
+        walk(&[ABOUT_ITEM, UPDATES_ITEM, SETTINGS_ITEM], &mut out);
     }
     out
 }
+
+/// About ZigZag: the app menu's on a Mac, the foot of Help elsewhere.
+pub const ABOUT_ITEM: Entry = Item(Action::About, "About ZigZag", None);
 
 /// Check for Updates…: the app menu's on a Mac, the head of Help elsewhere.
 pub const UPDATES_ITEM: Entry = Item(Action::CheckForUpdates, "Check for Updates…", None);
@@ -489,7 +509,7 @@ pub const UPDATES_ITEM: Entry = Item(Action::CheckForUpdates, "Check for Updates
 /// Settings…, ⌘, : the app menu's on a Mac, at the foot of Edit elsewhere.
 pub const SETTINGS_ITEM: Entry = Item(Action::Settings, "Settings…", cmd(Key::Comma));
 
-/// Locked, or hidden: the Objects list's two columns.
+/// Locked, or hidden: the Layers list's two columns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flag {
     Lock,
@@ -560,9 +580,11 @@ impl Studio {
                         == 1
             }
             Action::Paste => !self.layout.clipboard.is_empty(),
-            Action::SelectAll | Action::GroupColors | Action::FitToHoop | Action::CleanUp => {
-                !self.doc.shapes.is_empty()
-            }
+            Action::SelectAll
+            | Action::GroupColors
+            | Action::FitToHoop
+            | Action::CleanUp
+            | Action::SimplifyDesign => !self.doc.shapes.is_empty(),
             Action::Export(_) | Action::PlayPause => has_design,
             // (Only for a machine ZigZag sends to.)
             Action::SendToSkitch => has_design && self.sends_direct(),
@@ -751,6 +773,7 @@ impl Studio {
             Action::ReleaseCompound => self.release_compound_selected(),
             Action::SimplifyPath => self.open_simplify_dialog(),
             Action::CleanUp => self.open_cleanup_dialog(),
+            Action::SimplifyDesign => self.open_design_dialog(),
             Action::CopySettings => {
                 if let Some(i) = self.sel_index() {
                     self.layout.settings_clip = Some(self.doc.shapes[i].params.clone());
@@ -781,6 +804,9 @@ impl Studio {
             Action::ToggleJumps => self.show_jumps = !self.show_jumps,
             Action::Settings => self.open_settings(self.settings_ui.section),
             Action::ReportIssue => crate::sew::open_url(&issue_url()),
+            Action::GitHub => crate::sew::open_url(crate::about::GITHUB_URL),
+            Action::CrashLogs => self.show_crash_logs(),
+            Action::About => self.about = true,
             Action::Lock => {
                 let sel = self.sel_indices();
                 self.set_flag(&sel, Flag::Lock, true);
@@ -1015,10 +1041,17 @@ mod tests {
     fn help_reports_an_issue_on_github_saying_which_zigzag() {
         let help = menus().pop().unwrap();
         assert_eq!(help.0, "Help");
-        assert!(matches!(
-            help.1.last(),
-            Some(Item(Action::ReportIssue, "Report an Issue…", None))
-        ));
+        let has = |a: Action| help.1.iter().any(|e| matches!(e, Item(x, _, _) if *x == a));
+        assert!(has(Action::ReportIssue) && has(Action::GitHub) && has(Action::CrashLogs));
+        // About is in Help where there's no app menu for it: once, anywhere.
+        assert_eq!(has(Action::About), !cfg!(target_os = "macos"));
+        assert_eq!(
+            all_actions()
+                .iter()
+                .filter(|a| a.0 == Action::About)
+                .count(),
+            1
+        );
         // Check for Updates is there too, where a Mac has it: once.
         assert_eq!(
             all_actions()

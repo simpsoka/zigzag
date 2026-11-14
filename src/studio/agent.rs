@@ -767,6 +767,13 @@ pub struct Work {
 }
 
 impl Work {
+    /// Show these as being worked on, and keep them showing (for pictures
+    /// of the app: there's no agent behind it).
+    pub(crate) fn pose(&mut self, uids: &[usize]) {
+        self.note("set_object", uids);
+        self.last = Some(Instant::now() + Duration::from_secs(3600));
+    }
+
     /// Forget what it was working on (another document came forward).
     pub fn clear(&mut self) {
         self.touches.clear();
@@ -827,6 +834,41 @@ impl Work {
     }
 }
 
+/// The objects whose bounds box what's being worked on. One object is
+/// boxed by itself (an element's fill and outline together). Several are
+/// boxed by what holds them all, exactly as selecting that would be: the
+/// innermost group they're all in, or else the whole design. So there's
+/// one box, never a box round every piece.
+fn boxed(shapes: &[zigzag::svg::Shape], uids: &[usize]) -> Vec<usize> {
+    let mine: Vec<&zigzag::svg::Shape> = shapes.iter().filter(|s| uids.contains(&s.uid)).collect();
+    let Some(first) = mine.first() else {
+        return Vec::new();
+    };
+    if mine.iter().all(|s| s.id == first.id) {
+        return mine.iter().map(|s| s.uid).collect();
+    }
+    // The groups every one of them is in (outermost first): the last is
+    // the innermost that holds them all.
+    let shared = first
+        .groups
+        .iter()
+        .enumerate()
+        .take_while(|(k, g)| mine.iter().all(|s| s.groups.get(*k) == Some(*g)))
+        .last()
+        .map(|(_, g)| g);
+    // (What's hidden isn't part of what there is to see, or to select.)
+    let held: Vec<usize> = shapes
+        .iter()
+        .filter(|s| !s.params.hidden() && shared.is_none_or(|g| s.groups.contains(g)))
+        .map(|s| s.uid)
+        .collect();
+    if held.is_empty() {
+        mine.iter().map(|s| s.uid).collect()
+    } else {
+        held
+    }
+}
+
 /// What a tool call is doing, in a word or two.
 pub fn activity(tool: &str) -> &'static str {
     match tool {
@@ -837,6 +879,7 @@ pub fn activity(tool: &str) -> &'static str {
         "duplicate_objects" => "Duplicating",
         "delete_object" => "Removing",
         "round_corners" => "Rounding corners",
+        "simplify_design" => "Simplifying",
         "trace_image" => "Tracing",
         "render_preview" => "Looking",
         "check_design" => "Checking",
@@ -974,26 +1017,46 @@ impl Studio {
         let time = painter.ctx().input(|i| i.time);
         let mut union = Rect::NOTHING;
         let mut shown = 0.0f32;
-        for t in &self.agent.work.touches {
-            let Some(s) = self.doc.shapes.iter().find(|s| s.uid == t.uid) else {
-                continue;
-            };
-            let b = crate::app::shape_bounds(s);
+        // One box: round the object being worked on, or round what holds
+        // them all when there are several (see `boxed`). It sits where the
+        // selection's box would, so the two are one box, not one inside
+        // the other. What it has moved on from fades the same way:
+        // whatever went at one moment, together.
+        let touches = &self.agent.work.touches;
+        let mut sets: Vec<Option<Instant>> = touches.iter().map(|t| t.gone).collect();
+        sets.sort();
+        sets.dedup();
+        for gone in sets {
+            let mut k = 0.0f32;
+            let mut uids = Vec::new();
+            for t in touches.iter().filter(|t| t.gone == gone) {
+                uids.push(t.uid);
+                let fade_in = ((now - t.at).as_secs_f32() / 0.2).min(1.0);
+                let fade_out =
+                    gone.map_or(1.0, |g| 1.0 - (now - g).as_secs_f32() / FADE.as_secs_f32());
+                k = k.max((fade_in * fade_out).clamp(0.0, 1.0));
+            }
+            let mut b = zigzag::geom::Bounds::empty();
+            for u in boxed(&self.doc.shapes, &uids) {
+                if let Some(s) = self.doc.shapes.iter().find(|s| s.uid == u) {
+                    let sb = crate::app::shape_bounds(s);
+                    if !sb.is_empty() {
+                        b.add(sb.min);
+                        b.add(sb.max);
+                    }
+                }
+            }
             if b.is_empty() {
                 continue;
             }
+            // (The selection box's own margin: `selection_screen_rect`.)
             let r = Rect::from_two_pos(
                 self.view.to_screen(canvas, b.min),
                 self.view.to_screen(canvas, b.max),
             )
-            .expand(5.0);
-            let fade_in = ((now - t.at).as_secs_f32() / 0.2).min(1.0);
-            let fade_out = t
-                .gone
-                .map_or(1.0, |g| 1.0 - (now - g).as_secs_f32() / FADE.as_secs_f32());
-            let k = (fade_in * fade_out).clamp(0.0, 1.0);
+            .expand(4.0);
             working(painter, r, k, time, p.accent);
-            if t.gone.is_none() {
+            if gone.is_none() {
                 union = union.union(r);
                 shown = shown.max(k);
             }
@@ -1560,6 +1623,56 @@ fn install_steps(ui: &mut egui::Ui, a: &mut AgentState) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn work_is_boxed_as_the_whole_it_is() {
+        use zigzag::geom::P;
+        let mut d = zigzag::document::Document::empty();
+        let sq = |x: f64| {
+            vec![
+                P::new(x, 0.0),
+                P::new(x + 100.0, 0.0),
+                P::new(x + 100.0, 100.0),
+                P::new(x, 100.0),
+            ]
+        };
+        for k in 0..5 {
+            d.add_drawing(
+                &sq(k as f64 * 300.0),
+                true,
+                [0; 3],
+                zigzag::params::Kind::Fill,
+            )
+            .unwrap();
+        }
+        let u: Vec<usize> = d.shapes.iter().map(|s| s.uid).collect();
+        // One object: itself. Nothing: nothing.
+        assert_eq!(boxed(&d.shapes, &u[..1]), vec![u[0]]);
+        assert!(boxed(&d.shapes, &[]).is_empty());
+        // Several with nothing else in common: the whole design, however
+        // few of them (one box, as Select All would draw).
+        assert_eq!(boxed(&d.shapes, &[u[0], u[2]]), u);
+        assert_eq!(boxed(&d.shapes, &u), u);
+        // What's hidden isn't in the whole there is to see.
+        d.shapes[4].params.hide = Some(true);
+        assert_eq!(boxed(&d.shapes, &u[..2]), u[..4].to_vec());
+        d.shapes[4].params.hide = None;
+        // Several in one group: that group, all of it. In a group inside
+        // it: the inner one. Across the two: the outer.
+        for s in &mut d.shapes[..3] {
+            s.groups = vec!["head".into()];
+        }
+        for s in &mut d.shapes[..2] {
+            s.groups.push("face".into());
+        }
+        assert_eq!(boxed(&d.shapes, &u[..2]), u[..2].to_vec());
+        assert_eq!(boxed(&d.shapes, &[u[1], u[2]]), u[..3].to_vec());
+        assert_eq!(boxed(&d.shapes, &[u[2], u[3]]), u);
+        // An element's fill and outline are one object.
+        let id = d.shapes[0].id.clone();
+        d.shapes[3].id = id;
+        assert_eq!(boxed(&d.shapes, &[u[0], u[3]]), vec![u[0], u[3]]);
+    }
 
     #[test]
     fn reads_claude_stream_json() {

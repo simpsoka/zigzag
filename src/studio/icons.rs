@@ -49,7 +49,7 @@ pub enum Icon {
     Menu,
     /// An ×, to close.
     Close,
-    /// An eye: shown (the Objects list's visibility column).
+    /// An eye: shown (the Layers list's visibility column).
     Eye,
     /// A padlock: locked.
     Lock,

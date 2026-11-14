@@ -17,9 +17,12 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/zigzag-update-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 new=99.0.0
 
-# The copy that's "installed".
+# The copy that's "installed". (Signed by nobody, like the pretend release:
+# a copy signed with a Developer ID takes updates only from that team,
+# which is the point, and would turn the pretend release down.)
 mkdir -p "$work/Applications"
 cp -R dist/ZigZag.app "$work/Applications/"
+codesign --force --deep --sign - "$work/Applications/ZigZag.app" 2>/dev/null
 
 # The release: the same app with a later version, in a disk image.
 mkdir -p "$work/image" "$work/release"

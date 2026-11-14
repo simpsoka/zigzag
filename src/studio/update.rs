@@ -850,8 +850,9 @@ impl crate::app::Studio {
                                 .clicked();
                             close = dialog::secondary(ui, "Close").clicked();
                             if can_install && r.asset.is_some() {
-                                dialog::apart(ui);
-                                again = dialog::secondary(ui, "Try Again").clicked();
+                                again = dialog::apart(ui, |ui| {
+                                    dialog::secondary(ui, "Try Again").clicked()
+                                });
                             }
                         });
                     }

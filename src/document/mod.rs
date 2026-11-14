@@ -18,10 +18,12 @@ mod edit;
 mod glyphs;
 mod lettering;
 mod paths;
+mod simplify;
 pub use cleanup::{CleanUp, CleanUpReport};
 pub use edit::Fragment;
 pub use glyphs::{Carets, GlyphBox};
 pub use lettering::{Align, Case, TextSpec, default_font, font_families};
+pub use simplify::{SimplifyDesign, SimplifyReport, Unite};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

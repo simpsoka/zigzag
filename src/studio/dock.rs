@@ -98,7 +98,7 @@ pub struct DockUi {
     columns: [Option<Rect>; 2],
     /// Where the panel being drawn lives.
     pub(crate) current: Option<Place>,
-    /// Height of each dock column (for sizing the Objects list).
+    /// Height of each dock column (for sizing the Layers list).
     pub(crate) column_h: [f32; 2],
     /// The panel being drawn sits in a rounded window (floating, flyout).
     pub(crate) in_window: bool,
@@ -144,9 +144,18 @@ impl PanelId {
         }
     }
 
-    pub fn title(self) -> &'static str {
+    /// The name a saved layout knows the panel by. (The Layers panel was
+    /// called Objects once, and layouts saved then still say so.)
+    fn key(self) -> &'static str {
         match self {
             PanelId::Objects => "Objects",
+            p => p.title(),
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            PanelId::Objects => "Layers",
             PanelId::Stitch => "Stitch",
             PanelId::Transform => "Transform",
             PanelId::Lettering => "Lettering",
@@ -289,7 +298,7 @@ impl DockState {
         d.task_bar = v["task_bar"].as_bool().unwrap_or(true);
         d.agent_share = v["agent_share"].as_f64().unwrap_or(0.55).clamp(0.15, 0.95) as f32;
         for (k, id) in ALL.iter().enumerate() {
-            let e = &v["panels"][id.title()];
+            let e = &v["panels"][id.key()];
             d.hidden[k] = e["hidden"].as_bool().unwrap_or(false);
             d.collapsed[k] = e["collapsed"].as_bool().unwrap_or(false);
             d.place[k] = match e["place"].as_str() {
@@ -306,7 +315,7 @@ impl DockState {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|t| ALL.iter().copied().find(|p| Some(p.title()) == t.as_str()))
+            .filter_map(|t| ALL.iter().copied().find(|p| Some(p.key()) == t.as_str()))
             .collect();
         for p in ALL {
             if !order.contains(&p) {
@@ -314,7 +323,7 @@ impl DockState {
             }
         }
         d.order = order;
-        // A layout saved before the Agent panel: the Objects list moves to
+        // A layout saved before the Agent panel: the Layers list moves to
         // the top of the right dock, and the Agent has the left to itself.
         if v["panels"].get("Agent").is_none() {
             d.place[PanelId::Objects.index()] = Place::Right;
@@ -327,9 +336,9 @@ impl DockState {
             v["iconic"]["left"].as_bool().unwrap_or(false),
             v["iconic"]["right"].as_bool().unwrap_or(false),
         ];
-        let by_title = |t: Option<&str>| ALL.iter().copied().find(|p| Some(p.title()) == t);
+        let by_title = |t: Option<&str>| ALL.iter().copied().find(|p| Some(p.key()) == t);
         for (k, id) in ALL.iter().enumerate() {
-            let e = &v["panels"][id.title()];
+            let e = &v["panels"][id.key()];
             d.tab_of[k] = by_title(e["tab_of"].as_str()).filter(|l| l != id);
             d.active[k] = by_title(e["active"].as_str());
         }
@@ -356,15 +365,15 @@ impl DockState {
             .enumerate()
             .map(|(k, id)| {
                 (
-                    id.title().to_string(),
+                    id.key().to_string(),
                     serde_json::json!({
                         "hidden": self.hidden[k],
                         "collapsed": self.collapsed[k],
                         "place": self.place[k].key(),
                         "x": self.float_at[k].x,
                         "y": self.float_at[k].y,
-                        "tab_of": self.tab_of[k].map(|l| l.title()),
-                        "active": self.active[k].map(|a| a.title()),
+                        "tab_of": self.tab_of[k].map(|l| l.key()),
+                        "active": self.active[k].map(|a| a.key()),
                     }),
                 )
             })
@@ -377,7 +386,7 @@ impl DockState {
             "task_bar": self.task_bar,
             "agent_share": self.agent_share,
             "panels": panels,
-            "order": self.order.iter().map(|p| p.title()).collect::<Vec<_>>(),
+            "order": self.order.iter().map(|p| p.key()).collect::<Vec<_>>(),
             "iconic": { "left": self.iconic[0], "right": self.iconic[1] },
         });
         if let Some(dir) = path.parent() {
@@ -1576,7 +1585,7 @@ impl Studio {
         self.dock_ui.columns = [None, None];
     }
 
-    /// The Objects list as a tree: groups (open or closed) and their objects,
+    /// The Layers list as a tree: groups (open or closed) and their objects,
     /// in sewing order. Layers aren't groups (see `svg::layer_ids`), and a
     /// group of one object is listed as the object.
     fn object_rows(&self) -> Vec<ObjRow> {
@@ -1679,7 +1688,7 @@ impl Studio {
                     ui.add_space(8.0);
                     caption(
                         ui,
-                        "No objects yet. Open or drop an SVG, add text, or draw with the pen.",
+                        "No layers yet. Open or drop an SVG, add text, or draw with the pen.",
                     );
                 }
                 for row in &rows[range] {
@@ -1797,7 +1806,7 @@ impl Studio {
                                 group_click = Some(members.clone());
                             }
                             resp.on_hover_text(format!(
-                                "{label}: {} objects, {} stitches. Click to select the group.",
+                                "{label}: {} layers, {} stitches. Click to select the group.",
                                 members.len(),
                                 fmt_int(stitches)
                             ))
@@ -1915,7 +1924,7 @@ impl Studio {
                             })
                             .inner;
                         out.response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Object name")
+                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Layer name")
                         });
                         if *fresh {
                             // Just opened: the keyboard, and the whole name
@@ -2045,7 +2054,11 @@ impl Studio {
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                caption(ui, format!("{} objects", self.doc.shapes.len()));
+                let n = self.doc.shapes.len();
+                caption(
+                    ui,
+                    format!("{n} {}", if n == 1 { "layer" } else { "layers" }),
+                );
             });
         });
     }
@@ -3189,7 +3202,7 @@ pub(crate) fn connect_note(connect_mm: f64, cuts: usize, bridged: usize) -> Stri
     }
 }
 
-/// The Objects list's eye and lock columns, at the left of every row (as
+/// The Layers list's eye and lock columns, at the left of every row (as
 /// in Illustrator's Layers, and VectorCraft's): how wide each is, and
 /// the two together.
 const FLAG_COL: f32 = 18.0;
@@ -3370,16 +3383,16 @@ mod tests {
         click(&mut h, dot, 2);
         assert!(h.state().renaming.is_none(), "a double-click on the dot");
         h.run_steps(A_WHILE);
-        assert!(h.query_by_label("Object name").is_none());
+        assert!(h.query_by_label("Layer name").is_none());
         // A double-click on the name: a field, with the name in it.
         click(&mut h, patch, 2);
         assert_eq!(
             h.state().renaming.as_ref().map(|r| (r.0, r.1.as_str())),
             Some((h.state().doc.shapes[0].uid, "patch"))
         );
-        assert!(h.query_by_label("Object name").is_some());
+        assert!(h.query_by_label("Layer name").is_some());
         // Typing replaces it (it was selected); Enter keeps the new name.
-        h.get_by_label("Object name").type_text("Front Patch");
+        h.get_by_label("Layer name").type_text("Front Patch");
         h.run_steps(2);
         h.key_press(egui::Key::Enter);
         h.run_steps(4);
@@ -3399,7 +3412,7 @@ mod tests {
         let stripe = on_name(row(&h, "stripe"));
         click(&mut h, stripe, 2);
         assert!(h.state().renaming.is_some());
-        h.get_by_label("Object name").type_text("Never Mind");
+        h.get_by_label("Layer name").type_text("Never Mind");
         h.run_steps(2);
         h.key_press(egui::Key::Escape);
         h.run_steps(4);
@@ -3407,7 +3420,7 @@ mod tests {
         assert_eq!(h.state().names[1], "stripe");
         h.run_steps(A_WHILE);
         click(&mut h, stripe, 2);
-        h.get_by_label("Object name").type_text("fill");
+        h.get_by_label("Layer name").type_text("fill");
         h.run_steps(2);
         h.key_press(egui::Key::Enter);
         h.run_steps(4);
@@ -3660,6 +3673,14 @@ mod tests {
         d.save();
         let e = DockState::load_from(Some(file.clone()));
         assert_eq!(e.place_of(PanelId::Objects), Place::Left);
+        // The panel is called Layers now, and layouts still know it by the
+        // name they were saved with.
+        assert_eq!(PanelId::Objects.title(), "Layers");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            saved.contains("\"Objects\"") && !saved.contains("Layers"),
+            "{saved}"
+        );
         let _ = std::fs::remove_file(&file);
     }
 

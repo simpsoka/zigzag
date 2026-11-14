@@ -222,6 +222,52 @@ pub(crate) fn label(name: &str, number: Option<&str>) -> String {
     }
 }
 
+/// The thread of what's selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelThread {
+    /// Nothing is selected.
+    None,
+    /// One thread, whether one layer has it or all of several do.
+    One([u8; 3]),
+    /// Several layers in different threads.
+    Mixed,
+}
+
+impl Studio {
+    /// The selection's thread: one color only when every selected layer
+    /// has it (showing the first one's would say they all do).
+    pub fn selection_thread(&self) -> SelThread {
+        let mut colors = self
+            .sel_indices()
+            .into_iter()
+            .filter_map(|i| self.doc.shapes.get(i).map(|s| s.color));
+        match colors.next() {
+            None => SelThread::None,
+            Some(c) if colors.all(|d| d == c) => SelThread::One(c),
+            Some(_) => SelThread::Mixed,
+        }
+    }
+}
+
+/// A swatch for a selection in several threads: no color of its own, and
+/// a question mark (as Illustrator's fill swatch has for mixed fills).
+pub fn paint_mixed(painter: &egui::Painter, r: egui::Rect, rounding: f32, p: &crate::theme::Pal) {
+    painter.rect_filled(r, rounding, p.control);
+    painter.rect_stroke(
+        r,
+        rounding,
+        Stroke::new(1.0, p.control_border),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        "?",
+        crate::theme::semibold((r.height() * 0.66).clamp(9.0, 22.0)),
+        p.text,
+    );
+}
+
 pub fn swatch(ui: &mut egui::Ui, c: [u8; 3], size: f32, selected: bool) -> egui::Response {
     let p = pal_ui(ui);
     let (r, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
@@ -282,14 +328,34 @@ impl Studio {
         };
         let mut c = self.doc.shapes[first].color;
         let before = c;
+        // Several threads selected: there's no one color to show, and
+        // whatever is picked goes to them all.
+        let mixed = self.selection_thread() == SelThread::Mixed;
         let brand = self.view_tools.brand;
         section(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = space::S;
-            swatch(ui, c, 36.0, false);
+            if mixed {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                paint_mixed(ui.painter(), r, 3.0, &p);
+            } else {
+                swatch(ui, c, 36.0, false);
+            }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = space::XS / 2.0;
                 ui.add_space(space::XS / 2.0);
+                if mixed {
+                    ui.label(
+                        egui::RichText::new("Several threads")
+                            .size(13.0)
+                            .color(p.text),
+                    );
+                    caption(
+                        ui,
+                        format!("Pick one for all {} selected layers", sel.len()),
+                    );
+                    return;
+                }
                 let (_, name, number) = nearest(brand, c);
                 let b = if brand == Brand::Brother {
                     "Brother"
@@ -305,8 +371,10 @@ impl Studio {
             });
         });
         section(ui);
-        if let Some(t) = self.palette_section(ui, Some(c), "picker") {
+        let mut picked = false;
+        if let Some(t) = self.palette_section(ui, (!mixed).then_some(c), "picker") {
             c = t;
+            picked = true;
         }
         section(ui);
         // Custom color: a disclosure row, flush with everything else.
@@ -341,7 +409,8 @@ impl Studio {
         if open {
             crate::widgets::compact_color_picker(ui, &mut c);
         }
-        if c != before {
+        // (Picking the first layer's own thread still changes the others.)
+        if c != before || (mixed && picked) {
             for &i in &sel {
                 self.doc.shapes[i].color = c;
             }
@@ -523,6 +592,13 @@ impl Studio {
             {
                 self.group_colors();
             }
+            if ui
+                .button("Simplify…")
+                .on_hover_text("Fewer threads, small details and trims (Object › Simplify Design…)")
+                .clicked()
+            {
+                self.open_design_dialog();
+            }
             caption(
                 ui,
                 format!(
@@ -635,7 +711,8 @@ mod tests {
         h.state_mut().dock.toggle(crate::dock::PanelId::Threads);
         h.state_mut().set_selection(&[0, 1]);
         h.run_steps(2);
-        h.get_by_label("Thread Color").click();
+        // (The two are in different threads.)
+        h.get_by_label("Thread Color: several").click();
         h.run_steps(2);
         let (c, name, number) = chart(Brand::Brother)[10];
         h.get_by_label(&label(name, number)).click();
@@ -659,6 +736,8 @@ mod tests {
         assert_eq!(h.state().palettes.mine.len(), 1);
         let n = h.state().palettes.mine[0].colors.len();
         assert_eq!(n, 3, "the design's three threads");
+        // (One layer, so there is a current thread to add.)
+        h.state_mut().set_selection(&[0]);
         h.state_mut().doc.shapes[0].color = [1, 2, 3];
         h.run_steps(2);
         h.get_by_label("Add Color").click();
@@ -668,6 +747,48 @@ mod tests {
         h.get_by_label("Close").click();
         h.run_steps(2);
         assert!(h.query_by_label("Add Color").is_none());
+    }
+
+    #[test]
+    fn a_selection_in_several_threads_shows_no_one_color() {
+        let mut h = studio();
+        h.state_mut().dock.toggle(crate::dock::PanelId::Threads);
+        let at = |h: &Harness<'_, Studio>, name: &str| {
+            h.state().names.iter().position(|n| n == name).unwrap()
+        };
+        let (disc, sun, ring) = (at(&h, "disc"), at(&h, "sun"), at(&h, "ring"));
+        assert_eq!(h.state().selection_thread(), SelThread::None);
+        // The disc and the ring are one thread: that's the color shown.
+        h.state_mut().set_selection(&[disc, ring]);
+        h.run_steps(2);
+        let navy = h.state().doc.shapes[disc].color;
+        assert_eq!(h.state().selection_thread(), SelThread::One(navy));
+        assert!(h.query_by_label("Thread Color").is_some());
+        assert!(h.query_by_label("Thread Color: several").is_none());
+        // The disc and the sun aren't: a question mark, not the disc's
+        // color, in the tool strip and in the bar under the design.
+        let (c, name, number) = chart(Brand::Brother)[10];
+        h.state_mut().doc.shapes[disc].color = c;
+        h.state_mut().set_selection(&[disc, sun]);
+        h.run_steps(2);
+        assert_eq!(h.state().selection_thread(), SelThread::Mixed);
+        assert!(h.query_by_label("Thread Color").is_none());
+        assert!(h.query_by_label("Thread color: several").is_some());
+        // Its picker says so, and marks no thread as the current one.
+        h.get_by_label("Thread Color: several").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Several threads").is_some());
+        assert!(
+            h.query_by_label("Pick one for all 2 selected layers")
+                .is_some()
+        );
+        // Picking the thread the first layer already has still gives it
+        // to the other.
+        h.get_by_label(&label(name, number)).click();
+        h.run_steps(3);
+        assert_eq!(h.state().doc.shapes[sun].color, c);
+        assert_eq!(h.state().selection_thread(), SelThread::One(c));
+        assert!(h.query_by_label("Several threads").is_none());
     }
 
     /// A palette made from a thread kit holds just that kit's threads,

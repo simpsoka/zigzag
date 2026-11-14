@@ -1144,6 +1144,27 @@ fn manual_pieces(geometry: &Geometry) -> Vec<Vec<Piece>> {
     }
 }
 
+thread_local! {
+    /// How many [`caught`] calls this thread is inside.
+    static CATCHING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f`, catching a panic in it (an internal error on some odd
+/// geometry) so the caller can carry on without that piece. While it runs,
+/// [`catching`] is true on this thread: a panic hook can tell a failure
+/// that's being handled from one that ends the program.
+pub fn caught<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+    CATCHING.with(|c| c.set(c.get() + 1));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    CATCHING.with(|c| c.set(c.get().saturating_sub(1)));
+    r
+}
+
+/// Whether a panic on this thread now would be caught by [`caught`].
+pub fn catching() -> bool {
+    CATCHING.with(|c| c.get() > 0)
+}
+
 /// [`shape_runs`], but an object whose stitching hits an internal error
 /// (a panic in the fill, satin or boolean code on some odd outline) is
 /// left out with a note, rather than taking the whole plan (and the app,
@@ -1155,9 +1176,7 @@ fn shape_runs_guarded(
     notes: &mut Vec<String>,
 ) -> ShapeRuns {
     let mut tried = Vec::new();
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        shape_runs(shape, geometry, opt, &mut tried)
-    }));
+    let r = caught(|| shape_runs(shape, geometry, opt, &mut tried));
     match r {
         Ok(mut sr) => {
             notes.append(&mut tried);
@@ -2758,6 +2777,25 @@ mod tests {
     /// Overlap removal is cached per shape: after moving one object, the
     /// cached plan must still equal a plan made from scratch (what moved
     /// and what it overlapped are redone; the rest is reused).
+    #[test]
+    fn a_caught_panic_is_known_to_be_one_while_its_caught() {
+        assert!(!catching());
+        // (Quiet: this panic is the point.)
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let inside = caught(|| {
+            let seen = catching();
+            let nested = caught(|| -> bool { panic!("inner") });
+            assert!(nested.is_err() && catching(), "still inside the outer one");
+            seen
+        });
+        let failed = caught(|| -> u8 { panic!("odd geometry") });
+        std::panic::set_hook(hook);
+        assert_eq!(inside.ok(), Some(true));
+        assert!(failed.is_err());
+        assert!(!catching(), "and not afterwards");
+    }
+
     #[test]
     fn cached_overlap_removal_matches_a_fresh_plan_after_a_move() {
         let grid = |dx: f64| -> Vec<Shape> {

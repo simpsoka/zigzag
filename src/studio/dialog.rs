@@ -18,9 +18,8 @@ pub const BUTTON_H: f32 = 28.0;
 const BUTTON_MIN_W: f32 = 72.0;
 const BUTTON_RADIUS: u8 = 6;
 const BUTTON_TEXT: f32 = 13.0;
-/// Between buttons, and before one set apart (Don't Save).
+/// Between buttons.
 const BUTTON_GAP: f32 = space::S;
-const APART_GAP: f32 = 28.0;
 /// How wide a dialog's text may run before it wraps.
 pub const MAX_W: f32 = 420.0;
 pub const MIN_W: f32 = 320.0;
@@ -34,6 +33,10 @@ pub enum Place {
     /// Near the top, nothing dimmed: a tool with a live preview on the
     /// canvas that you want to see (Round Corners, Simplify).
     Top,
+    /// At the top left, over the left dock and beside the tool strip, with
+    /// no dimming: for a dialog too big to sit over the design it previews
+    /// on.
+    TopLeft,
 }
 
 /// A modal dialog with the studio's look; `add` draws its contents (start
@@ -55,6 +58,9 @@ pub fn show<R>(
         Place::Center => modal,
         Place::Top => modal.backdrop_color(Color32::TRANSPARENT).area(
             egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 90.0)),
+        ),
+        Place::TopLeft => modal.backdrop_color(Color32::TRANSPARENT).area(
+            egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, Vec2::new(56.0, 64.0)),
         ),
     };
     modal.show(ctx, |ui| {
@@ -104,9 +110,17 @@ pub fn buttons<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R 
     .inner
 }
 
-/// Space before a button set apart from the rest (Don't Save).
-pub fn apart(ui: &mut egui::Ui) {
-    ui.add_space(APART_GAP - BUTTON_GAP);
+/// A button (or a few) set apart from the rest, at the row's other end:
+/// the one that isn't an answer to the question so much as a way out of
+/// it (Don't Save, Reset, Show Log). Call it last, inside [`buttons`].
+pub fn apart<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    // (Whatever room is left of the buttons already there, filled from
+    // its left edge.)
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+        add(ui)
+    })
+    .inner
 }
 
 /// The default button (Enter): the accent color.

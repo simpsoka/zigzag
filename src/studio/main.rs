@@ -1,6 +1,7 @@
 //! ZigZag studio: visual stitch editor (egui, OpenGL via glow) with an
 //! MCP server so agents can work on the same canvas.
 
+mod about;
 mod agent;
 mod agent_log;
 mod app;
@@ -10,6 +11,7 @@ mod canvas;
 mod capture;
 mod chrome;
 mod commands;
+mod crash;
 mod cursors;
 mod density;
 mod dialog;
@@ -20,6 +22,7 @@ mod icons;
 mod kits;
 mod layout;
 mod lettering;
+mod lights;
 mod machine;
 mod machines;
 mod mcp;
@@ -36,6 +39,7 @@ mod session;
 mod settings;
 mod sew;
 mod shapes;
+mod simplify;
 mod snap;
 mod swatches;
 mod tabs;
@@ -52,6 +56,13 @@ mod widgets;
 const USAGE: &str = "usage: zigzag-studio [design.svg] [--select N] [--mcp-port PORT | --no-mcp | --mcp-stdio]\n\n  --mcp-stdio  no window: serve the MCP tools over stdin/stdout (headless, for agents)";
 
 fn main() -> eframe::Result {
+    // A failure that stops ZigZag leaves a log to report (see `crash`).
+    crash::install();
+    // (To see the crash log and the report offer work: this fails on
+    // purpose, as a real failure would.)
+    if std::env::var_os("ZIGZAG_CRASH_TEST").is_some() {
+        panic!("a crash made on purpose, to test the crash log");
+    }
     let mut path = None;
     let mut select = None;
     // The agent server's port: as the command line says, else the

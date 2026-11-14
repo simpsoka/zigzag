@@ -14,10 +14,7 @@ mod imp {
     use crate::commands::{Entry, Sc, menus};
     use eframe::egui::{self, Key};
     use muda::accelerator::{Accelerator, CMD_OR_CTRL, Code, Modifiers};
-    use muda::{
-        AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem,
-        Submenu,
-    };
+    use muda::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
     use std::collections::HashMap;
     use std::sync::{Mutex, mpsc};
 
@@ -142,15 +139,9 @@ mod imp {
                 state: HashMap::new(),
             };
             let app = Submenu::new("ZigZag", true);
-            app.append_items(&[&PredefinedMenuItem::about(
-                None,
-                Some(AboutMetadata {
-                    name: Some("ZigZag".into()),
-                    version: Some(env!("CARGO_PKG_VERSION").into()),
-                    comments: Some("SVG to machine embroidery".into()),
-                    ..Default::default()
-                }),
-            )])?;
+            // About ZigZag: ZigZag's own window (the system's About panel
+            // can't carry the links).
+            me.fill(&app, &[crate::commands::ABOUT_ITEM], studio)?;
             // Check for Updates…, under About as Mac apps have it.
             me.fill(&app, &[crate::commands::UPDATES_ITEM], studio)?;
             app.append_items(&[&PredefinedMenuItem::separator()])?;
