@@ -294,6 +294,7 @@ cotton cap, check it, and show me the preview."*
 zigzag convert logo.svg -o logo.pes -o logo.jef -o preview.png -o sheet.html [--fabric thin-cap] [--hat]
 zigzag convert old.dst -o old.pes             # machine files convert too
 zigzag convert logo.png -o logo.pes           # PNG, JPEG, WebP… logos are traced first
+zigzag convert examples/badge.svg -o badge-realistic.png --realistic --width 1800
 zigzag info logo.svg                     # stats + checks
 zigzag fabrics                           # list presets
 zigzag convert logo.svg -o logo.exp --machine melco-summit   # that machine's hoop and shortest stitch
@@ -479,3 +480,24 @@ Image Trace is vendored from [VectorCraft](https://github.com/storytold/vectorcr
 (MIT OR Apache-2.0), whose curve fitting, live corners, snap targets and colour
 difference were also ported (see `vendor/README.md`).
 Tatami, satin and short-stitch approaches follow [Ink/Stitch](https://inkstitch.org).
+
+### Embroidery mockup PNGs
+
+Use `zigzag convert design.svg -o mockup.png --realistic --width 1800` for
+a fabric-backed mockup with directional thread shading, soft stitch shadows,
+and needle-entry detail. It renders the actual stitch plan without a GPU,
+omits hoop and travel guides, and crops to the design with 5 mm padding.
+`--width` accepts 64–4096 pixels (default 1200); realistic images also cap
+height at 4096 pixels, preserving aspect ratio. The standard preview remains
+available by omitting `--realistic`. This is an illustrative rendering, not
+a physical fabric simulation.
+
+Rust callers can use `formats::preview::render_realistic_png(&design,
+[244, 241, 234], 1800)` to choose a fabric color and receive PNG bytes.
+
+For a blank white background, add `--background white`. For a transparent
+PNG that can be composited over another image, add `--background transparent`.
+Both keep thread shading and soft shadows while removing fabric texture and
+vignetting, and imply realistic rendering. The default is `--background fabric`.
+Rust callers can use `render_realistic_png_with_background` with
+`MockupBackground::{Fabric([r,g,b]), Solid([r,g,b]), Transparent}`.

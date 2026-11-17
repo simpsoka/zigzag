@@ -19,6 +19,13 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Background {
+    Fabric,
+    White,
+    Transparent,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Convert an SVG (or a PNG, JPEG, WebP, GIF, BMP or TIFF logo, traced first). Output format comes from each file extension:
@@ -36,6 +43,15 @@ enum Cmd {
         /// each stitch, jump and trim in it is for.
         #[arg(long)]
         objects: bool,
+        /// Render PNGs as embroidery on woven fabric, cropped to the design.
+        #[arg(long)]
+        realistic: bool,
+        /// Background for realistic PNGs.
+        #[arg(long, value_enum, default_value_t = Background::Fabric)]
+        background: Background,
+        /// PNG width in pixels (64–4096).
+        #[arg(long, default_value_t = 1200, value_parser = clap::value_parser!(u32).range(64..=4096))]
+        width: u32,
         #[command(flatten)]
         settings: SettingsArgs,
     },
@@ -193,6 +209,9 @@ fn main() -> Result<()> {
             out,
             hoop,
             objects,
+            realistic,
+            background,
+            width,
             settings,
         } => {
             let t0 = Instant::now();
@@ -202,7 +221,15 @@ fn main() -> Result<()> {
             let d = doc.plan();
             let t_plan = t0.elapsed() - t_load;
             for path in &out {
-                write_output(&doc, &d, path, hoop)?;
+                write_output(
+                    &doc,
+                    &d,
+                    path,
+                    hoop,
+                    realistic || !matches!(background, Background::Fabric),
+                    background,
+                    width,
+                )?;
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let file = path.file_name().unwrap_or_default().to_string_lossy();
                 if objects && let Some(map) = doc.object_map(&d, ext, &file) {
@@ -309,7 +336,15 @@ fn parse_hoop(v: &str) -> std::result::Result<(f64, f64), String> {
         .ok_or_else(|| "use WIDTHxHEIGHT in mm, e.g. 130x180, each side 10 to 1000".to_string())
 }
 
-fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Result<()> {
+fn write_output(
+    doc: &Document,
+    d: &Design,
+    path: &Path,
+    hoop: (f64, f64),
+    realistic: bool,
+    background: Background,
+    width: u32,
+) -> Result<()> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -336,7 +371,12 @@ fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Re
             zigzag::formats::worksheet::html(d, &info)?.into_bytes()
         }
         "svg" => preview::write_svg(d, &preview::PreviewOptions { hoop_mm: Some(hoop), ..Default::default() }).into_bytes(),
-        "png" => preview::render_png(d, &preview::PreviewOptions { hoop_mm: Some(hoop), ..Default::default() }, 1200)?,
+        "png" if realistic => preview::render_realistic_png_with_background(d, match background {
+            Background::Fabric => preview::MockupBackground::Fabric([244, 241, 234]),
+            Background::White => preview::MockupBackground::Solid([255; 3]),
+            Background::Transparent => preview::MockupBackground::Transparent,
+        }, width)?,
+        "png" => preview::render_png(d, &preview::PreviewOptions { hoop_mm: Some(hoop), ..Default::default() }, width)?,
         other => zigzag::formats::write_format_with(d, other, &doc.settings.export_options())
             .map_err(|_| anyhow::anyhow!("unknown output format '.{other}' (use .pes .dst .exp .jef .vp3 .pec .pen .svg .png, or .html for a worksheet)"))?,
     };

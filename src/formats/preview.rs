@@ -119,3 +119,6 @@ pub fn render_png(d: &Design, opt: &PreviewOptions, width_px: u32) -> Result<Vec
     );
     pixmap.encode_png().context("encoding PNG")
 }
+
+mod realistic;
+pub use realistic::{MockupBackground, render_realistic_png, render_realistic_png_with_background};
