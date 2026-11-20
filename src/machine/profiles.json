@@ -56,6 +56,15 @@
       "tested": false
     },
     {
+      "id": "pfaff-creative-3",
+      "name": "Pfaff creative 3.0",
+      "hoops": ["200x260", "150x260", "150x240", "120x120"],
+      "default_hoop": "200x260",
+      "format": "vp3",
+      "source": "Retailer listings for the creative 3.0 (comes with the creative Elite hoop 260 × 200 mm and the creative 120 Square hoop 120 × 120 mm) and a Pfaff hoop guide (also takes the Grand Endless hoop 260 × 150 mm and the Grand Metal hoop 240 × 150 mm). VP3 is Pfaff's own format.",
+      "tested": false
+    },
+    {
       "id": "melco-summit",
       "name": "Melco Summit",
       "hoops": ["410x393"],

@@ -1,4 +1,4 @@
-//! Reading machine files (PES, PEC, DST, EXP, JEF) into stitch blocks, and
+//! Reading machine files (PES, PEC, DST, EXP, JEF, VP3) into stitch blocks, and
 //! turning them into an editable SVG of manual-stitch paths.
 //! Decoding follows pyembroidery (MIT License, Copyright (c) 2018 Tatarize).
 
@@ -322,6 +322,135 @@ fn read_jef(d: &[u8]) -> Result<StitchFile> {
     })
 }
 
+/// Husqvarna Viking / Pfaff VP3. Positions are in 1/1000 mm (stored
+/// big-endian, y up); stitch deltas are in 0.1 mm (y down). Layout as in
+/// pyembroidery's vp3reader.
+fn read_vp3(d: &[u8]) -> Result<StitchFile> {
+    struct Rd<'a> {
+        d: &'a [u8],
+        i: usize,
+    }
+    impl Rd<'_> {
+        fn skip(&mut self, n: usize) -> Result<()> {
+            if self.i + n > self.d.len() {
+                bail!("VP3 file is truncated");
+            }
+            self.i += n;
+            Ok(())
+        }
+        fn u8(&mut self) -> Result<u8> {
+            let v = *self
+                .d
+                .get(self.i)
+                .ok_or_else(|| anyhow::anyhow!("VP3 file is truncated"))?;
+            self.i += 1;
+            Ok(v)
+        }
+        fn u16(&mut self) -> Result<u16> {
+            Ok(((self.u8()? as u16) << 8) | self.u8()? as u16)
+        }
+        fn i32(&mut self) -> Result<i32> {
+            let b = self
+                .d
+                .get(self.i..self.i + 4)
+                .ok_or_else(|| anyhow::anyhow!("VP3 file is truncated"))?;
+            self.i += 4;
+            Ok(i32::from_be_bytes(b.try_into().unwrap()))
+        }
+        /// A string with a 16-bit byte length in front.
+        fn skip_str(&mut self) -> Result<()> {
+            let n = self.u16()? as usize;
+            self.skip(n)
+        }
+    }
+    if !d.starts_with(b"%vsm%") {
+        bail!("not a VP3 file");
+    }
+    let mut r = Rd { d, i: 6 };
+    r.skip_str()?; // "Produced by …"
+    r.skip(7)?;
+    r.skip_str()?; // comments
+    r.skip(32)?;
+    let cx = r.i32()? as f64 / 100.0;
+    let cy = -(r.i32()? as f64) / 100.0;
+    r.skip(27)?;
+    r.skip_str()?;
+    r.skip(24)?;
+    r.skip_str()?; // "Produced by …"
+    let ncolors = r.u16()? as usize;
+    let mut bld = Builder::new();
+    let mut colors = Vec::new();
+    for ci in 0..ncolors {
+        if ci > 0 {
+            bld.color_change();
+        }
+        r.skip(3)?; // 00 05 00
+        let len = r.i32()?.max(0) as usize;
+        let end = (r.i + len).min(d.len());
+        let sx = r.i32()? as f64 / 100.0;
+        let sy = -(r.i32()? as f64) / 100.0;
+        let target = P::new(sx + cx, sy + cy);
+        let here = bld.pos;
+        bld.jump(target.x - here.x, target.y - here.y);
+        // Thread: its colors (the first one counts), type, weight, three strings.
+        let parts = r.u8()?;
+        r.u8()?; // transition
+        let mut color = None;
+        for _ in 0..parts {
+            let c = [r.u8()?, r.u8()?, r.u8()?];
+            color.get_or_insert(c);
+            r.skip(3)?; // parts, length
+        }
+        colors.push(color.unwrap_or(DEFAULT_COLORS[ci % DEFAULT_COLORS.len()]));
+        r.skip(2)?; // type, weight
+        for _ in 0..3 {
+            r.skip_str()?;
+        }
+        r.skip(15)?;
+        r.skip(3)?; // 0A F6 00
+        let s = d.get(r.i..end).unwrap_or_default();
+        let mut i = 0;
+        let mut trimmed = false;
+        let step = |bld: &mut Builder, x: f64, y: f64, trimmed: &mut bool| {
+            // The move after a trim, or one too long to be a stitch, is a jump.
+            if *trimmed || x.abs() > 127.0 || y.abs() > 127.0 {
+                bld.jump(x, y);
+            } else {
+                bld.stitch(x, y);
+            }
+            *trimmed = false;
+        };
+        while i + 1 < s.len() {
+            let (x, y) = (s[i], s[i + 1]);
+            i += 2;
+            if x != 0x80 {
+                step(&mut bld, x as i8 as f64, y as i8 as f64, &mut trimmed);
+                continue;
+            }
+            match y {
+                0x01 => {
+                    let Some(b) = s.get(i..i + 4) else { break };
+                    let dx = i16::from_be_bytes([b[0], b[1]]) as f64;
+                    let dy = i16::from_be_bytes([b[2], b[3]]) as f64;
+                    i += 4;
+                    step(&mut bld, dx, dy, &mut trimmed);
+                }
+                0x02 => {}
+                0x03 => {
+                    trimmed = true;
+                    bld.jumped = true;
+                }
+                _ => {}
+            }
+        }
+        r.i = end;
+    }
+    Ok(StitchFile {
+        name: String::new(),
+        blocks: bld.finish(&colors),
+    })
+}
+
 /// Read a machine file by extension.
 pub fn read_stitch_file(data: &[u8], ext: &str) -> Result<StitchFile> {
     match ext.to_ascii_lowercase().as_str() {
@@ -344,7 +473,8 @@ pub fn read_stitch_file(data: &[u8], ext: &str) -> Result<StitchFile> {
             blocks: read_exp_like(data, 0x04, &[]),
         }),
         "jef" => read_jef(data),
-        other => bail!("can't read .{other} files (PES, PEC, DST, EXP and JEF are supported)"),
+        "vp3" => read_vp3(data),
+        other => bail!("can't read .{other} files (PES, PEC, DST, EXP, JEF and VP3 are supported)"),
     }
 }
 
@@ -438,6 +568,7 @@ mod tests {
             ("dst", dst::write_dst(&d)),
             ("exp", more::write_exp(&d)),
             ("jef", more::write_jef(&d)),
+            ("vp3", more::write_vp3(&d)),
         ] {
             let f = read_stitch_file(&bytes, ext).unwrap_or_else(|e| panic!("{ext}: {e}"));
             assert_eq!(f.blocks.len(), 2, "{ext}: two colors");
@@ -457,7 +588,7 @@ mod tests {
                     "{ext}: missing {want:?}"
                 );
             }
-            if ext == "pes" || ext == "jef" {
+            if ext == "pes" || ext == "jef" || ext == "vp3" {
                 assert_ne!(f.blocks[0].color, f.blocks[1].color, "{ext}: colors kept");
             }
         }

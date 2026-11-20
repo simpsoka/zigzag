@@ -341,7 +341,7 @@ impl Document {
             return Document::from_svg(&t.svg, &name, None);
         }
         // Anything else is taken for an SVG; what isn't even text is a
-        // kind of file ZigZag doesn't open (a VP3, say: written, not read).
+        // kind of file ZigZag doesn't open.
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let Ok(xml) = String::from_utf8(bytes) else {
             bail!(
