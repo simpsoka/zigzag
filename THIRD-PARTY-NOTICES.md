@@ -2335,6 +2335,35 @@ THE SOFTWARE.
 ## MIT License
 
 Used by:
+- maybe-async 0.2.11 (https://github.com/fMeow/maybe-async-rs)
+
+```
+Copyright (c) 2020 Guoli Lyu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+---
+
+## MIT License
+
+Used by:
 - document-features 0.2.12 (https://github.com/slint-ui/document-features)
 
 ```
@@ -3321,38 +3350,6 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- vectorcraft-geom 0.17.0
-- vectorcraft-trace 0.17.0
-
-```
-MIT License
-
-Copyright (c) 2026 ArtCraft Team and the VectorCraft contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## MIT License
-
-Used by:
 - accesskit 0.25.1 (https://github.com/AccessKit/accesskit)
 
 ```
@@ -4102,7 +4099,7 @@ terms compatible with the above MIT license:
 * musl libc https://www.musl-libc.org/. This library contains the following
   copyright:
 
-      Copyright Â© 2005-2020 Rich Felker, et al.
+      Copyright © 2005-2020 Rich Felker, et al.
 
 * The CORE-MATH project https://core-math.gitlabpages.inria.fr/. CORE-MATH
   routines are available under the MIT license on a per-file basis.
@@ -4112,12 +4109,12 @@ math portions of the library:
 
 ------------------------------------------------------------------------------
 Much of the math library code (src/math/* and src/complex/*) is
-Copyright Â© 1993,2004 Sun Microsystems or
-Copyright Â© 2003-2011 David Schultz or
-Copyright Â© 2003-2009 Steven G. Kargl or
-Copyright Â© 2003-2009 Bruce D. Evans or
-Copyright Â© 2008 Stephen L. Moshier or
-Copyright Â© 2017-2018 Arm Limited
+Copyright © 1993,2004 Sun Microsystems or
+Copyright © 2003-2011 David Schultz or
+Copyright © 2003-2009 Steven G. Kargl or
+Copyright © 2003-2009 Bruce D. Evans or
+Copyright © 2008 Stephen L. Moshier or
+Copyright © 2017-2018 Arm Limited
 and labelled as such in comments in the individual source files. All
 have been licensed under extremely permissive terms.
 ------------------------------------------------------------------------------
@@ -4622,7 +4619,7 @@ terms compatible with the above MIT license:
 * musl libc https://www.musl-libc.org/. This library contains the following
   copyright:
 
-      Copyright Â© 2005-2020 Rich Felker, et al.
+      Copyright © 2005-2020 Rich Felker, et al.
 
 * The CORE-MATH project https://core-math.gitlabpages.inria.fr/. CORE-MATH
   routines are available under the MIT license on a per-file basis.
@@ -4632,12 +4629,12 @@ math portions of the library:
 
 ------------------------------------------------------------------------------
 Much of the math library code (src/math/* and src/complex/*) is
-Copyright Â© 1993,2004 Sun Microsystems or
-Copyright Â© 2003-2011 David Schultz or
-Copyright Â© 2003-2009 Steven G. Kargl or
-Copyright Â© 2003-2009 Bruce D. Evans or
-Copyright Â© 2008 Stephen L. Moshier or
-Copyright Â© 2017-2018 Arm Limited
+Copyright © 1993,2004 Sun Microsystems or
+Copyright © 2003-2011 David Schultz or
+Copyright © 2003-2009 Steven G. Kargl or
+Copyright © 2003-2009 Bruce D. Evans or
+Copyright © 2008 Stephen L. Moshier or
+Copyright © 2017-2018 Arm Limited
 and labelled as such in comments in the individual source files. All
 have been licensed under extremely permissive terms.
 ------------------------------------------------------------------------------
@@ -5282,6 +5279,38 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+---
+
+## MIT License
+
+Used by:
+- vectorcraft-geom 0.17.0
+- vectorcraft-trace 0.17.0
+
+```
+MIT License
+
+Copyright (c) 2026 ArtCraft Team and the VectorCraft contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ---
@@ -6236,4 +6265,4 @@ the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 ```
 
-<!-- Cargo.lock: 44766e8e91832e36c5862119c6996f140a4e46a2ddd46abf1a7de7a1e82ca946 -->
+<!-- Cargo.lock: 006e9dcf8b5d124e60fd5dcc625aa80d3de4d93fc634125d9a2b96e6d45e1460 -->

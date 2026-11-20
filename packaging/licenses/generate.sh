@@ -5,7 +5,10 @@ set -eo pipefail
 cd "$(dirname "$0")/../.."
 # --offline: the licenses as the crates themselves state them; --fail: stop
 # rather than leave out a library whose license can't be read.
-cargo about generate --features gui,ble --offline --fail --format json \
+# The studio's dependencies (the engine's among them), as the app is built:
+# not the whole workspace, whose browser and relay crates aren't in it.
+cargo about generate --manifest-path crates/studio/Cargo.toml --features ble \
+    --offline --fail --format json \
     --config packaging/licenses/about.toml \
     | python3 packaging/licenses/render.py > THIRD-PARTY-NOTICES.md
 # Which dependencies these notices are for (make-app.sh checks it).

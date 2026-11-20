@@ -1,0 +1,39 @@
+[package]
+name = "zigzag-web"
+description = "ZZZ: the ZigZag studio in the browser (WebAssembly)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The browser only: the studio and the page's start. (Natively the crate is
+# empty, and its native build, for the tests, is the engine alone, with no
+# windowing or system libraries.)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+zigzag = { path = "../.." }
+zigzag-studio = { path = "../studio" }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "BeforeUnloadEvent"] }
+
+[features]
+# A real Brother Skitch over Web Bluetooth (the simulated one is always there).
+default = ["ble"]
+ble = ["zigzag-studio/ble"]
+
+# The tests in tests/ run the engine natively (on the desktop, and in CI)
+# and in WebAssembly, to compare the two.
+[dev-dependencies]
+zigzag = { path = "../.." }
+usvg = "0.45"
+wasm-bindgen-test = "0.3"
+web-time = "1"
+
+[lints.rust]
+# `zzz_local`: tests on files that aren't kept in the repository.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zzz_local)'] }

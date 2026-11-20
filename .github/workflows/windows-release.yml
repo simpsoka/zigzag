@@ -71,11 +71,19 @@ jobs:
         env:
           # Static CRT: one self-contained .exe per binary, no VC++ redist needed.
           RUSTFLAGS: -C target-feature=+crt-static
-        run: >
-          cargo build --locked --release
-          --features gui,ble
-          --target x86_64-pc-windows-msvc
-          --bin zigzag-studio --bin zigzag --bin zigzag-mcp
+        run: |
+          $bins = '--bin', 'zigzag-studio', '--bin', 'zigzag', '--bin', 'zigzag-mcp'
+          if (Test-Path crates/studio/Cargo.toml) {
+            # The workspace: the studio is its own package.
+            cargo build --locked --release -p zigzag -p zigzag-studio `
+              --features zigzag/ble,zigzag-studio/ble `
+              --target x86_64-pc-windows-msvc @bins
+          } else {
+            # A tag from before the workspace (v0.1.5 and older).
+            cargo build --locked --release --features gui,ble `
+              --target x86_64-pc-windows-msvc @bins
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage release folder
         id: stage

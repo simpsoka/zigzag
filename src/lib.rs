@@ -18,6 +18,7 @@ pub mod route;
 pub mod stitch;
 pub mod svg;
 pub mod trace;
+pub mod vfs;
 
 use anyhow::Result;
 use std::path::Path;

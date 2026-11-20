@@ -14,6 +14,12 @@ with embroidery machines—or send designs directly to a **Brother Skitch
 Draw in Illustrator, draw in ZigZag, or let an agent draw. The Rust engine
 and `zigzag` command-line tool power the same workflow outside the editor.
 
+> **ZZZ — ZigZag in the browser.** This fork also builds the studio for the
+> web: [quilombodigital.github.io/zigzag](https://quilombodigital.github.io/zigzag/)
+> (Chrome or Edge). Same editor, nothing to install, with saving to your
+> files, Web Bluetooth for the Skitch, and agents through a small relay.
+> See [docs/zzz.md](docs/zzz.md).
+
 ## See ZigZag in action
 
 https://github.com/user-attachments/assets/94812f25-82f4-429f-85db-5e20c1d5e723
@@ -76,8 +82,12 @@ inside the extracted folder. It also includes the `zigzag` CLI and
 · [Changelog](CHANGELOG.md)
 · [Publishing a release](RELEASE.md)
 
+The repository is a Cargo workspace: the engine at the root, and what's
+built on it in `crates/` (see [docs/architecture.md](docs/architecture.md)).
+
 ```
 zigzag/
+  src/                    the engine (crate `zigzag`), the `zigzag` CLI and the MCP bridge
   src/svg.rs              SVG import (usvg): fill and stroke parts, transforms, text
   src/document/           editable document; settings saved back into SVG ids,
                           layout edits as SVG transforms, lettering
@@ -95,19 +105,27 @@ zigzag/
   src/formats/            PES (+PEC), DST, EXP, JEF, VP3, Skitch PEN writers;
                           PES/PEC/DST/EXP/JEF readers; preview; worksheet
   src/machine/            Skitch Bluetooth protocol (+ btleplug client, `ble` feature)
-  src/studio/             editor (egui on OpenGL via glow) + MCP server (`gui` feature)
+  src/vfs.rs              file access: std::fs on the desktop, files in memory in the browser
   src/mcp_bridge.rs       stdio ↔ HTTP bridge for MCP clients that launch a command
+  crates/studio/          the editor (egui on OpenGL via glow) + MCP server: a library,
+                          and the desktop app `zigzag-studio`
+  crates/web/             ZZZ: the studio in the browser (WebAssembly, built with Trunk)
+  crates/relay/           zigzag-mcp-relay: MCP clients ↔ a ZZZ tab
+  vendor/                 Image Trace (VectorCraft), vendored
+  docs/                   architecture, development, ZZZ, plans
 ```
 
 ## Build
 
 ```sh
-cargo build --release                        # CLI + MCP bridge, no system deps
-cargo build --release --features gui,ble     # + the studio editor and Skitch upload
+cargo build --release      # CLI + MCP bridge, no system deps
+cargo build --release -p zigzag -p zigzag-studio --features zigzag/ble,zigzag-studio/ble
+                           # + the studio and Skitch upload
 ```
 
-Linux needs the usual X11/Wayland and OpenGL dev libraries for `gui`. libdbus
-is vendored for `ble`.
+Linux needs the usual X11/Wayland and OpenGL dev libraries for the studio.
+libdbus is vendored for `ble`. The browser version, tests and releases:
+[docs/development.md](docs/development.md).
 
 ## Stitch types
 
@@ -216,7 +234,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Crash logs:** if something inside ZigZag fails badly enough to stop it, a short log of what failed and where is kept in the settings folder (`crashes/`, the newest ten; Help › Show Crash Logs opens it). The next time ZigZag opens it offers to report it: a GitHub issue started with the gist of the log, and the file shown so it can be attached. Nothing is sent unless you post it, and people's names are taken out of the paths in it. Help also has ZigZag on GitHub, and About ZigZag links there too.
 - **Cursors drawn for each tool:** the Pen's nib (with what a click will do), crosshairs for the Shape, Rotate, Measure and Fill Angle tools, Direct Selection's hollow arrow, and a curved arrow at rotate corners and while the Rotate tool turns.
 - **Right-click menus** on the canvas and the Layers list, styled like the tool flyouts: the stitch types with their icons, then the usual commands with their shortcuts.
-- **Stays quick on big designs:** stitches are planned once per change, reusing every object that didn't change (overlap removal too: moving one object redoes only the objects it overlaps); a design that takes more than 12 ms to plan plans in the background (the status bar says "Updating stitches…" and the last plan stays on screen meanwhile; when you drop a moved object its stitches move with it until the new plan lands). Dragging points or objects, and typing, preview without re-planning until you let go. The stitches live on the GPU: each color block's segments are uploaded once and drawn by a shader (thread shading and needle points included), so panning, zooming, dragging and the stitch player cost nothing per stitch on the CPU, whether the design has a thousand stitches or half a million. The Layers list lays out only the rows in view. An object whose stitches hit an internal error is left out with a warning in Issues rather than taking the plan down. For development: `TL_PROFILE=1` prints each frame's sections to stderr, `TL_NO_GPU=1` draws the stitches with the painter instead, and `cargo test --release --features gui --bin zigzag-studio perf_bench -- --ignored --nocapture --test-threads=1` times typing and dragging on a traced logo (`examples/bench-grid.svg` is a 213,000-stitch design for the studio itself).
+- **Stays quick on big designs:** stitches are planned once per change, reusing every object that didn't change (overlap removal too: moving one object redoes only the objects it overlaps); a design that takes more than 12 ms to plan plans in the background (the status bar says "Updating stitches…" and the last plan stays on screen meanwhile; when you drop a moved object its stitches move with it until the new plan lands). Dragging points or objects, and typing, preview without re-planning until you let go. The stitches live on the GPU: each color block's segments are uploaded once and drawn by a shader (thread shading and needle points included), so panning, zooming, dragging and the stitch player cost nothing per stitch on the CPU, whether the design has a thousand stitches or half a million. The Layers list lays out only the rows in view. An object whose stitches hit an internal error is left out with a warning in Issues rather than taking the plan down. For development: `TL_PROFILE=1` prints each frame's sections to stderr, `TL_NO_GPU=1` draws the stitches with the painter instead, and `cargo test --release -p zigzag-studio --lib perf_bench -- --ignored --nocapture --test-threads=1` times typing and dragging on a traced logo (`examples/bench-grid.svg` is a 213,000-stitch design for the studio itself).
 - **Letter census** (for development): `tools/census/census.sh NAME` sets every letter and digit of about 50 popular fonts of every kind of type (`tools/census/fonts.txt`) as a satin and counts how many come out clean on every measure (no filled parts, stitches off the letter, extra cuts, travel in sight, bare cloth, off-square stitches, seams or satin piled three deep), with trims and letters sewn in one piece. It takes about half a minute; `quick` sweeps every 8th installed family and `full` all of them. Each process is stopped past 2 GB. `ZIGZAG_FONT_SIZE=11` sets letters about 8 mm tall. `tools/census/summary.py` compares runs in `target/census/`. To try a change, `tools/census/try.sh [VAR=VALUE …]` runs the popular fonts at 8 and 15 mm as sewn and with the settings given, in one go, and shows each against the last try (results for code that hasn't changed are kept). `tools/census/letter.sh FAMILY CHAR [8|15] [VAR=VALUE …]` plans one letter and says where each trim is and why (`ZIGZAG_TRIMS=1` does that for any `zigzag convert`); `tools/census/trims.py` sorts a census's trims that way, for a census run with `ZIGZAG_TRIMS=1`. `tools/census/sheet.py OUT.png [8|15] FAMILY=CHARS …` draws letters' stitches in a few settings side by side over their outlines, to judge by eye; `tools/census/judged.txt` is a set judged that way and `tools/census/judge.py` checks the census's faults against it (the census counts stitches crowded into one place, the narrow end of a fan, and needle points outside the letter, but judges fans poorly). They build with the `trial` profile: as fast as release, but an edit rebuilds in seconds.
 - Follows the system's **light or dark** appearance (`ZIGZAG_THEME=light|dark` overrides) and uses the San Francisco system font on a Mac.
 - **Interface size:** Settings › General draws everything in the window larger or smaller (90% to 150%): panels, text, buttons and the handles on the canvas. Your design keeps the size it has on screen, the window never gets smaller than the layout needs, and a size the display has no room for steps down to the largest that fits.

@@ -17,4 +17,4 @@ geom property tests were left out. To update, copy `crates/trace/src` and
 
 Ported pieces (not vendored) are credited where they live: CIEDE2000 in
 `src/formats/mod.rs`, curve fitting and corner cutting in `src/bezier.rs`,
-snap targets in `src/studio/snap.rs`.
+snap targets in `crates/studio/src/snap.rs`.

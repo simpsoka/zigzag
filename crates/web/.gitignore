@@ -1,0 +1,2 @@
+# Files the tests can use that are not in the repository (see tests/engine.rs).
+tests/fixtures/local/

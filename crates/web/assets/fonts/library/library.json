@@ -1,0 +1,116 @@
+{
+ "fonts": [
+  {
+   "file": "abrilfatface/AbrilFatface-Regular.ttf",
+   "kind": "serif"
+  },
+  {
+   "file": "alfaslabone/AlfaSlabOne-Regular.ttf",
+   "kind": "serif"
+  },
+  {
+   "file": "anton/Anton-Regular.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "archivoblack/ArchivoBlack-Regular.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "bebasneue/BebasNeue-Regular.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "blackopsone/BlackOpsOne-Regular.ttf",
+   "kind": "block"
+  },
+  {
+   "file": "bungee/Bungee-Regular.ttf",
+   "kind": "block"
+  },
+  {
+   "file": "caveat/Caveat-Variable.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "cinzel/Cinzel-Variable.ttf",
+   "kind": "serif"
+  },
+  {
+   "file": "courgette/Courgette-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "dancingscript/DancingScript-Variable.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "fredoka/Fredoka-Variable.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "graduate/Graduate-Regular.ttf",
+   "kind": "block"
+  },
+  {
+   "file": "greatvibes/GreatVibes-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "kaushanscript/KaushanScript-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "lobster/Lobster-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "lora/Lora-Variable.ttf",
+   "kind": "serif"
+  },
+  {
+   "file": "montserrat/Montserrat-Variable.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "nunito/Nunito-Variable.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "oswald/Oswald-Variable.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "pacifico/Pacifico-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "permanentmarker/PermanentMarker-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+   "kind": "serif"
+  },
+  {
+   "file": "poppins/Poppins-Bold.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "poppins/Poppins-Regular.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "righteous/Righteous-Regular.ttf",
+   "kind": "sans"
+  },
+  {
+   "file": "satisfy/Satisfy-Regular.ttf",
+   "kind": "script"
+  },
+  {
+   "file": "staatliches/Staatliches-Regular.ttf",
+   "kind": "block"
+  }
+ ]
+}

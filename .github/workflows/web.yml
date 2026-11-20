@@ -1,0 +1,85 @@
+# ZZZ, the studio in the browser (crates/web): tested, built with Trunk, and
+# published on GitHub Pages at https://<owner>.github.io/<repository>/.
+#
+# Runs on a push to the `web` branch, and by hand (Actions › web › Run
+# workflow). Pull requests are tested and built, not published.
+#
+# Once, in the repository's settings:
+#   - Settings › Pages › Build and deployment › Source: GitHub Actions.
+#   - Settings › Environments › github-pages › Deployment branches: add
+#     `web` (by default only the default branch may publish).
+
+name: web
+
+on:
+  push:
+    branches: [web]
+  pull_request:
+    branches: [web]
+    paths: ["crates/**", "src/**", "vendor/**", "Cargo.toml", "Cargo.lock", ".github/workflows/web.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One publication at a time; a newer push doesn't wait for an older one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: v0.22.2
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        run: |
+          curl -sSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin trunk
+          trunk --version
+
+      # The browser's part, natively: the engine (opening, planning,
+      # exporting, every font in the library) and the relay. (The studio's
+      # own tests draw with egui on the desktop: `cargo test --workspace`
+      # on a developer's machine.)
+      - name: Test
+        run: |
+          cargo test --locked --release -p zigzag-web --test engine
+          cargo test --locked -p zigzag-mcp-relay
+
+      # Paths in the page start at the repository's name: the site is
+      # served under https://<owner>.github.io/<repository>/.
+      - name: Build
+        working-directory: crates/web
+        run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
+
+      - name: Package for Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: crates/web/dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

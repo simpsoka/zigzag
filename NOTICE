@@ -9,7 +9,7 @@ Respira (https://github.com/jhbruhn/respira)
   Ported: Brother PP1 (Skitch) Bluetooth protocol and sewing flow
   (src/machine/protocol.rs, src/machine/session.rs, src/machine/skitch.rs),
   machine error descriptions and thread-break rollback, the Brother
-  Embroidery thread numbers (src/studio/threads.rs), and the PEN stitch
+  Embroidery thread numbers (crates/studio/src/threads.rs), and the PEN stitch
   encoder (src/formats/pen.rs).
 
 pyembroidery (https://github.com/EmbroidePy/pyembroidery)
@@ -34,7 +34,7 @@ VectorCraft (https://github.com/storytold/vectorcraft)
   vendor/vectorcraft-geom), used to trace PNG/JPEG logos (src/trace.rs).
   Ported: CIEDE2000 colour difference (src/formats/mod.rs), Schneider curve
   fitting with corner splitting (src/bezier.rs), live-corner cutting
-  (src/bezier.rs), smart-guide snap targets (src/studio/snap.rs), segment
-  bending (src/studio/path_edit.rs), typed lengths with units and arithmetic
-  and the inch ruler steps (src/studio/units.rs), and the Measure tool
-  (src/studio/view_tools.rs).
+  (src/bezier.rs), smart-guide snap targets (crates/studio/src/snap.rs), segment
+  bending (crates/studio/src/path_edit.rs), typed lengths with units and arithmetic
+  and the inch ruler steps (crates/studio/src/units.rs), and the Measure tool
+  (crates/studio/src/view_tools.rs).

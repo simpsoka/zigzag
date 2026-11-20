@@ -256,16 +256,17 @@ impl BleLink {
     }
 }
 
+#[maybe_async::maybe_async(?Send)]
 impl super::session::Transport for BleLink {
-    fn request(&mut self, command: u16, payload: &[u8]) -> Result<Vec<u8>> {
+    async fn request(&mut self, command: u16, payload: &[u8]) -> Result<Vec<u8>> {
         self.rt.block_on(self.skitch.raw(command, payload))
     }
 
-    fn send(&mut self, command: u16, payload: &[u8]) -> Result<()> {
+    async fn send(&mut self, command: u16, payload: &[u8]) -> Result<()> {
         self.rt.block_on(self.skitch.send(command, payload))
     }
 
-    fn read(&mut self) -> Result<Vec<u8>> {
+    async fn read(&mut self) -> Result<Vec<u8>> {
         self.rt.block_on(self.skitch.reread())
     }
 

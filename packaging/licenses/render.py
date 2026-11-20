@@ -1,6 +1,6 @@
 """THIRD-PARTY-NOTICES.md from cargo-about's JSON (on stdin): each license
 text once per distinct text, with the libraries it covers. ZigZag itself is
-left out (its license is LICENSE).
+left out, the engine and the studio both (their license is LICENSE).
 
 Where cargo-about could only offer its generic template (a crate whose license
 file it couldn't match: "<copyright holders>" left in), the crate's own
@@ -10,7 +10,8 @@ import json
 import os
 import sys
 
-ME = "zigzag"
+# ZigZag's own packages: the engine and the studio.
+ME = {"zigzag", "zigzag-studio"}
 LICENSE_FILES = ("LICENSE", "LICENCE", "COPYING", "COPYRIGHT")
 
 
@@ -37,7 +38,7 @@ data = json.load(sys.stdin)
 sections = []  # (title, [crates], [(heading or None, text)])
 for lic in data["licenses"]:
     users = sorted(
-        (u["crate"] for u in lic["used_by"] if u["crate"]["name"] != ME),
+        (u["crate"] for u in lic["used_by"] if u["crate"]["name"] not in ME),
         key=lambda c: (c["name"], c["version"]),
     )
     if not users:
@@ -57,7 +58,7 @@ for lic in data["licenses"]:
 
 names = []
 for lic in data["licenses"]:
-    if lic["name"] not in names and any(u["crate"]["name"] != ME for u in lic["used_by"]):
+    if lic["name"] not in names and any(u["crate"]["name"] not in ME for u in lic["used_by"]):
         names.append(lic["name"])
 out = [
     "# Third-party notices",

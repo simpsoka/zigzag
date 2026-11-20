@@ -135,20 +135,54 @@ fn layer_ids_in(doc: &roxmltree::Document) -> std::collections::HashSet<String> 
 }
 
 pub fn load_file(path: &std::path::Path) -> Result<Vec<Shape>> {
-    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let data = crate::vfs::read(path).with_context(|| format!("reading {}", path.display()))?;
     load(&data)
 }
 
+/// The fonts text is set in, behind a lock so more can arrive later
+/// ([`add_fonts`]): `None` until first asked for.
+static FONTS: std::sync::RwLock<Option<std::sync::Arc<usvg::fontdb::Database>>> =
+    std::sync::RwLock::new(None);
+/// Counts the times the fonts changed ([`fonts_generation`]).
+static FONTS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
-    // Loading system fonts is slow; do it once per process.
-    static DB: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
-        std::sync::OnceLock::new();
-    DB.get_or_init(|| {
+    if let Some(db) = FONTS.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return db.clone();
+    }
+    let mut slot = FONTS.write().unwrap_or_else(|e| e.into_inner());
+    slot.get_or_insert_with(|| {
+        // Loading system fonts is slow; do it once per process. (In the
+        // browser there are none to find: fonts come by `add_fonts`.)
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
         std::sync::Arc::new(db)
     })
     .clone()
+}
+
+/// Add fonts (the bytes of TTF, OTF or TTC files) to those text is set in,
+/// returning how many faces they held. Where there are no system fonts to
+/// scan (the browser), this is where every font comes from. Documents
+/// opened before keep the fonts they were read with.
+pub fn add_fonts(files: impl IntoIterator<Item = Vec<u8>>) -> usize {
+    let mut db = (*fontdb()).clone();
+    let before = db.len();
+    for data in files {
+        db.load_font_data(data);
+    }
+    let added = db.len() - before;
+    if added > 0 {
+        *FONTS.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(db));
+        FONTS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    added
+}
+
+/// Changes each time [`add_fonts`] adds something: what's kept from the
+/// fonts (a list of families, say) is stale once this moves.
+pub fn fonts_generation() -> u64 {
+    FONTS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The font database for parsing one SVG: the system fonts only when it

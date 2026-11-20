@@ -316,43 +316,52 @@ impl Document {
     /// or a raster logo (PNG/JPEG/…) traced into shapes. Machine files and
     /// images get no save path, so they're never overwritten with SVG.
     pub fn open(path: &Path) -> Result<Document> {
-        let name = path
+        let bytes = crate::vfs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self::open_bytes(&file_name, &bytes, Some(path))
+    }
+
+    /// [`Document::open`] for a file already read (in the browser there
+    /// are no paths, only what the person picked): `file_name` says what
+    /// kind it is, by its extension, and names the document. `path`, when
+    /// there is one, becomes an SVG's save path.
+    pub fn open_bytes(file_name: &str, bytes: &[u8], path: Option<&Path>) -> Result<Document> {
+        let named = Path::new(file_name);
+        let name = named
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let ext = path
+        let ext = named
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
         if crate::formats::READABLE_FORMATS.contains(&ext.as_str()) {
-            let bytes =
-                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let file = crate::formats::read::read_stitch_file(&bytes, &ext)?;
+            let file = crate::formats::read::read_stitch_file(bytes, &ext)?;
             return Document::from_svg(&crate::formats::read::to_svg(&file), &name, None);
         }
         if crate::trace::is_image(&ext) {
             // A raster logo is traced into shapes (default options); it gets
             // no save path, so the image is never overwritten with SVG.
-            let bytes =
-                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let t = crate::trace::trace_bytes(&bytes, &crate::trace::TraceOptions::default())
-                .with_context(|| format!("tracing {}", path.display()))?;
+            let t = crate::trace::trace_bytes(bytes, &crate::trace::TraceOptions::default())
+                .with_context(|| match path {
+                    Some(p) => format!("tracing {}", p.display()),
+                    None => format!("tracing {file_name}"),
+                })?;
             return Document::from_svg(&t.svg, &name, None);
         }
         // Anything else is taken for an SVG; what isn't even text is a
         // kind of file ZigZag doesn't open (a VP3, say: written, not read).
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let Ok(xml) = String::from_utf8(bytes) else {
+        let Ok(xml) = std::str::from_utf8(bytes) else {
             bail!(
-                "{} isn't a file ZigZag can open: it opens SVG, images to trace, and {} machine files",
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                "{file_name} isn't a file ZigZag can open: it opens SVG, images to trace, and {} machine files",
                 crate::formats::READABLE_FORMATS.join(", ")
             );
         };
-        Document::from_svg(&xml, &name, Some(path.to_path_buf()))
+        Document::from_svg(xml, &name, path.map(Path::to_path_buf))
     }
 
     /// Load SVG text, centering its artwork on the hoop.
@@ -518,7 +527,7 @@ impl Document {
             None => bail!("no file name yet; use Save As"),
         };
         self.sync()?;
-        std::fs::write(&path, &self.xml).with_context(|| format!("writing {}", path.display()))?;
+        crate::vfs::write(&path, &self.xml).with_context(|| format!("writing {}", path.display()))?;
         if self.path.as_deref() != Some(path.as_path()) {
             self.name = path
                 .file_stem()

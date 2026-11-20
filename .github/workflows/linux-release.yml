@@ -99,10 +99,19 @@ jobs:
 
       - name: Build release binaries
         working-directory: source
-        run: >
-          cargo build --locked --release --features gui,ble
-          --target x86_64-unknown-linux-gnu
-          --bin zigzag-studio --bin zigzag --bin zigzag-mcp
+        run: |
+          if [[ -f crates/studio/Cargo.toml ]]; then
+            # The workspace: the studio is its own package.
+            cargo build --locked --release \
+              -p zigzag -p zigzag-studio --features zigzag/ble,zigzag-studio/ble \
+              --target x86_64-unknown-linux-gnu \
+              --bin zigzag-studio --bin zigzag --bin zigzag-mcp
+          else
+            # A tag from before the workspace (v0.1.5 and older).
+            cargo build --locked --release --features gui,ble \
+              --target x86_64-unknown-linux-gnu \
+              --bin zigzag-studio --bin zigzag --bin zigzag-mcp
+          fi
 
       - name: Package and test the download
         env:

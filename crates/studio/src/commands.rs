@@ -1,0 +1,1254 @@
+//! Every menu command in one place. The same list drives the macOS menu bar,
+//! the in-window menus on other systems, and keyboard shortcuts.
+
+use crate::app::{History, Studio, Tool};
+use crate::dock::PanelId;
+use crate::shapes::ShapeKind;
+use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
+use zigzag::boolean::PathOp;
+use zigzag::geom::{rotate_about, scale_about, translation};
+use zigzag::params::Kind;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Action {
+    New,
+    Open,
+    /// File › Close: the tab in front (asks first if it has unsaved changes).
+    CloseTab,
+    NextTab,
+    PreviousTab,
+    Place,
+    Save,
+    SaveAs,
+    Export(&'static str),
+    SendToSkitch,
+    Undo,
+    Redo,
+    Copy,
+    Paste,
+    Duplicate,
+    Delete,
+    SelectAll,
+    Deselect,
+    Kind(Kind),
+    FlipH,
+    FlipV,
+    RotateLeft,
+    RotateRight,
+    CenterInHoop,
+    FitToHoop,
+    BringToFront,
+    BringForward,
+    SendBackward,
+    SendToBack,
+    GroupColors,
+    AddText,
+    Tool(Tool),
+    ToggleGrid,
+    ToggleSmartGuides,
+    /// Show lengths in this unit (View › Units).
+    Units(crate::units::Unit),
+    /// The contextual task bar under the selection.
+    ToggleTaskBar,
+    /// Collapse the right dock to icons (or expand it).
+    IconicPanels,
+    /// Put every panel back where it started.
+    ResetPanels,
+    /// Show the prompt bar and put the cursor in it.
+    AskAgent,
+    /// Type › Add Fonts… (the browser only, which has no system fonts):
+    /// font files to set text in.
+    AddFonts,
+    /// Open the issues list (in the status bar).
+    ShowIssues,
+    TransformAgain,
+    /// Object › Rotate…: the Rotate tool's window, for an exact angle.
+    RotateDialog,
+    Pathfinder(zigzag::boolean::PathOp),
+    OffsetPath,
+    OutlineStroke,
+    /// Object › Path › Add Outline: a stroke along a filled shape's edge,
+    /// an object of its own to sew.
+    AddOutline,
+    /// Object › Path › Remove Outline: a shape's outline, taken off.
+    RemoveOutline,
+    /// Object › Break into Columns: a satin shape as the columns it's sewn
+    /// as, two-rail satins of their own to adjust.
+    BreakIntoColumns,
+    /// Object › Path › Release Compound Path: one object per separate shape.
+    ReleaseCompound,
+    SimplifyPath,
+    /// Object › Simplify Design…: fewer threads, small details and trims.
+    SimplifyDesign,
+    RoundCorners,
+    /// Edit › Copy / Paste Stitch Settings (Ink/Stitch's Duplicate Params).
+    CopySettings,
+    PasteSettings,
+    /// Edit › Select Same Stitch Type.
+    SelectSameKind,
+    /// Object › Path › Reverse Direction: sew the selection's paths the
+    /// other way (a satin from its other end).
+    ReversePath,
+    /// Object › Test Swatches….
+    TestSwatches,
+    /// Type › Create Outlines: lettering into plain paths.
+    CreateOutlines,
+    /// Type › Convert to Text: outlines made from text back into text.
+    ConvertToText,
+    /// Type › Change Case.
+    ChangeCase(zigzag::document::Case),
+    /// Type › Align.
+    AlignText(zigzag::document::Align),
+    /// Type › Type on a Path: the selected text onto the selected path.
+    TypeOnPath,
+    CleanUp,
+    ToggleStitchLines,
+    TogglePoints,
+    ToggleJumps,
+    /// Tint where stitches pile up (View › Density Map).
+    ToggleDensity,
+    /// Number the objects in sewing order on the canvas.
+    ToggleOrder,
+    /// Draw the stitches on the GPU (off: egui's painter, as before; for
+    /// comparing the two, or a GL driver that gets the shader wrong).
+    /// ZigZag › Settings… (in Edit where there's no app menu).
+    Settings,
+    /// Object › Lock, Unlock All, Hide, Show All (Illustrator's, with
+    /// its ⌘2 and ⌘3): what's locked can't be selected on the canvas;
+    /// what's hidden isn't shown or sewn.
+    Lock,
+    UnlockAll,
+    Hide,
+    ShowAll,
+    /// ZigZag › Check for Updates… (in Help where there's no app menu).
+    CheckForUpdates,
+    /// Help › Report an Issue…: a new issue on GitHub, in the browser.
+    ReportIssue,
+    /// Help › ZigZag on GitHub: its page there, in the browser.
+    GitHub,
+    /// Help › Show Crash Logs: the folder they're kept in.
+    CrashLogs,
+    /// About ZigZag (the app menu's on a Mac, Help's elsewhere).
+    About,
+    /// Quit ZigZag (the app menu's on a Mac, File's elsewhere): asks
+    /// about unsaved changes first.
+    Quit,
+    ZoomIn,
+    ZoomOut,
+    ZoomFit,
+    PlayPause,
+    Panel(PanelId),
+    ToggleLeftDock,
+    ToggleRightDock,
+}
+
+/// A keyboard shortcut. `cmd` is ⌘ on macOS and Ctrl elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sc {
+    pub key: Key,
+    pub cmd: bool,
+    pub shift: bool,
+}
+
+const fn cmd(key: Key) -> Option<Sc> {
+    Some(Sc {
+        key,
+        cmd: true,
+        shift: false,
+    })
+}
+const fn cmd_shift(key: Key) -> Option<Sc> {
+    Some(Sc {
+        key,
+        cmd: true,
+        shift: true,
+    })
+}
+const fn shift(key: Key) -> Option<Sc> {
+    Some(Sc {
+        key,
+        cmd: false,
+        shift: true,
+    })
+}
+const fn plain(key: Key) -> Option<Sc> {
+    Some(Sc {
+        key,
+        cmd: false,
+        shift: false,
+    })
+}
+
+impl Sc {
+    pub fn egui(&self) -> KeyboardShortcut {
+        let mut m = Modifiers::NONE;
+        if self.cmd {
+            m |= Modifiers::COMMAND;
+        }
+        if self.shift {
+            m |= Modifiers::SHIFT;
+        }
+        KeyboardShortcut::new(m, self.key)
+    }
+}
+
+pub enum Entry {
+    Item(Action, &'static str, Option<Sc>),
+    Sep,
+    Sub(&'static str, Vec<Entry>),
+}
+
+use Entry::{Item, Sep, Sub};
+
+/// What only a desktop app does: not in the menus in the browser, and
+/// not to be had by its shortcut there.
+/// What only the browser needs: not in the desktop's menus.
+fn browser_only(a: Action) -> bool {
+    matches!(a, Action::AddFonts)
+}
+
+fn desktop_only(a: Action) -> bool {
+    matches!(
+        a,
+        Action::AskAgent
+            | Action::Quit
+            | Action::CrashLogs
+            | Action::CheckForUpdates
+            | Action::Panel(PanelId::Agent)
+    )
+}
+
+/// Take what this build doesn't do out of a menu (`skip`), and the
+/// separators that leaves at an end or doubled.
+fn without(entries: &mut Vec<Entry>, skip: fn(Action) -> bool) {
+    entries.retain_mut(|e| match e {
+        Item(a, _, shortcut) => {
+            // The browser keeps these keys for itself (a new window,
+            // closing the tab): the commands stay, without them.
+            if cfg!(target_arch = "wasm32") && matches!(a, Action::New | Action::CloseTab) {
+                *shortcut = None;
+            }
+            !skip(*a)
+        }
+        Sub(_, sub) => {
+            without(sub, skip);
+            !sub.is_empty()
+        }
+        Sep => true,
+    });
+    let mut last_was_sep = true;
+    entries.retain(|e| {
+        let sep = matches!(e, Sep);
+        let keep = !(sep && last_was_sep);
+        last_was_sep = sep;
+        keep
+    });
+    if matches!(entries.last(), Some(Sep)) {
+        entries.pop();
+    }
+}
+
+pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
+    let mut menus = all_menus();
+    let skip = if cfg!(target_arch = "wasm32") {
+        desktop_only
+    } else {
+        browser_only
+    };
+    for (_, entries) in &mut menus {
+        without(entries, skip);
+    }
+    menus
+}
+
+fn all_menus() -> Vec<(&'static str, Vec<Entry>)> {
+    let mut export: Vec<Entry> = zigzag::formats::MACHINE_FORMATS
+        .iter()
+        .map(|&(ext, label)| Item(Action::Export(ext), label, None))
+        .collect();
+    export.push(Sep);
+    export.push(Item(
+        Action::Export("html"),
+        "Production Worksheet (HTML)…",
+        None,
+    ));
+    let kinds = vec![
+        Item(Action::Kind(Kind::Fill), "Fill", plain(Key::F)),
+        Item(Action::Kind(Kind::Satin), "Satin", plain(Key::S)),
+        Item(Action::Kind(Kind::Run), "Run", plain(Key::R)),
+        Item(Action::Kind(Kind::Contour), "Contour Fill", plain(Key::C)),
+        Item(Action::Kind(Kind::Blanket), "Blanket", None),
+        Item(Action::Kind(Kind::Applique), "Appliqué", None),
+        Item(Action::Kind(Kind::Meander), "Meander Fill", None),
+        Item(Action::Kind(Kind::Ripple), "Ripple Fill", None),
+        Item(Action::Kind(Kind::Cross), "Cross-Stitch", None),
+        Item(Action::Kind(Kind::Tartan), "Tartan", None),
+        Item(Action::Kind(Kind::Manual), "Manual Stitches", None),
+        Sep,
+        Item(Action::Kind(Kind::Skip), "Don't Stitch", plain(Key::X)),
+    ];
+    vec![
+        (
+            "File",
+            vec![
+                Item(Action::New, "New", cmd(Key::N)),
+                Item(Action::Open, "Open…", cmd(Key::O)),
+                Item(Action::Place, "Place SVG…", cmd_shift(Key::P)),
+                Sep,
+                Item(Action::CloseTab, "Close", cmd(Key::W)),
+                Item(Action::Save, "Save", cmd(Key::S)),
+                Item(Action::SaveAs, "Save As…", cmd_shift(Key::S)),
+                Sep,
+                Sub("Export", export),
+                Item(Action::SendToSkitch, "Send to Skitch…", None),
+            ]
+            .into_iter()
+            // (On a Mac, Quit is in the ZigZag menu: see `native_menu`.)
+            .chain(if cfg!(target_os = "macos") {
+                vec![]
+            } else {
+                vec![Sep, QUIT_ITEM]
+            })
+            .collect(),
+        ),
+        (
+            "Edit",
+            vec![
+                Item(Action::Undo, "Undo", cmd(Key::Z)),
+                Item(Action::Redo, "Redo", cmd_shift(Key::Z)),
+                Sep,
+                Item(Action::Copy, "Copy", cmd(Key::C)),
+                Item(Action::Paste, "Paste", cmd(Key::V)),
+                Item(Action::Duplicate, "Duplicate", None),
+                Item(Action::Delete, "Delete", plain(Key::Backspace)),
+                Sep,
+                Item(Action::CopySettings, "Copy Stitch Settings", None),
+                Item(Action::PasteSettings, "Paste Stitch Settings", None),
+                Sep,
+                Item(Action::SelectAll, "Select All", cmd(Key::A)),
+                Item(Action::Deselect, "Deselect All", cmd_shift(Key::A)),
+                Item(Action::SelectSameKind, "Select Same Stitch Type", None),
+            ]
+            .into_iter()
+            // (On a Mac, Settings is in the ZigZag menu: see `native_menu`.)
+            .chain(if cfg!(target_os = "macos") {
+                vec![]
+            } else {
+                vec![Sep, SETTINGS_ITEM]
+            })
+            .collect(),
+        ),
+        (
+            "Object",
+            vec![
+                Sub("Stitch Type", kinds),
+                Sep,
+                Item(Action::TransformAgain, "Transform Again", cmd(Key::D)),
+                // (R alone is the Run stitch.)
+                Item(Action::Tool(Tool::Rotate), "Rotate Tool", shift(Key::R)),
+                Item(Action::RotateDialog, "Rotate…", None),
+                Item(Action::FlipH, "Flip Horizontal", None),
+                Item(Action::FlipV, "Flip Vertical", None),
+                Item(Action::RotateLeft, "Rotate Left 90°", None),
+                Item(Action::RotateRight, "Rotate Right 90°", None),
+                Item(Action::CenterInHoop, "Center in Hoop", None),
+                Item(Action::FitToHoop, "Fit to Hoop", None),
+                Sep,
+                Item(Action::Lock, "Lock", cmd(Key::Num2)),
+                Item(Action::UnlockAll, "Unlock All", None),
+                Item(Action::Hide, "Hide", cmd(Key::Num3)),
+                Item(Action::ShowAll, "Show All", None),
+                Sep,
+                Item(Action::BreakIntoColumns, "Break into Columns", None),
+                Sub(
+                    "Path",
+                    vec![
+                        Item(Action::OffsetPath, "Offset Path…", None),
+                        Item(Action::AddOutline, "Add Outline", None),
+                        Item(Action::RemoveOutline, "Remove Outline", None),
+                        Item(Action::OutlineStroke, "Outline Stroke", None),
+                        Item(Action::ReleaseCompound, "Release Compound Path", None),
+                        Item(Action::SimplifyPath, "Simplify…", None),
+                        Item(Action::RoundCorners, "Round Corners…", None),
+                        Item(Action::ReversePath, "Reverse Direction", None),
+                        Sep,
+                        Item(Action::CleanUp, "Clean Up…", None),
+                    ],
+                ),
+                Sub(
+                    "Pathfinder",
+                    vec![
+                        Item(Action::Pathfinder(PathOp::Unite), "Unite", None),
+                        Item(Action::Pathfinder(PathOp::MinusFront), "Minus Front", None),
+                        Item(Action::Pathfinder(PathOp::Intersect), "Intersect", None),
+                        Item(Action::Pathfinder(PathOp::Exclude), "Exclude", None),
+                    ],
+                ),
+                Sep,
+                Sub(
+                    "Sewing Order",
+                    vec![
+                        Item(
+                            Action::BringToFront,
+                            "Sew Last (on Top)",
+                            cmd_shift(Key::CloseBracket),
+                        ),
+                        Item(Action::BringForward, "Sew Later", cmd(Key::CloseBracket)),
+                        Item(Action::SendBackward, "Sew Earlier", cmd(Key::OpenBracket)),
+                        Item(Action::SendToBack, "Sew First", cmd_shift(Key::OpenBracket)),
+                        Sep,
+                        Item(Action::GroupColors, "Group Colors", None),
+                    ],
+                ),
+                Item(Action::SimplifyDesign, "Simplify Design…", None),
+                Sep,
+                Item(Action::TestSwatches, "Test Swatches…", None),
+            ],
+        ),
+        (
+            "Type",
+            vec![
+                Item(Action::AddText, "Add Text…", None),
+                Item(Action::TypeOnPath, "Type on a Path", None),
+                Item(Action::AddFonts, "Add Fonts…", None),
+                Sep,
+                Sub(
+                    "Change Case",
+                    vec![
+                        Item(
+                            Action::ChangeCase(zigzag::document::Case::Upper),
+                            "UPPERCASE",
+                            None,
+                        ),
+                        Item(
+                            Action::ChangeCase(zigzag::document::Case::Lower),
+                            "lowercase",
+                            None,
+                        ),
+                        Item(
+                            Action::ChangeCase(zigzag::document::Case::Title),
+                            "Title Case",
+                            None,
+                        ),
+                        Item(
+                            Action::ChangeCase(zigzag::document::Case::AsTyped),
+                            "As Typed",
+                            None,
+                        ),
+                    ],
+                ),
+                Sub(
+                    "Align",
+                    vec![
+                        Item(
+                            Action::AlignText(zigzag::document::Align::Left),
+                            "Left",
+                            None,
+                        ),
+                        Item(
+                            Action::AlignText(zigzag::document::Align::Center),
+                            "Center",
+                            None,
+                        ),
+                        Item(
+                            Action::AlignText(zigzag::document::Align::Right),
+                            "Right",
+                            None,
+                        ),
+                    ],
+                ),
+                Sep,
+                Item(Action::CreateOutlines, "Create Outlines", cmd_shift(Key::O)),
+                Item(Action::ConvertToText, "Convert to Text", None),
+            ],
+        ),
+        (
+            "View",
+            vec![
+                Item(Action::ZoomIn, "Zoom In", cmd(Key::Equals)),
+                Item(Action::ZoomOut, "Zoom Out", cmd(Key::Minus)),
+                Item(Action::ZoomFit, "Zoom to Fit", cmd(Key::Num0)),
+                Sep,
+                Item(Action::ToggleStitchLines, "Stitch Lines", cmd(Key::Y)),
+                Item(Action::ToggleGrid, "Grid", cmd(Key::Quote)),
+                Item(Action::ToggleSmartGuides, "Smart Guides", cmd(Key::U)),
+                Sub(
+                    "Units",
+                    crate::units::Unit::ALL
+                        .iter()
+                        .map(|&u| Item(Action::Units(u), u.label(), None))
+                        .collect(),
+                ),
+                Item(Action::ToggleTaskBar, "Contextual Task Bar", None),
+                Item(Action::TogglePoints, "Needle Points", None),
+                Item(Action::ToggleJumps, "Jump Stitches", None),
+                Item(Action::ToggleDensity, "Density Map", None),
+                Item(Action::ToggleOrder, "Sewing Order", None),
+                Sep,
+                Item(Action::PlayPause, "Play Stitch-Out", plain(Key::Space)),
+            ],
+        ),
+        (
+            "Window",
+            vec![
+                Item(Action::ToggleLeftDock, "Left Dock", None),
+                Item(Action::ToggleRightDock, "Panels", None),
+                Item(Action::IconicPanels, "Collapse Panels to Icons", None),
+                Item(Action::ResetPanels, "Reset Panels", None),
+                Item(Action::AskAgent, "Ask Agent…", cmd(Key::K)),
+                Sep,
+                // (Also ⌃Tab and ⌃⇧Tab.)
+                Item(Action::NextTab, "Next Document", None),
+                Item(Action::PreviousTab, "Previous Document", None),
+                Sep,
+                Item(Action::Panel(PanelId::Objects), "Layers", None),
+                Item(Action::ShowIssues, "Issues", None),
+                Item(Action::Panel(PanelId::Stitch), "Stitch", None),
+                Item(Action::Panel(PanelId::Transform), "Transform", None),
+                Item(Action::Panel(PanelId::Lettering), "Lettering", None),
+                Item(Action::Panel(PanelId::Threads), "Threads", None),
+                Item(Action::Panel(PanelId::Document), "Document", None),
+                Item(Action::Panel(PanelId::Agent), "Agent", None),
+            ],
+        ),
+        (
+            "Help",
+            // (On a Mac, Check for Updates is in the ZigZag menu: see
+            // `native_menu`.)
+            {
+                let mut help = if cfg!(target_os = "macos") {
+                    Vec::new()
+                } else {
+                    vec![UPDATES_ITEM, Sep]
+                };
+                help.extend([
+                    Item(
+                        Action::GitHub,
+                        if cfg!(target_arch = "wasm32") {
+                            "ZZZ on GitHub"
+                        } else {
+                            "ZigZag on GitHub"
+                        },
+                        None,
+                    ),
+                    Item(Action::ReportIssue, "Report an Issue…", None),
+                    Item(Action::CrashLogs, "Show Crash Logs", None),
+                ]);
+                // (On a Mac, About is in the ZigZag menu too.)
+                if !cfg!(target_os = "macos") {
+                    help.extend([Sep, ABOUT_ITEM]);
+                }
+                help
+            },
+        ),
+    ]
+}
+
+/// Where Help › Report an Issue… goes: a new issue on GitHub, started with
+/// headings to write under and which ZigZag on what this is (the two
+/// things every report gets asked for).
+pub fn issue_url() -> String {
+    let body = format!(
+        "**What happened**\n\n\n**What you expected**\n\n\n**Steps, and the design if you can share it**\n\n\n---\n{} {} on {} ({})\n",
+        if cfg!(target_arch = "wasm32") {
+            "ZZZ"
+        } else {
+            "ZigZag"
+        },
+        env!("CARGO_PKG_VERSION"),
+        match std::env::consts::OS {
+            "macos" => "macOS",
+            "windows" => "Windows",
+            "linux" => "Linux",
+            // (In the browser: which one isn't known here.)
+            "unknown" if cfg!(target_arch = "wasm32") => "the browser",
+            other => other,
+        },
+        std::env::consts::ARCH,
+    );
+    let mut url = format!("{}/issues/new?body=", crate::about::home_url());
+    for b in body.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                url.push(b as char)
+            }
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    url
+}
+
+/// Tools, with their single-key shortcuts (handled with the rest).
+pub const TOOLS: [(Tool, &str, Key); 12] = [
+    (Tool::Select, "Select", Key::V),
+    (Tool::Direct, "Direct Selection", Key::A),
+    (Tool::Hand, "Hand", Key::H),
+    (Tool::Pen, "Pen", Key::P),
+    (Tool::Brush, "Brush", Key::B),
+    (Tool::Shape, "Shape", Key::M),
+    (Tool::Angle, "Fill Angle", Key::G),
+    (Tool::Measure, "Measure", Key::I),
+    (Tool::Text, "Type", Key::T),
+    // (In groups: the tool strip shows them in their group's slot.)
+    (Tool::Lasso, "Lasso", Key::Q),
+    (Tool::Knife, "Knife", Key::K),
+    (Tool::Eyedropper, "Eyedropper", Key::E),
+];
+
+fn walk(entries: &[Entry], out: &mut Vec<(Action, &'static str, Option<Sc>)>) {
+    for e in entries {
+        match e {
+            Item(a, l, s) => out.push((*a, *l, *s)),
+            Sub(_, v) => walk(v, out),
+            Sep => {}
+        }
+    }
+}
+
+/// Every action with its label and shortcut, flattened.
+pub fn all_actions() -> Vec<(Action, &'static str, Option<Sc>)> {
+    let mut out = Vec::new();
+    for (_, v) in &menus() {
+        walk(v, &mut out);
+    }
+    // (In the app menu on a Mac, not in the menus above.)
+    if cfg!(target_os = "macos") {
+        walk(
+            &[ABOUT_ITEM, UPDATES_ITEM, SETTINGS_ITEM, QUIT_ITEM],
+            &mut out,
+        );
+    }
+    out
+}
+
+/// About ZigZag: the app menu's on a Mac, the foot of Help elsewhere.
+pub const ABOUT_ITEM: Entry = Item(Action::About, "About ZigZag", None);
+
+/// Check for Updates…: the app menu's on a Mac, the head of Help elsewhere.
+pub const UPDATES_ITEM: Entry = Item(Action::CheckForUpdates, "Check for Updates…", None);
+
+/// Settings…, ⌘, : the app menu's on a Mac, at the foot of Edit elsewhere.
+pub const SETTINGS_ITEM: Entry = Item(Action::Settings, "Settings…", cmd(Key::Comma));
+
+/// Quit ZigZag, ⌘Q: the app menu's on a Mac, at the foot of File elsewhere.
+pub const QUIT_ITEM: Entry = Item(Action::Quit, "Quit ZigZag", cmd(Key::Q));
+
+/// Locked, or hidden: the Layers list's two columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    Lock,
+    Hide,
+}
+
+impl Studio {
+    /// Lock or unlock, hide or show, the objects `of`. What's locked or
+    /// hidden isn't selected any more: it can't be on the canvas.
+    pub(crate) fn set_flag(&mut self, of: &[usize], flag: Flag, on: bool) {
+        for &i in of {
+            if let Some(s) = self.doc.shapes.get_mut(i) {
+                let to = on.then_some(true);
+                match flag {
+                    Flag::Lock => s.params.lock = to,
+                    Flag::Hide => s.params.hide = to,
+                }
+            }
+        }
+        if on {
+            let keep: Vec<usize> = self
+                .sel_indices()
+                .into_iter()
+                .filter(|&i| self.free(i))
+                .collect();
+            self.set_selection(&keep);
+        }
+    }
+
+    /// Whether every one of `of` is locked (hidden).
+    pub(crate) fn flagged(&self, of: &[usize], flag: Flag) -> bool {
+        !of.is_empty()
+            && of.iter().all(|&i| {
+                self.doc.shapes.get(i).is_some_and(|s| match flag {
+                    Flag::Lock => s.params.locked(),
+                    Flag::Hide => s.params.hidden(),
+                })
+            })
+    }
+
+    pub fn action_enabled(&self, a: Action) -> bool {
+        if cfg!(target_arch = "wasm32") && desktop_only(a) {
+            return false;
+        }
+        if cfg!(not(target_arch = "wasm32")) && browser_only(a) {
+            return false;
+        }
+        let has_sel = !self.sel_indices().is_empty();
+        let has_design = !self.design.blocks.is_empty();
+        match a {
+            Action::Lock | Action::Hide => has_sel,
+            Action::UnlockAll => self.doc.shapes.iter().any(|s| s.params.locked()),
+            Action::ShowAll => self.doc.shapes.iter().any(|s| s.params.hidden()),
+            Action::Undo => !self.undo.is_empty(),
+            Action::Redo => !self.redo.is_empty(),
+            Action::Copy | Action::Duplicate | Action::Delete | Action::Deselect => has_sel,
+            Action::CopySettings
+            | Action::SelectSameKind
+            | Action::ReversePath
+            | Action::TestSwatches => has_sel,
+            Action::PasteSettings => has_sel && self.layout.settings_clip.is_some(),
+            Action::ConvertToText => self.sel_indices().iter().any(|&i| self.doc.records_text(i)),
+            Action::CreateOutlines | Action::ChangeCase(_) | Action::AlignText(_) => self
+                .sel_indices()
+                .iter()
+                .any(|&i| self.doc.lettering(i).is_some()),
+            Action::TypeOnPath => {
+                let sel = self.sel_indices();
+                sel.len() == 2
+                    && sel
+                        .iter()
+                        .filter(|&&i| self.doc.lettering(i).is_some())
+                        .count()
+                        == 1
+            }
+            Action::Paste => !self.layout.clipboard.is_empty(),
+            Action::SelectAll
+            | Action::GroupColors
+            | Action::FitToHoop
+            | Action::CleanUp
+            | Action::SimplifyDesign => !self.doc.shapes.is_empty(),
+            Action::Export(_) | Action::PlayPause => has_design,
+            // (Only for a machine ZigZag sends to.)
+            Action::SendToSkitch => has_design && self.sends_direct(),
+            Action::FlipH
+            | Action::FlipV
+            | Action::RotateLeft
+            | Action::RotateRight
+            | Action::CenterInHoop
+            | Action::TransformAgain
+            | Action::RotateDialog
+            | Action::OffsetPath
+            | Action::OutlineStroke
+            | Action::AddOutline
+            | Action::BreakIntoColumns
+            | Action::ReleaseCompound
+            | Action::SimplifyPath
+            | Action::RoundCorners
+            | Action::BringToFront
+            | Action::BringForward
+            | Action::SendBackward
+            | Action::SendToBack => has_sel,
+            Action::Pathfinder(_) => self.subjects().len() >= 2,
+            Action::RemoveOutline => self
+                .subjects()
+                .iter()
+                .any(|&i| self.outline_index(i).is_some()),
+            Action::NextTab | Action::PreviousTab => self.tab_count() > 1,
+            Action::Kind(k) => self
+                .sel_indices()
+                .iter()
+                .any(|&i| crate::widgets::allowed_kinds(&self.doc.shapes[i]).contains(&k)),
+            _ => true,
+        }
+    }
+
+    pub fn action_checked(&self, a: Action) -> Option<bool> {
+        Some(match a {
+            Action::ToggleGrid => self.view_tools.grid,
+            Action::ToggleSmartGuides => self.view_tools.smart_guides,
+            Action::Units(u) => self.dock.units == u,
+            Action::ChangeCase(c) => {
+                let i = self.sel_index()?;
+                self.doc.lettering(i)?.case == c
+            }
+            Action::AlignText(a) => {
+                let i = self.sel_index()?;
+                self.doc.lettering(i)?.align == a
+            }
+            Action::ToggleTaskBar => self.dock.task_bar,
+            Action::IconicPanels => self.dock.iconic[1],
+            Action::ToggleStitchLines => {
+                self.view_tools.stitch_view == crate::canvas::StitchView::Lines
+            }
+            Action::TogglePoints => self.view_tools.points,
+            Action::ToggleJumps => self.show_jumps,
+            Action::ToggleDensity => self.view_tools.density,
+            Action::ToggleOrder => self.view_tools.order_labels,
+            Action::Panel(p) => self.dock.visible(p),
+            Action::ToggleLeftDock => self.dock.left,
+            Action::ToggleRightDock => self.dock.right,
+            Action::Tool(t) => self.tool == t,
+            Action::Kind(k) => self
+                .sel_index()
+                .is_some_and(|i| self.doc.shapes[i].params.kind.unwrap_or(Kind::Fill) == k),
+            _ => return None,
+        })
+    }
+
+    pub fn run_action(&mut self, a: Action) {
+        // An Open / Save panel is up (a sheet, on macOS, which leaves the
+        // menu bar live): the window waits for it.
+        if self.file_dialog_open() || !self.action_enabled(a) {
+            return;
+        }
+        let c = self.selection_bounds().center();
+        match a {
+            Action::New => {
+                self.new_tab();
+                self.status = "New document.".into();
+            }
+            Action::CloseTab => {
+                // The last, empty tab: ⌘W closes the window, as on macOS.
+                if self.tab_count() == 1 && self.tab_is_blank() {
+                    if let Some(ctx) = &self.egui_ctx {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                } else {
+                    self.close_tab(self.active_tab());
+                }
+            }
+            Action::NextTab => {
+                let n = self.tab_count();
+                self.tabs.pending = Some(crate::tabs::TabOp::Switch((self.active_tab() + 1) % n));
+            }
+            Action::PreviousTab => {
+                let n = self.tab_count();
+                self.tabs.pending =
+                    Some(crate::tabs::TabOp::Switch((self.active_tab() + n - 1) % n));
+            }
+            Action::Open => {
+                let mut exts = vec!["svg"];
+                exts.extend(zigzag::formats::READABLE_FORMATS);
+                exts.extend(zigzag::trace::IMAGE_FORMATS);
+                let req = crate::file_dialog::Request::open()
+                    .filter("Designs", &exts)
+                    .filter("SVG artwork", &["svg"])
+                    .filter("Images to trace", &zigzag::trace::IMAGE_FORMATS)
+                    .filter("Machine files", &zigzag::formats::READABLE_FORMATS);
+                self.file_dialog(req, crate::file_dialog::Then::Open);
+            }
+            Action::Place => {
+                let mut exts = vec!["svg"];
+                exts.extend(zigzag::trace::IMAGE_FORMATS);
+                let req = crate::file_dialog::Request::open().filter("Artwork", &exts);
+                self.file_dialog(req, crate::file_dialog::Then::Place);
+            }
+            Action::Save => {
+                if self.doc.path.is_some() {
+                    self.save(None)
+                } else {
+                    self.save_as_dialog()
+                }
+            }
+            Action::SaveAs => self.save_as_dialog(),
+            Action::AddFonts => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(ctx) = &self.egui_ctx {
+                    crate::platform::add_fonts(ctx);
+                }
+            }
+            Action::Export(ext) => self.export_dialog(ext),
+            Action::SendToSkitch => self.send_action(),
+            Action::Undo => self.pending_history = Some(History::Undo),
+            Action::Redo => self.pending_history = Some(History::Redo),
+            Action::Copy => self.copy_selected(),
+            Action::Paste => self.paste(),
+            Action::Duplicate => self.duplicate_selected(),
+            Action::Delete => self.delete_selection(),
+            Action::SelectAll => {
+                // Inside a group, Select All means everything in it.
+                // (Not what's locked or hidden.)
+                let idx: Vec<usize> = (0..self.doc.shapes.len())
+                    .filter(|&i| self.in_scope(i) && self.free(i))
+                    .collect();
+                self.set_selection(&idx);
+            }
+            Action::Deselect => self.set_selection(&[]),
+            Action::Kind(k) => self.set_kind_selected(k),
+            Action::FlipH => {
+                self.transform_selected(scale_about(c, -1.0, 1.0), "Flipped");
+            }
+            Action::FlipV => {
+                self.transform_selected(scale_about(c, 1.0, -1.0), "Flipped");
+            }
+            Action::RotateLeft => {
+                self.transform_selected(rotate_about(c, -90.0), "Rotated");
+            }
+            Action::RotateRight => {
+                self.transform_selected(rotate_about(c, 90.0), "Rotated");
+            }
+            Action::FitToHoop => {
+                self.fit_to_hoop(false);
+            }
+            Action::CenterInHoop => {
+                self.transform_selected(translation(zigzag::geom::P::default() - c), "Centered");
+            }
+            Action::BringToFront => self.move_selected_to(false),
+            Action::SendToBack => self.move_selected_to(true),
+            Action::BringForward => self.move_selected(1),
+            Action::SendBackward => self.move_selected(-1),
+            Action::GroupColors => self.group_colors(),
+            Action::AddText => self.open_text_window(),
+            Action::Tool(t) => self.set_tool(t),
+            Action::ToggleGrid => self.view_tools.grid = !self.view_tools.grid,
+            Action::Units(u) => self.set_units(u),
+            Action::ToggleSmartGuides => {
+                self.view_tools.smart_guides = !self.view_tools.smart_guides
+            }
+            Action::TransformAgain => self.transform_again(),
+            Action::RotateDialog => self.open_rotate_dialog(None),
+            Action::ToggleTaskBar => self.dock.task_bar = !self.dock.task_bar,
+            Action::IconicPanels => {
+                self.dock.iconic[1] = !self.dock.iconic[1];
+                self.dock_ui.flyout = None;
+            }
+            Action::ResetPanels => {
+                self.dock.reset_layout();
+                self.dock_ui.flyout = None;
+            }
+            Action::AskAgent => self.ask_agent(),
+            Action::ShowIssues => self.open_issues = true,
+            Action::Pathfinder(op) => self.pathfinder_selected(op),
+            Action::OffsetPath => self.layout.offset_dialog = Some(1.0),
+            Action::OutlineStroke => self.outline_stroke_selected(),
+            Action::AddOutline => self.add_outline_selected(),
+            Action::BreakIntoColumns => self.break_into_columns_selected(),
+            Action::RemoveOutline => self.remove_outline_selected(),
+            Action::ReleaseCompound => self.release_compound_selected(),
+            Action::SimplifyPath => self.open_simplify_dialog(),
+            Action::CleanUp => self.open_cleanup_dialog(),
+            Action::SimplifyDesign => self.open_design_dialog(),
+            Action::CopySettings => {
+                if let Some(i) = self.sel_index() {
+                    self.layout.settings_clip = Some(self.doc.shapes[i].params.clone());
+                    self.status =
+                        "Stitch settings copied. Select other objects and Paste Stitch Settings."
+                            .into();
+                }
+            }
+            Action::PasteSettings => self.paste_settings(),
+            Action::SelectSameKind => self.select_same_kind(),
+            Action::ReversePath => self.reverse_paths(),
+            Action::TestSwatches => self.open_swatch_dialog(),
+            Action::CreateOutlines => self.create_outlines(),
+            Action::ConvertToText => self.convert_to_text(),
+            Action::ChangeCase(c) => self.edit_selected_text(|t| t.case = c),
+            Action::AlignText(a) => self.edit_selected_text(|t| t.align = a),
+            Action::TypeOnPath => self.type_on_selected_path(),
+            Action::RoundCorners => self.open_corner_dialog(),
+            Action::ToggleStitchLines => {
+                use crate::canvas::StitchView;
+                self.view_tools.stitch_view = if self.view_tools.stitch_view == StitchView::Lines {
+                    StitchView::Thread
+                } else {
+                    StitchView::Lines
+                };
+            }
+            Action::TogglePoints => self.view_tools.points = !self.view_tools.points,
+            Action::ToggleJumps => self.show_jumps = !self.show_jumps,
+            Action::Settings => self.open_settings(self.settings_ui.section),
+            Action::ReportIssue => crate::sew::open_url(&issue_url()),
+            Action::GitHub => crate::sew::open_url(crate::about::home_url()),
+            Action::CrashLogs => self.show_crash_logs(),
+            Action::About => self.about = true,
+            Action::Quit => self.request_quit(),
+            Action::Lock => {
+                let sel = self.sel_indices();
+                self.set_flag(&sel, Flag::Lock, true);
+            }
+            Action::Hide => {
+                let sel = self.sel_indices();
+                self.set_flag(&sel, Flag::Hide, true);
+            }
+            Action::UnlockAll => {
+                let all: Vec<usize> = (0..self.doc.shapes.len()).collect();
+                self.set_flag(&all, Flag::Lock, false);
+            }
+            Action::ShowAll => {
+                let all: Vec<usize> = (0..self.doc.shapes.len()).collect();
+                self.set_flag(&all, Flag::Hide, false);
+            }
+            Action::CheckForUpdates => {
+                let ctx = self.egui_ctx.clone().unwrap_or_default();
+                self.updater.check(&ctx, true);
+            }
+            Action::ToggleDensity => {
+                self.view_tools.density = !self.view_tools.density;
+                if self.view_tools.density {
+                    let m = self.density_map();
+                    self.status = if m.heavy_cells() == 0 {
+                        format!("No heavy spots: at most {:.1} stitches per mm².", m.peak())
+                    } else {
+                        format!(
+                            "Yellow to red: {} to {} stitches per mm² and up (peak {:.1}). Two fills on top of each other, or dense satin over fill, get there.",
+                            crate::density::HEAVY,
+                            crate::density::TOO_HEAVY,
+                            m.peak()
+                        )
+                    };
+                }
+            }
+            Action::ToggleOrder => self.view_tools.order_labels = !self.view_tools.order_labels,
+            Action::ZoomIn => self.zoom_by(1.25),
+            Action::ZoomOut => self.zoom_by(0.8),
+            Action::ZoomFit => self.request_fit(),
+            Action::PlayPause => self.toggle_play(),
+            Action::Panel(p) => self.dock.toggle(p),
+            Action::ToggleLeftDock => self.dock.left = !self.dock.left,
+            Action::ToggleRightDock => self.dock.right = !self.dock.right,
+        }
+    }
+
+    pub fn set_tool(&mut self, t: Tool) {
+        if self.tool == Tool::Text && t != Tool::Text {
+            self.finish_typing();
+        }
+        // Another tool ends the path being drawn, keeping it (Illustrator).
+        if self.tool == Tool::Pen && t != Tool::Pen && !self.view_tools.pen.is_empty() {
+            self.finish_pen(false);
+        }
+        if self.tool == Tool::Curvature && t != Tool::Curvature {
+            self.finish_curvature(false);
+        }
+        if let Some(slot) = crate::flyout::Group::of(t).and_then(|g| self.view_tools.slot(g)) {
+            *slot = t;
+        }
+        // (The points the Lasso selected are Direct Selection's to move,
+        // and the other way round.)
+        let keep_points = matches!(
+            (self.tool, t),
+            (Tool::Lasso, Tool::Direct) | (Tool::Direct, Tool::Lasso)
+        );
+        self.tool = t;
+        self.view_tools.pen.clear();
+        if !keep_points {
+            self.path_edit.selected.clear();
+        }
+        self.cancel_point_drag();
+        self.path_edit.show_all = false;
+    }
+
+    /// Keyboard shortcuts for every action. With the macOS menu bar active,
+    /// ⌘-shortcuts arrive as menu events instead and are skipped here.
+    pub fn action_shortcuts(&mut self, ctx: &egui::Context) {
+        // Typing with the Type tool: every key is text.
+        if self.lettering.typing.is_some() {
+            return;
+        }
+        let typing = ctx.egui_wants_keyboard_input();
+        let native = self.native_menu_active();
+        let mut todo = Vec::new();
+        let mut shape = None;
+        // Shift+C is the Anchor Point tool: taken before the plain C (Contour)
+        // shortcut, which would match it too.
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::C))
+        {
+            self.set_tool(Tool::Anchor);
+            return;
+        }
+        // Shift+M, Shift+B and Shift+` are the Shape Builder, the Blob Brush
+        // and Curvature, as in Illustrator: taken before M and B alone.
+        if !ctx.egui_wants_keyboard_input() {
+            let t = ctx.input_mut(|i| {
+                [
+                    (Key::M, Tool::ShapeBuilder),
+                    (Key::B, Tool::Blob),
+                    (Key::Backtick, Tool::Curvature),
+                ]
+                .into_iter()
+                .find(|(k, _)| i.consume_key(Modifiers::SHIFT, *k))
+                .map(|(_, t)| t)
+            });
+            if let Some(t) = t {
+                self.set_tool(t);
+                return;
+            }
+        }
+        // + (or =) and - : Add and Delete Anchor Point, as in Illustrator.
+        if !ctx.egui_wants_keyboard_input() {
+            let (add, del) = ctx.input_mut(|i| {
+                let add = i.consume_key(Modifiers::NONE, Key::Plus)
+                    || i.consume_key(Modifiers::SHIFT, Key::Plus)
+                    || i.consume_key(Modifiers::NONE, Key::Equals)
+                    || i.consume_key(Modifiers::SHIFT, Key::Equals);
+                let del = i.consume_key(Modifiers::NONE, Key::Minus);
+                (add, del)
+            });
+            if add {
+                self.set_tool(Tool::AddAnchor);
+                return;
+            }
+            if del {
+                self.set_tool(Tool::DeleteAnchor);
+                return;
+            }
+        }
+        let mut all = all_actions();
+        // ⇧ variants first: egui matches ⌘Z inside ⌘⇧Z otherwise.
+        all.sort_by_key(|(_, _, s)| std::cmp::Reverse(s.is_some_and(|s| s.shift)));
+        ctx.input_mut(|i| {
+            for (a, _, sc) in &all {
+                let Some(sc) = sc else { continue };
+                // Space is handled by the canvas: hold to pan, tap to play.
+                if *a == Action::PlayPause {
+                    continue;
+                }
+                if (native && sc.cmd)
+                    || (typing
+                        && !matches!(
+                            a,
+                            Action::Save
+                                | Action::SaveAs
+                                | Action::Open
+                                | Action::New
+                                | Action::CloseTab
+                        ))
+                {
+                    continue;
+                }
+                if !sc.cmd && (i.modifiers.command || i.modifiers.alt) {
+                    continue;
+                }
+                if i.consume_shortcut(&sc.egui()) {
+                    todo.push(*a);
+                }
+            }
+            // (Copy / paste arrive as clipboard events on most platforms:
+            // `layout_shortcuts` takes those. Taking them here as well
+            // pasted twice.)
+            if !typing {
+                for (t, _, key) in TOOLS {
+                    if !i.modifiers.command && i.key_pressed(key) {
+                        todo.push(Action::Tool(t));
+                    }
+                }
+                // Shape tools, as in Illustrator: M rectangle, L ellipse, \ line.
+                for (k, key) in [
+                    (ShapeKind::Rect, Key::M),
+                    (ShapeKind::Ellipse, Key::L),
+                    (ShapeKind::Line, Key::Backslash),
+                ] {
+                    if !i.modifiers.command && i.key_pressed(key) {
+                        shape = Some(k);
+                    }
+                }
+                if i.key_pressed(Key::Delete) && !i.modifiers.command {
+                    todo.push(Action::Delete);
+                }
+            }
+        });
+        todo.dedup();
+        if let Some(k) = shape {
+            self.shapes.kind = k;
+            todo.retain(|a| *a != Action::Tool(Tool::Shape));
+            self.set_tool(Tool::Shape);
+        }
+        for a in todo {
+            self.run_action(a);
+        }
+    }
+
+    /// In-window menus (Linux, Windows). macOS uses the real menu bar.
+    pub fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        // Plain menu buttons (not a MenuBar, which claims the whole row).
+        ui.scope(|ui| {
+            ui.visuals_mut().button_frame = false;
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (title, entries) in menus() {
+                ui.menu_button(title, |ui| self.menu_entries(ui, &ctx, &entries));
+            }
+        });
+    }
+
+    fn menu_entries(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, entries: &[Entry]) {
+        ui.set_min_width(220.0);
+        for e in entries {
+            match e {
+                Sep => {
+                    ui.separator();
+                }
+                Sub(title, v) => {
+                    ui.menu_button(*title, |ui| self.menu_entries(ui, ctx, v));
+                }
+                Item(a, label, sc) => {
+                    let checked = self.action_checked(*a).unwrap_or(false);
+                    // The check is drawn, not typed: the fallback UI fonts
+                    // (Arial on Windows) have no ✓ and show a box instead.
+                    let mut b = egui::Button::new(format!("      {label}"));
+                    if let Some(sc) = sc {
+                        b = b.shortcut_text(ctx.format_shortcut(&sc.egui()));
+                    }
+                    let resp = ui.add_enabled(self.action_enabled(*a), b);
+                    if checked {
+                        let x = resp.rect.left() + ui.spacing().button_padding.x + 6.0;
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(x, resp.rect.center().y),
+                            egui::Vec2::splat(12.0),
+                        );
+                        crate::icons::paint(
+                            ui.painter(),
+                            r,
+                            crate::icons::Icon::Check,
+                            ui.visuals().text_color(),
+                        );
+                    }
+                    if resp.clicked() {
+                        self.run_action(*a);
+                        ui.close();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn zoom_by(&mut self, f: f32) {
+        let rect = self.canvas_rect;
+        if rect.width() > 0.0 {
+            self.view.zoom_at(rect, rect.center(), f);
+        }
+    }
+
+    pub fn native_menu_active(&self) -> bool {
+        self.native_menu.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_reports_an_issue_on_github_saying_which_zigzag() {
+        let help = menus().pop().unwrap();
+        assert_eq!(help.0, "Help");
+        let has = |a: Action| help.1.iter().any(|e| matches!(e, Item(x, _, _) if *x == a));
+        assert!(has(Action::ReportIssue) && has(Action::GitHub) && has(Action::CrashLogs));
+        // About is in Help where there's no app menu for it: once, anywhere.
+        assert_eq!(has(Action::About), !cfg!(target_os = "macos"));
+        assert_eq!(
+            all_actions()
+                .iter()
+                .filter(|a| a.0 == Action::About)
+                .count(),
+            1
+        );
+        // Check for Updates is there too, where a Mac has it: once.
+        assert_eq!(
+            all_actions()
+                .iter()
+                .filter(|a| a.0 == Action::CheckForUpdates)
+                .count(),
+            1
+        );
+        let url = issue_url();
+        let (page, body) = url.split_once("?body=").unwrap();
+        assert_eq!(page, "https://github.com/simpsoka/zigzag/issues/new");
+        // One word to the browser: nothing in it that ends or splits a URL.
+        assert!(
+            body.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.~%".contains(&b))
+        );
+        assert!(body.contains(&format!("ZigZag%20{}%20on", env!("CARGO_PKG_VERSION"))));
+        assert!(body.starts_with("%2A%2AWhat%20happened%2A%2A%0A"));
+    }
+}

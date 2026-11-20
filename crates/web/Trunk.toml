@@ -1,0 +1,15 @@
+# `trunk serve` / `trunk build`, run in this folder (or from anywhere with
+# `--config crates/web/Trunk.toml`).
+
+[build]
+target = "index.html"
+dist = "dist"
+# The engine is slow unoptimized: always the release build.
+release = true
+
+[watch]
+# The page's crate, the studio's and the engine's.
+watch = ["index.html", "src", "assets", "Cargo.toml", "../studio", "../../src", "../../vendor"]
+
+[serve]
+port = 8087

@@ -1,0 +1,4 @@
+# Runs the WebAssembly tests (crates/web: cargo test --target wasm32-unknown-unknown).
+# Needs wasm-bindgen-cli, at the version in Cargo.lock.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

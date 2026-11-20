@@ -7,6 +7,11 @@ fn main() {
     // resource compiled in by winresource. Elsewhere this file is a no-op.
     #[cfg(windows)]
     {
+        // Only for a Windows target: a build for another one from a Windows
+        // machine (WebAssembly, say) has no .exe to put it in.
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+            return;
+        }
         let icon = std::path::Path::new("packaging/windows/AppIcon.ico");
         if !icon.exists() {
             println!(

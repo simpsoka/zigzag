@@ -8,7 +8,9 @@ use super::session::Transport;
 use crate::formats::pen::{self, COLOR_END};
 use anyhow::{Result, bail};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// `std`'s clock on the desktop; the browser's where `std` has none.
+use web_time::Instant;
 
 /// How the simulated machine behaves.
 #[derive(Clone, Copy, Debug)]
@@ -352,8 +354,9 @@ impl State {
     }
 }
 
+#[maybe_async::maybe_async(?Send)]
 impl Transport for Sim {
-    fn request(&mut self, command: u16, payload: &[u8]) -> Result<Vec<u8>> {
+    async fn request(&mut self, command: u16, payload: &[u8]) -> Result<Vec<u8>> {
         let mut s = self.0.lock().unwrap();
         if !s.connected {
             bail!("the machine went away");
@@ -368,11 +371,11 @@ impl Transport for Sim {
         Ok(r)
     }
 
-    fn read(&mut self) -> Result<Vec<u8>> {
+    async fn read(&mut self) -> Result<Vec<u8>> {
         Ok(self.0.lock().unwrap().reply.clone())
     }
 
-    fn send(&mut self, command: u16, payload: &[u8]) -> Result<()> {
+    async fn send(&mut self, command: u16, payload: &[u8]) -> Result<()> {
         let mut s = self.0.lock().unwrap();
         if !s.connected {
             bail!("the machine went away");

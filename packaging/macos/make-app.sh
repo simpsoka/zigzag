@@ -113,19 +113,20 @@ if ! grep -q "<!-- Cargo.lock: $lock -->" THIRD-PARTY-NOTICES.md 2>/dev/null; th
     fi
 fi
 
-FEATURES="${FEATURES:-gui,ble}"
+# (The studio is its own package, crates/studio: features are named by package.)
+FEATURES="${FEATURES:-zigzag/ble,zigzag-studio/ble}"
 BINS="zigzag-studio zigzag zigzag-mcp"
-version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 # The oldest macOS the app runs on (Info.plist's LSMinimumSystemVersion):
 # the binaries are built for it too.
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 build() { # build [target triple]
     if [[ -n "$1" ]]; then
-        cargo build --release --features "$FEATURES" --target "$1" \
+        cargo build --release -p zigzag -p zigzag-studio --features "$FEATURES" --target "$1" \
             --bin zigzag-studio --bin zigzag --bin zigzag-mcp
     else
-        cargo build --release --features "$FEATURES" \
+        cargo build --release -p zigzag -p zigzag-studio --features "$FEATURES" \
             --bin zigzag-studio --bin zigzag --bin zigzag-mcp
     fi
 }

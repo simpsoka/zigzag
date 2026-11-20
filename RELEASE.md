@@ -19,7 +19,8 @@ your Mac's keychain.
 
 ### Publish
 
-1. Update `version` in `Cargo.toml` and regenerate `Cargo.lock` with Cargo.
+1. Update `version` in `Cargo.toml` (`[workspace.package]`, the one for
+   every package) and regenerate `Cargo.lock` with Cargo.
    If the lockfile changes, regenerate `THIRD-PARTY-NOTICES.md` with
    `packaging/licenses/generate.sh`.
 2. Add `packaging/releases/<version>.md` with the release notes and update
@@ -169,7 +170,8 @@ harmless as long as the source PNG is up to date.
 ## Linux
 
 `.github/workflows/linux-release.yml` builds the editor, CLI, and MCP bridge
-with `gui,ble` from the published release tag. It runs on `ubuntu-24.04`
+with Bluetooth (`zigzag/ble,zigzag-studio/ble`; `gui,ble` for tags from
+before the workspace) from the published release tag. It runs on `ubuntu-24.04`
 inside an Ubuntu 22.04 container, keeping the glibc requirement at 2.35.
 The first supported architecture is x86-64 (`x86_64-unknown-linux-gnu`).
 

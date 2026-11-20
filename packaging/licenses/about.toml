@@ -1,5 +1,5 @@
 # cargo-about configuration: the libraries in the macOS app (both
-# architectures, built with gui,ble). Regenerate THIRD-PARTY-NOTICES.md after
+# architectures, built with Bluetooth: zigzag-studio with `ble`). Regenerate THIRD-PARTY-NOTICES.md after
 # changing dependencies:
 #   packaging/licenses/generate.sh
 #

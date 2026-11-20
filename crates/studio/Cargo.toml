@@ -1,0 +1,79 @@
+[package]
+name = "zigzag-studio"
+description = "The ZigZag studio: the visual embroidery editor (egui), as a library and the desktop app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[lib]
+name = "zigzag_studio"
+path = "src/lib.rs"
+
+# The desktop app. `cargo run --release -p zigzag-studio --features ble`
+[[bin]]
+name = "zigzag-studio"
+path = "src/main.rs"
+
+[dependencies]
+zigzag = { path = "../.." }
+anyhow = "1"
+serde_json = "1.0.154"
+base64 = "0.23.1"
+usvg = "0.45"
+resvg = { version = "0.45", default-features = false }
+# File panels: the system's on the desktop, the browser's in it.
+rfd = "0.17"
+# The agents' (MCP) server. (Compiled in the browser too, and never started
+# there: agents reach the page through crates/relay.)
+tiny_http = "0.12"
+# `Instant` that works in the browser too (std's there panics).
+web-time = "1"
+# Only the glow (OpenGL / WebGL 2) renderer is compiled in; no wgpu.
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.37", default-features = false, features = [
+    "glow", "default_fonts", "accesskit", "clipboard", "x11", "wayland", "__screenshot",
+] }
+# The machine worker blocks on the desktop (see zigzag's src/machine).
+maybe-async = { version = "0.2", features = ["is_sync"] }
+
+# The browser: its APIs, and the async machine worker.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+maybe-async = "0.2"
+async-trait = "0.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "HtmlAnchorElement", "Blob", "Url", "console", "Event", "EventTarget", "BeforeUnloadEvent"] }
+
+# The macOS menu bar. Elsewhere the menus are drawn in the window.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+# Lets the native menu code be compile-checked on Linux (needs GTK 3 dev files).
+[target.'cfg(target_os = "linux")'.dependencies]
+muda = { version = "0.21", optional = true }
+
+[features]
+default = []
+# Talk to a real Brother Skitch over Bluetooth (the simulated machine is
+# always there). On the desktop this is zigzag's own Bluetooth; in the
+# browser, Web Bluetooth (src/platform).
+ble = ["zigzag/ble"]
+menu-check = ["dep:muda"]
+
+# Embeds the app icon and version metadata in zigzag-studio.exe.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+egui_kittest = "0.37"
+# (Some tests build trace input directly.)
+vectorcraft-trace = { path = "../../vendor/vectorcraft-trace" }

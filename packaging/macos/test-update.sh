@@ -54,5 +54,5 @@ feed "$work/bad/SHA256SUMS.txt" "$work/latest-bad.json"
 ZIGZAG_TEST_APP="$work/Applications/ZigZag.app" \
 ZIGZAG_TEST_FEED="file://$work/latest.json" \
 ZIGZAG_TEST_BAD_FEED="file://$work/latest-bad.json" \
-    cargo test --features gui --bin zigzag-studio -- --ignored --exact update::tests::installs_a_release_made_here
+    cargo test -p zigzag-studio --lib -- --ignored --exact update::tests::installs_a_release_made_here
 echo "The updater installed $new over $(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1), and left nothing behind."

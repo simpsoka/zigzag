@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ZZZ</title>
+    <link data-trunk rel="rust" data-wasm-opt="2" />
+    <!-- Fonts to embroider in, fetched after the studio is up (crates/studio/src/platform/files.js). -->
+    <link data-trunk rel="copy-dir" href="assets/fonts/library" />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1b; }
+      body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8e6e1; }
+      canvas { display: block; width: 100%; height: 100%; outline: none; }
+      /* What's shown over the canvas: loading, a browser that won't do, a failure. */
+      .notice {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 10px;
+        padding: 24px; text-align: center; background: #1b1b1b;
+      }
+      .notice[hidden] { display: none; }
+      .notice h1 { margin: 0; font-size: 44px; font-weight: 700; letter-spacing: 0.12em; }
+      .notice p { margin: 0; max-width: 34em; color: #b9b5ad; }
+      .notice pre {
+        max-width: min(90vw, 60em); max-height: 30vh; overflow: auto; margin: 6px 0 0;
+        padding: 10px 12px; text-align: left; white-space: pre-wrap;
+        font: 12px/1.45 ui-monospace, Consolas, monospace; color: #b9b5ad;
+        background: #262626; border-radius: 6px;
+      }
+      .notice button {
+        margin-top: 8px; padding: 8px 18px; font: inherit; color: #1b1b1b;
+        background: #e8e6e1; border: 0; border-radius: 6px; cursor: pointer;
+      }
+      .notice button.quiet { color: #b9b5ad; background: none; text-decoration: underline; }
+      .notice a { color: #e8e6e1; }
+    </style>
+    <script>
+      // For automated checks (`?keep-frame`): keeps each frame's pixels, so
+      // the canvas can be read back as a picture.
+      if (new URLSearchParams(location.search).has("keep-frame")) {
+        const getContext = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function (type, options) {
+          return getContext.call(this, type, { ...options, preserveDrawingBuffer: true });
+        };
+      }
+
+      const show = (id) => {
+        for (const n of document.querySelectorAll(".notice")) n.hidden = n.id !== id;
+      };
+
+      // Called by the app (src/lib.rs): it's on screen; it went down.
+      window.zzzStarted = () => show(null);
+      window.zzzFailed = (what) => {
+        document.getElementById("failure-text").textContent = what;
+        show("failed");
+      };
+
+      // ZZZ is made for Chrome and Edge: it draws with WebGL 2 (without it
+      // there is nothing to show), saves through the File System Access API
+      // and talks to the machine over Web Bluetooth.
+      window.addEventListener("DOMContentLoaded", () => {
+        const gl2 = !!document.createElement("canvas").getContext("webgl2");
+        if (!gl2) {
+          document.getElementById("unsupported-why").textContent =
+            "This browser can't draw it (it has no WebGL 2).";
+          document.getElementById("anyway").hidden = true;
+          show("unsupported");
+        } else if (!("bluetooth" in navigator) || !("showSaveFilePicker" in window)) {
+          if (!sessionStorage.getItem("zzz-anyway")) show("unsupported");
+        }
+        document.getElementById("anyway").addEventListener("click", () => {
+          sessionStorage.setItem("zzz-anyway", "1");
+          show(window.zzzIsUp ? null : "loading");
+        });
+        document.getElementById("reload").addEventListener("click", () => location.reload());
+      });
+      // (If the app came up while the browser notice was showing, leave the notice.)
+      const started = window.zzzStarted;
+      window.zzzStarted = () => {
+        window.zzzIsUp = true;
+        if (document.getElementById("unsupported").hidden) started();
+      };
+    </script>
+  </head>
+  <body>
+    <canvas id="zzz"></canvas>
+
+    <div class="notice" id="loading">
+      <h1>ZZZ</h1>
+      <p>Loading the studio…</p>
+    </div>
+
+    <div class="notice" id="unsupported" hidden>
+      <h1>ZZZ</h1>
+      <p id="unsupported-why">
+        ZZZ is made for Chrome and Edge on a computer. In this browser, saving back to a file
+        and sending to the machine over Bluetooth won't work.
+      </p>
+      <button id="anyway" class="quiet">Open it anyway</button>
+    </div>
+
+    <div class="notice" id="failed" hidden>
+      <h1>ZZZ</h1>
+      <p>Something went wrong and ZZZ stopped. Reloading starts it again.</p>
+      <pre id="failure-text"></pre>
+      <button id="reload">Reload</button>
+    </div>
+  </body>
+</html>
