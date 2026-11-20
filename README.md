@@ -229,7 +229,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Pen** (P): draw filled shapes or lines with corners and curves, or place manual stitches one by one. Snaps to the grid when it's showing, else to smart guides.
 - **Shapes** (M, L, \\): rectangles (with rounded corners), ellipses, polygons, stars and lines.
 - **Measure**, **mm grid**, **needle points**, **First/Last**, **Group colors**.
-- **Open machine files** (PES, PEC, DST, EXP, JEF) to view, resize and re-export them, and **images** to trace.
+- **Open machine files** (PES, PEC, DST, EXP, JEF, VP3) to view, resize and re-export them, and **images** to trace.
 - **Settings per type:** fill angle (with a drag-to-set **angle tool**, `A`), spacing, length, pull, underlay. Satin options: column vs border, stitch (satin, S-stitch, zig-zag), threads across the column, width, underlay passes, short stitches. Contour and ripple: rings or spiral. Cross-stitch: cell size. Tartan: the stripes (color and width each, mirrored), angle, row spacing. Run options: single or triple.
 - **Lean** in the Stitch panel, for satins: how far the stitches lean from square across the column (a few degrees keeps them from sinking between a knit's rows; more shows a slant, like a leaf's veins).
 - **Zigzag: Even** in the Stitch panel, for satins: each step along the column is shared between the stitch over and the stitch back, so both slant the same and a narrow stem's edges are clean. Off, one stitch goes straight across and the next takes the whole step.

@@ -26,7 +26,7 @@ pub const MACHINE_FORMATS: [(&str, &str); 7] = [
 ];
 
 /// Machine files ZigZag can open.
-pub const READABLE_FORMATS: [&str; 5] = ["pes", "pec", "dst", "exp", "jef"];
+pub const READABLE_FORMATS: [&str; 6] = ["pes", "pec", "dst", "exp", "jef", "vp3"];
 
 /// Encode a design in the machine format for `ext` (no preview formats),
 /// with the usual locks and no shortest stitch.
