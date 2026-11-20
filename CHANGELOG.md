@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- File › Place… (⇧⌘P, was Place SVG…) also takes PES, PEC, DST, EXP
+  and JEF files, putting them in the open design as Embrilliance's Merge
+  does: at their real size, as one group named after the file in the
+  Layers list, sewn after what's there. Agents can do it with
+  `place_file`, and the CLI with `zigzag convert … --place FILE[@X,Y]`.
+
 ## 0.1.6 — 2026-11-19
 
 - Satin lettering is read stroke by stroke, with Corners (Cut, Auto or

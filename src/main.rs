@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -36,6 +36,13 @@ enum Cmd {
         /// each stitch, jump and trim in it is for.
         #[arg(long)]
         objects: bool,
+        /// Place another file in the design (Illustrator's Place;
+        /// Embrilliance calls it Merge): a PES, PEC, DST, EXP or JEF file at
+        /// its real size, or an SVG or image. Centered in the hoop, or
+        /// FILE@X,Y for a center X mm right and Y mm below the hoop's.
+        /// Repeat for more; each is sewn after the ones before.
+        #[arg(long, value_name = "FILE[@X,Y]", value_parser = parse_place)]
+        place: Vec<(PathBuf, Option<(f64, f64)>)>,
         #[command(flatten)]
         settings: SettingsArgs,
     },
@@ -215,10 +222,21 @@ fn main() -> Result<()> {
             out,
             hoop,
             objects,
+            place,
             settings,
         } => {
             let t0 = Instant::now();
-            let doc = settings.open(&input)?;
+            let mut doc = settings.open(&input)?;
+            for (file, at) in &place {
+                let at = zigzag::document::Placement {
+                    center_mm: *at,
+                    ..Default::default()
+                };
+                let added = doc
+                    .place_file(file, at)
+                    .with_context(|| format!("placing {}", file.display()))?;
+                eprintln!("placed {} ({} objects)", file.display(), added.len());
+            }
             let hoop = hoop.unwrap_or(doc.settings.hoop);
             let t_load = t0.elapsed();
             let d = doc.plan();
@@ -324,6 +342,19 @@ fn ms(d: std::time::Duration) -> f64 {
 }
 
 /// `--hoop`: `130x180`, or `100` for a square.
+/// `FILE` or `FILE@X,Y` (mm from the hoop's center).
+fn parse_place(v: &str) -> std::result::Result<(PathBuf, Option<(f64, f64)>), String> {
+    if let Some((file, at)) = v.rsplit_once('@')
+        && let Some((x, y)) = at.split_once(',')
+        && let (Ok(x), Ok(y)) = (x.trim().parse::<f64>(), y.trim().parse::<f64>())
+        && x.is_finite()
+        && y.is_finite()
+    {
+        return Ok((PathBuf::from(file), Some((x, y))));
+    }
+    Ok((PathBuf::from(v), None))
+}
+
 fn parse_hoop(v: &str) -> std::result::Result<(f64, f64), String> {
     let square = || v.parse::<f64>().ok().map(|s| format!("{s}x{s}"));
     zigzag::document::parse_hoop(v)

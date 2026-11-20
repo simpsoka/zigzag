@@ -1177,8 +1177,13 @@ impl Studio {
         }
     }
 
-    /// Add an SVG file's artwork to the document (Illustrator's Place).
-    pub fn place_svg(&mut self, path: &Path) {
+    /// Add a file to the document (Illustrator's Place): SVG artwork, an
+    /// image to trace, or a machine file's stitches.
+    pub fn place_file(&mut self, path: &Path) {
+        if is_machine_file(path) {
+            self.place_stitches(path);
+            return;
+        }
         if path
             .extension()
             .is_some_and(|e| zigzag::trace::is_image(&e.to_string_lossy()))
@@ -1212,6 +1217,65 @@ impl Studio {
             Err(e) => self.status = format!("Couldn't place {}: {e:#}", path.display()),
         }
     }
+}
+
+impl Studio {
+    /// Place a machine file (Embrilliance's Merge): its stitches come in
+    /// at their real size, centered in the hoop, as one group named after
+    /// the file, on top of what's there (sewn last). They're selected, to
+    /// move into place; one undo takes them out.
+    fn place_stitches(&mut self, path: &Path) {
+        let mut added = Vec::new();
+        match self.structural(|d| {
+            added = d.place_file(path, zigzag::document::Placement::default())?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                self.set_selection(&added);
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let b = merged_bounds(&self.doc, &added);
+                let (hw, hh) = self.hoop_dims();
+                // Stitches aren't scaled to fit: scaled, a machine file's
+                // density changes (Embrilliance's Merge keeps the size too).
+                self.status = if b.width() > hw * 10.0 + 0.5 || b.height() > hh * 10.0 + 0.5 {
+                    format!(
+                        "Placed {name} ({:.0} × {:.0} mm): it's bigger than the {hw:.0} × {hh:.0} mm hoop.",
+                        b.width() / 10.0,
+                        b.height() / 10.0
+                    )
+                } else {
+                    format!(
+                        "Placed {name} ({:.0} × {:.0} mm, {} objects).",
+                        b.width() / 10.0,
+                        b.height() / 10.0,
+                        added.len()
+                    )
+                };
+            }
+            Err(e) => self.status = format!("Couldn't place {}: {e:#}", path.display()),
+        }
+    }
+}
+
+/// Where placed stitches fall: their needle points, without the width of
+/// the line they're drawn with.
+pub(crate) fn merged_bounds(
+    doc: &zigzag::document::Document,
+    idx: &[usize],
+) -> zigzag::geom::Bounds {
+    let shapes: Vec<_> = idx.iter().map(|&i| doc.shapes[i].clone()).collect();
+    zigzag::svg::shapes_bounds(&shapes)
+}
+
+/// A PES, PEC, DST, EXP or JEF file, by its extension.
+fn is_machine_file(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        zigzag::formats::READABLE_FORMATS
+            .contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
+    })
 }
 
 impl eframe::App for Studio {

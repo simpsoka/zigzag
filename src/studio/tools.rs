@@ -1,6 +1,6 @@
 //! MCP tools: what agents can do with the live studio document.
 
-use crate::app::{HOOPS, SPM, Studio, shape_bounds};
+use crate::app::{HOOPS, SPM, Studio, merged_bounds, shape_bounds};
 use crate::mcp::{Content, ToolResult};
 use crate::widgets::{allowed_kinds, kind_name};
 use serde_json::{Value, json};
@@ -21,7 +21,7 @@ Settings can also be preset in SVG element ids, e.g. id=\"logo_fill_a=45\" or id
 An object is named for its id without the settings (id=\"Face_mask_fill\" is \"Face mask\"); name it to a tool by that name, by the id, or by its index. \
 list_machines and set_document's machine set a document up for a machine: its hoop, the file it reads, its shortest stitch and its lock stitches. \
 Hat designs are small (about 50 × 50 mm on the front of a cap): keep satin columns under 7 mm wide, letters at least 5 mm tall, and details at least 1.5 mm. \
-open_file also opens machine files (pes, pec, dst, exp, jef) as manual stitches. \
+open_file also opens machine files (pes, pec, dst, exp, jef) as manual stitches; place_file adds one to the open design instead, at its real size, as one group named after the file. \
 trace_image turns a logo (PNG, JPEG, WebP, GIF, BMP or TIFF) into shapes (snap colors to Brother or Janome threads with `threads`). simplify_design makes the whole design quicker to sew (fewer threads, no details too small to sew, fewer trims; try it with dry_run first to see what it comes to). add_outline gives a filled shape an outline (a running stitch, or satin) that is an object of its own, named \"<shape> (outline)\", with its own thread and stitch type. round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
 To make satin stitching cleaner: measure_stitching counts what shows (stitches outside the shape, bare cloth, crowded needle points, seams, piled satin, travel in sight, trims); change one thing (a letter's corners with set_object cut or mitred, its zigzag with even, its lean, underlay or pull; or break_into_columns and then move_object to reorder the columns and edit_path to move a rail's points or add, move or delete a rung, reading them first with get_path); measure again passing the first result's measures as `before`, keep the change if the verdict is better and undo it if it's worse; and look at render_preview, which sees what the numbers don't. Text is made shapes with create_outlines before its columns or points can be changed. Before breaking a shape into columns, duplicate it and set the copy's kind to skip, to pass as measure_stitching's `within` (the outline the columns are held to); delete the copy when done. \
 Use batch to make several changes in one call: it is all or nothing and one undo step, each step is {\"tool\": name, \"arguments\": {…}}, and later steps can use earlier results (\"$0.added.0.name\"). \
@@ -445,6 +445,19 @@ pub fn tool_specs() -> Value {
             "name": "export",
             "description": "Write a machine file: pes (Brother, Baby Lock), dst (Tajima, most commercial machines), exp (Melco, Bernina), jef (Janome), vp3 (Husqvarna Viking, Pfaff), pec, or pen (raw Skitch stream). Or html: a printable production worksheet (picture, size, time, thread list with Brother/Janome names). Without a format, the one the path ends in (.dst), or else the one the document's machine reads.",
             "inputSchema": { "type": "object", "properties": { "format": { "type": "string", "enum": ["pes", "dst", "exp", "jef", "vp3", "pec", "pen", "html"] }, "path": { "type": "string", "description": "Absolute output path." }, "objects": { "type": "boolean", "description": "Also write PATH.objects.json beside a machine file: which object each stitch, jump and trim in it is for (the objects, and the runs of commands for each, numbered as the file has them), so a checker can name the shape behind a stitch. Not for pen or html. Default false." } }, "required": ["path"] }
+        }),
+        json!({
+            "name": "place_file",
+            "description": "Place a file in the open design (Illustrator's Place; Embrilliance calls it Merge). A machine file (pes, pec, dst, exp, jef) comes in as manual-stitch objects at its real size (not scaled, which would change its density), one per run, inside one group named after the file, on top of what's there (sewn last). Move them with transform_objects. An SVG file is placed as add_svg places it, and an image is traced with default settings (use trace_image for more control).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the file." },
+                    "x_mm": { "type": "number", "description": "Center of the merged design, mm right of the hoop center. Default 0." },
+                    "y_mm": { "type": "number", "description": "Center of the merged design, mm below the hoop center. Default 0." }
+                },
+                "required": ["path"]
+            }
         }),
         json!({
             "name": "trace_image",
@@ -1154,6 +1167,7 @@ impl Studio {
         let result = match name {
             "batch" => return self.tool_batch(args),
             "trace_image" => self.tool_trace_image(args),
+            "place_file" => self.tool_place_file(args),
             "round_corners" => self.tool_round_corners(args),
             "break_into_columns" => self.tool_break_into_columns(args),
             "create_outlines" => self.tool_create_outlines(args),
@@ -1641,6 +1655,41 @@ impl Studio {
         let mut out = ToolResult::json(&json!({ "results": report }));
         out.content.extend(images);
         out
+    }
+
+    fn tool_place_file(&mut self, args: &Value) -> Result<ToolResult, String> {
+        let path = match args.get("path").and_then(Value::as_str).map(PathBuf::from) {
+            Some(p) if p.is_absolute() => p,
+            _ => return Err("path must be absolute".into()),
+        };
+        let num = |k: &str| {
+            args.get(k)
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite())
+        };
+        let place = Placement {
+            center_mm: Some((num("x_mm").unwrap_or(0.0), num("y_mm").unwrap_or(0.0))),
+            ..Placement::default()
+        };
+        let mut added = Vec::new();
+        self.structural(|d| {
+            added = d.place_file(&path, place)?;
+            Ok(())
+        })
+        .map_err(|e| format!("couldn't place {}: {e:#}", path.display()))?;
+        self.replan_soon();
+        self.fit_view();
+        let b = merged_bounds(&self.doc, &added);
+        let (hw, hh) = self.hoop_dims();
+        let objs: Vec<Value> = added.iter().map(|&i| self.object_json(i)).collect();
+        Ok(ToolResult::json(&json!({
+            "added": objs,
+            "width_mm": b.width().round() / 10.0,
+            "height_mm": b.height().round() / 10.0,
+            "fits_hoop": b.width() <= hw * 10.0 + 0.5 && b.height() <= hh * 10.0 + 0.5,
+            "total_objects": self.doc.shapes.len(),
+            "design_problems": self.issues.iter().filter(|x| x.shape.is_none()).map(|x| issue_json(x, &self.names)).collect::<Vec<_>>(),
+        })))
     }
 
     fn tool_trace_image(&mut self, args: &Value) -> Result<ToolResult, String> {
@@ -3020,6 +3069,72 @@ mod tests {
     fn ok(r: ToolResult) -> Value {
         assert!(!r.is_error, "tool failed: {}", text(&r));
         serde_json::from_str(&text(&r)).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn place_file_adds_a_machine_file_to_the_open_design() {
+        use zigzag::design::{Block, Design, Run};
+        let run = |pts: &[(f64, f64)]| Run {
+            pts: pts.iter().map(|&(x, y)| P::new(x, y)).collect(),
+            trim_before: true,
+        };
+        let star = Design {
+            name: "star".into(),
+            blocks: vec![
+                Block {
+                    color: [255, 200, 0],
+                    runs: vec![run(&[(-100.0, 0.0), (0.0, -60.0), (100.0, 0.0)])],
+                },
+                Block {
+                    color: [20, 50, 190],
+                    runs: vec![run(&[(-100.0, 60.0), (100.0, 60.0)])],
+                },
+            ],
+            ..Design::default()
+        };
+        let dir = std::env::temp_dir().join(format!("zigzag-merge-tool-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gold star.dst");
+        std::fs::write(&path, zigzag::formats::dst::write_dst(&star)).unwrap();
+
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool("add_svg", &json!({ "svg": BADGE, "replace": true })));
+        let n = s.doc.shapes.len();
+        let undo = s.undo.len();
+        let r = ok(s.run_tool(
+            "place_file",
+            &json!({ "path": path.to_str().unwrap(), "x_mm": 10.0, "y_mm": 5.0 }),
+        ));
+        assert_eq!(r["added"].as_array().unwrap().len(), 2, "{r}");
+        assert_eq!(r["width_mm"], 20.0, "kept its size: {r}");
+        assert_eq!(r["height_mm"], 12.0, "{r}");
+        assert_eq!(r["fits_hoop"], true);
+        assert_eq!(s.doc.shapes.len(), n + 2, "the badge is still there");
+        assert_eq!(s.undo.len(), undo + 1, "one undo step");
+        for o in r["added"].as_array().unwrap() {
+            assert_eq!(o["kind"], "manual", "{o}");
+        }
+        let added = &s.doc.shapes[n..];
+        assert!(
+            added.iter().all(|x| x.groups[0] == "gold_star"),
+            "one group named after the file"
+        );
+        // A relative path or a file that isn't there is an error that changes nothing.
+        assert!(
+            s.run_tool("place_file", &json!({ "path": "star.dst" }))
+                .is_error
+        );
+        assert!(
+            s.run_tool(
+                "place_file",
+                &json!({ "path": dir.join("missing.pes").to_str().unwrap() }),
+            )
+            .is_error
+        );
+        assert_eq!(s.doc.shapes.len(), n + 2);
+        s.run_tool("undo", &json!({}));
+        assert_eq!(s.doc.shapes.len(), n, "undo takes the merge out");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

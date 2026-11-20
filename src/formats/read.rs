@@ -351,10 +351,7 @@ pub fn read_stitch_file(data: &[u8], ext: &str) -> Result<StitchFile> {
 /// An SVG (mm units, origin at the design's center) with one manual-stitch
 /// path per run, so the design can be moved, scaled and recolored as objects.
 pub fn to_svg(f: &StitchFile) -> String {
-    let mut b = crate::geom::Bounds::empty();
-    for p in f.blocks.iter().flat_map(|b| b.runs.iter().flatten()) {
-        b.add(*p);
-    }
+    let b = stitch_bounds(f);
     // Stitches sit on whole 0.1 mm units: so does the center, or every
     // coordinate would be written (rounded) half a unit off.
     let c = b.center();
@@ -367,36 +364,75 @@ pub fn to_svg(f: &StitchFile) -> String {
         (b.min.x - c.x) / 10.0,
         (b.min.y - c.y) / 10.0
     );
+    write_runs(&mut s, f, "  ", 0.4, |p| {
+        let q = p - c;
+        format!("{:.1},{:.1}", q.x / 10.0, q.y / 10.0)
+    });
+    s.push_str("</svg>\n");
+    s
+}
+
+/// The SVG a machine file is merged into another design with
+/// (Embrilliance's Merge): as [`to_svg`], but its color blocks inside one
+/// group of this id, so the merged design moves as one object and shows in
+/// the Layers list under its own name. It's written in px with nothing to
+/// scale, so that group is the artwork's outermost (a viewBox in mm would
+/// put it inside an unnamed group carrying the scaling).
+pub fn to_svg_grouped(f: &StitchFile, group: &str) -> String {
+    let b = stitch_bounds(f);
+    let px = |units: f64| units / crate::svg::PX_TO_UNITS;
+    let (w, h) = (px(b.width().max(10.0)), px(b.height().max(10.0)));
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.4}" height="{h:.4}" viewBox="0 0 {w:.4} {h:.4}">"#
+    );
+    let _ = writeln!(s, r#"  <g id="{}">"#, xml_attr(group));
+    write_runs(&mut s, f, "    ", px(4.0), |p| {
+        format!("{:.4},{:.4}", px(p.x - b.min.x), px(p.y - b.min.y))
+    });
+    s.push_str("  </g>\n</svg>\n");
+    s
+}
+
+fn stitch_bounds(f: &StitchFile) -> crate::geom::Bounds {
+    let mut b = crate::geom::Bounds::empty();
+    for p in f.blocks.iter().flat_map(|b| b.runs.iter().flatten()) {
+        b.add(*p);
+    }
+    b
+}
+
+/// One group per color block, one manual-stitch path per run.
+fn write_runs(s: &mut String, f: &StitchFile, indent: &str, width: f64, at: impl Fn(P) -> String) {
     for (bi, blk) in f.blocks.iter().enumerate() {
         let col = format!(
             "#{:02x}{:02x}{:02x}",
             blk.color[0], blk.color[1], blk.color[2]
         );
-        let _ = writeln!(s, r#"  <g id="color_{}">"#, bi + 1);
+        let _ = writeln!(s, r#"{indent}<g id="color_{}">"#, bi + 1);
         for (ri, run) in blk.runs.iter().enumerate() {
             let mut d = String::new();
             for (k, p) in run.iter().enumerate() {
-                let q = *p - c;
-                let _ = write!(
-                    d,
-                    "{}{:.1},{:.1} ",
-                    if k == 0 { "M" } else { "L" },
-                    q.x / 10.0,
-                    q.y / 10.0
-                );
+                let _ = write!(d, "{}{} ", if k == 0 { "M" } else { "L" }, at(*p));
             }
             let _ = writeln!(
                 s,
-                r#"    <path id="stitches_{}_{}_manual" d="{}" fill="none" stroke="{col}" stroke-width="0.4"/>"#,
+                r#"{indent}  <path id="stitches_{}_{}_manual" d="{}" fill="none" stroke="{col}" stroke-width="{width}"/>"#,
                 bi + 1,
                 ri + 1,
                 d.trim_end()
             );
         }
-        s.push_str("  </g>\n");
+        let _ = writeln!(s, "{indent}</g>");
     }
-    s.push_str("</svg>\n");
-    s
+}
+
+fn xml_attr(v: &str) -> String {
+    v.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]

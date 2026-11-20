@@ -17,6 +17,8 @@ pub enum Action {
     CloseTab,
     NextTab,
     PreviousTab,
+    /// File › Place…: artwork, an image to trace, or a machine file's
+    /// stitches into this design (Illustrator's Place; Embrilliance's Merge).
     Place,
     Save,
     SaveAs,
@@ -742,7 +744,12 @@ impl Studio {
             Action::Place => {
                 let mut exts = vec!["svg"];
                 exts.extend(zigzag::trace::IMAGE_FORMATS);
-                let req = crate::file_dialog::Request::open().filter("Artwork", &exts);
+                exts.extend(zigzag::formats::READABLE_FORMATS);
+                let req = crate::file_dialog::Request::open()
+                    .filter("Artwork and designs", &exts)
+                    .filter("SVG artwork", &["svg"])
+                    .filter("Images to trace", &zigzag::trace::IMAGE_FORMATS)
+                    .filter("Machine files", &zigzag::formats::READABLE_FORMATS);
                 self.file_dialog(req, crate::file_dialog::Then::Place);
             }
             Action::Save => {
