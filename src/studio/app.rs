@@ -343,6 +343,9 @@ impl Studio {
             i.on_arrival(move || ctx.request_repaint());
         }
         s.inbox = inbox;
+        // So do files the Mac asks to open (from the Finder).
+        let ctx = cc.egui_ctx.clone();
+        crate::open_documents::on_arrival(move || ctx.request_repaint());
         // A job on the Skitch outlives the app: pick it up too.
         let resume = s.restore_sent() && s.session.resume_skitch;
         s.dock = crate::dock::DockState::load();
@@ -1489,23 +1492,31 @@ impl Studio {
             || self.tabs.asking
     }
 
-    /// Open what later launches of ZigZag handed over, each file in a tab,
-    /// and bring the window to the front. False when they have to wait.
+    /// Open what later launches of ZigZag handed over, and the files the
+    /// Mac asked to open (`open_documents`), each file in a tab, and bring
+    /// the window to the front. False when they have to wait.
     pub(crate) fn take_handed_over(&mut self, ctx: &egui::Context) -> bool {
         use egui::ViewportCommand;
         if std::mem::take(&mut self.focus_again) {
             ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
-        if self.inbox.is_none() {
+        if self.inbox.is_none() && !crate::open_documents::pending() {
             return true;
         }
         if self.mid_gesture() {
             return false;
         }
-        let requests = match &self.inbox {
+        let mut requests = match &self.inbox {
             Some(i) => i.take(),
-            None => return true,
+            None => Vec::new(),
         };
+        let finder = crate::open_documents::take();
+        if !finder.is_empty() {
+            requests.push(crate::instance::Request {
+                files: finder,
+                select: None,
+            });
+        }
         if requests.is_empty() {
             return true;
         }

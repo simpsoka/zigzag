@@ -37,6 +37,7 @@ mod machines;
 mod mcp;
 mod mcp_chip;
 mod native_menu;
+mod open_documents;
 mod palettes;
 mod path_edit;
 mod path_tools;
@@ -161,6 +162,9 @@ fn main() -> eframe::Result {
         });
         return Ok(());
     }
+    // macOS: files from the Finder come as an event, not on the command
+    // line, also the ones this launch is for (see `open_documents`).
+    open_documents::install();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: {

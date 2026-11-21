@@ -941,3 +941,23 @@ mod ciede2000_tests {
         assert_eq!(*best, [11, 61, 145], "Ultramarine, not Purple");
     }
 }
+
+#[cfg(test)]
+mod mac_document_types {
+    use super::READABLE_FORMATS;
+
+    /// The Finder offers ZigZag in Open With only for the types its
+    /// Info.plist names: every format ZigZag reads is there.
+    #[test]
+    fn the_mac_app_names_every_format_it_reads() {
+        let plist = include_str!("../../packaging/macos/Info.plist");
+        for ext in READABLE_FORMATS {
+            assert!(
+                plist.contains(&format!("<string>dev.zigzag.{ext}</string>"))
+                    && plist.contains(&format!("<string>{ext}</string>")),
+                "Info.plist doesn't declare .{ext}"
+            );
+        }
+        assert!(plist.contains("<string>public.svg-image</string>"));
+    }
+}
