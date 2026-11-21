@@ -269,22 +269,7 @@ fn main() -> Result<()> {
         }
         Cmd::Machines => {
             for p in zigzag::machine::profile::builtin() {
-                let hoops: Vec<String> = p
-                    .hoops
-                    .iter()
-                    .map(|&h| zigzag::document::format_hoop(h))
-                    .collect();
-                println!(
-                    "{:<15} {}\n{:<15} hoops {} mm{}{}",
-                    p.id,
-                    p.name,
-                    "",
-                    hoops.join(", "),
-                    p.format
-                        .map(|f| format!("; reads .{f}"))
-                        .unwrap_or_default(),
-                    if p.tested { "; sewn from ZigZag" } else { "" }
-                );
+                println!("{}", machine_lines(p));
             }
         }
         Cmd::Skitch { cmd, name, scan } => skitch(cmd, name, scan)?,
@@ -380,6 +365,44 @@ fn print_checks(doc: &Document, d: &Design, hoop: (f64, f64)) {
             None => eprintln!("{level}: {}", issue.message),
         }
     }
+}
+
+/// `zigzag machines`'s two lines for one profile: name and hoops, then what
+/// choosing it (`--machine`) changes besides the hoop (`Profile::apply`) -
+/// easy to miss otherwise, since picking a machine doesn't ask for them.
+fn machine_lines(p: &zigzag::machine::profile::Profile) -> String {
+    let hoops: Vec<String> = p
+        .hoops
+        .iter()
+        .map(|&h| zigzag::document::format_hoop(h))
+        .collect();
+    let min_stitch = p
+        .min_stitch_mm
+        .map(|m| format!("; min stitch {} mm", zigzag::params::fmt_num(m)))
+        .unwrap_or_default();
+    let lock = p
+        .lock
+        .map(|l| format!("; lock {}", l.format()))
+        .unwrap_or_default();
+    let link = p
+        .link
+        .and_then(|id| zigzag::machine::profile::LINKS.iter().find(|l| l.0 == id))
+        .map(|l| format!("; sends over {}", l.1))
+        .unwrap_or_default();
+    format!(
+        "{:<15} {}\n{:<15} hoops {} mm{}{}{}{}{}",
+        p.id,
+        p.name,
+        "",
+        hoops.join(", "),
+        p.format
+            .map(|f| format!("; reads .{f}"))
+            .unwrap_or_default(),
+        min_stitch,
+        lock,
+        link,
+        if p.tested { "; sewn from ZigZag" } else { "" }
+    )
 }
 
 fn summary(d: &Design) {
@@ -514,4 +537,41 @@ fn skitch(cmd: SkitchCmd, name: Option<String>, scan: u64) -> Result<()> {
         let _ = m.disconnect().await;
         result
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_lines_says_nothing_extra_for_a_plain_profile() {
+        let p = zigzag::machine::profile::builtin_named("brother-4x4").unwrap();
+        let s = machine_lines(p);
+        assert!(s.contains("brother-4x4"));
+        assert!(s.contains("hoops 100x100 mm"));
+        assert!(s.contains("; reads .pes"));
+        assert!(!s.contains("min stitch"));
+        assert!(!s.contains("lock"));
+        assert!(!s.contains("sends over"));
+        assert!(!s.contains("sewn from ZigZag"));
+    }
+
+    #[test]
+    fn machine_lines_says_what_the_machine_changes() {
+        // Drops stitches under 0.4 mm (see profiles.json): worth knowing
+        // before `--machine melco-summit` quietly merges short stitches.
+        let p = zigzag::machine::profile::builtin_named("melco-summit").unwrap();
+        let s = machine_lines(p);
+        assert!(s.contains("; min stitch 0.4 mm"), "{s}");
+        assert!(!s.contains("; lock"), "{s}");
+        assert!(!s.contains("sends over"), "{s}");
+    }
+
+    #[test]
+    fn machine_lines_says_how_a_linked_machine_is_reached() {
+        let p = zigzag::machine::profile::builtin_named("brother-skitch").unwrap();
+        let s = machine_lines(p);
+        assert!(s.contains("; sends over Bluetooth (Brother Skitch)"), "{s}");
+        assert!(s.contains("; sewn from ZigZag"), "{s}");
+    }
 }
