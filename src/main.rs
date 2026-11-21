@@ -246,7 +246,7 @@ fn main() -> Result<()> {
             let doc = settings.open(&input)?;
             let d = doc.plan();
             eprintln!(
-                "fabric: {}{}{}",
+                "fabric: {}{}{}{}",
                 doc.settings.fabric().name,
                 if doc.settings.hat_order {
                     ", cap order"
@@ -257,7 +257,8 @@ fn main() -> Result<()> {
                     ""
                 } else {
                     ", overlaps kept"
-                }
+                },
+                settings_note(&doc.settings)
             );
             summary(&d);
             print_checks(&doc, &d, doc.settings.hoop);
@@ -380,6 +381,26 @@ fn print_checks(doc: &Document, d: &Design, hoop: (f64, f64)) {
             None => eprintln!("{level}: {}", issue.message),
         }
     }
+}
+
+/// What `--machine`, or a saved file, set besides the fabric, cap order and
+/// overlaps (already shown next to this): easy to miss otherwise, since it
+/// isn't asked for on this run of `zigzag info` or `zigzag convert`.
+fn settings_note(s: &zigzag::document::Settings) -> String {
+    let mut note = String::new();
+    if let Some(m) = s.machine.as_deref() {
+        note.push_str(&format!(", machine {m}"));
+    }
+    if s.min_stitch_mm != zigzag::document::DEFAULT_MIN_STITCH_MM {
+        note.push_str(&format!(
+            ", min stitch {} mm",
+            zigzag::params::fmt_num(s.min_stitch_mm)
+        ));
+    }
+    if s.lock != zigzag::formats::Lock::default() {
+        note.push_str(&format!(", lock {}", s.lock.format()));
+    }
+    note
 }
 
 fn summary(d: &Design) {
@@ -514,4 +535,31 @@ fn skitch(cmd: SkitchCmd, name: Option<String>, scan: u64) -> Result<()> {
         let _ = m.disconnect().await;
         result
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_note_is_empty_for_the_usual_settings() {
+        assert_eq!(settings_note(&zigzag::document::Settings::default()), "");
+    }
+
+    #[test]
+    fn settings_note_names_a_non_default_min_stitch() {
+        let mut s = zigzag::document::Settings::default();
+        s.min_stitch_mm = 0.4;
+        assert_eq!(settings_note(&s), ", min stitch 0.4 mm");
+    }
+
+    #[test]
+    fn settings_note_names_the_machine_and_a_custom_lock() {
+        let mut s = zigzag::document::Settings::default();
+        s.machine = Some("melco-summit".into());
+        s.lock = zigzag::formats::Lock::new(zigzag::formats::LockStyle::Triangle, 0.5, 6);
+        let note = settings_note(&s);
+        assert!(note.contains(", machine melco-summit"), "{note}");
+        assert!(note.contains(", lock triangle:0.5:6"), "{note}");
+    }
 }
