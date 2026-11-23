@@ -189,6 +189,27 @@ fn gone_in_batch(why: &str, names_before: &[Vec<String>], steps: &[Value]) -> Op
     ))
 }
 
+/// The error for an object name that isn't there. It names a dozen of the
+/// objects, not all of them: a traced design has hundreds, and the whole list
+/// filled the chat. `get_design` has the rest.
+fn no_object_named(asked: &str, names: &[String]) -> String {
+    const SHOWN: usize = 12;
+    let some = names
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len() {
+        0 => format!("no object named '{asked}': the design has no objects"),
+        n if n <= SHOWN => format!("no object named '{asked}'. Objects: {some}"),
+        n => format!(
+            "no object named '{asked}'. Objects: {some}, and {} more (get_design lists them all)",
+            n - SHOWN
+        ),
+    }
+}
+
 fn obj_schema() -> Value {
     json!({ "description": "Object: its index in sewing order (0-based), its name from get_design, or the id you gave it in an SVG (Face_mask for \"Face mask\").", "oneOf": [{ "type": "integer" }, { "type": "string" }] })
 }
@@ -626,7 +647,7 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "review_design",
-            "description": "Review the whole design as an embroiderer would before it's sewn, and say what to fix: what it costs to sew (threads, thread changes, trims and the objects behind most of them, threads sewn in more than one block, time), what may not read clearly (pieces under 1.5 mm, gaps sewn across in plain view, threads too close to the fabric's color, touching objects in threads too alike to tell apart), stitch types that may suit a shape better (a narrow band filled that satin would sew cleaner, a satin too wide) and fill angles for flow (rows along a piece's length) and dimension (touching pieces set apart), and the problems check_design finds. What document settings would save trims (what_ifs) is tried on copies. With a picture of the stitches at about their real size on a screen, to judge whether it reads. Use it after generating or changing artwork, and fix what costs or reads badly without taking out shading, highlights or features.",
+            "description": "Review the whole design as an embroiderer would before it's sewn, and say what to fix: the sewing basics first (objects with no underlay where they need it, rows too far apart to cover the cloth, fills running the same way as what they sit on or touch, thread sewn across finished fill, satin underlay that doesn't suit its width, shapes sewn only as an empty outline, a patch border not sewn last or too narrow, lettering too small to read, lines sewn across a plain ground, specks the trace left sewn as loops), then what it costs to sew (threads, thread changes, trims and the objects behind most of them, threads sewn in more than one block, time), what may not read clearly (pieces under 1.5 mm, gaps sewn across in plain view, threads too close to the fabric's color, touching objects in threads too alike to tell apart), stitch types that may suit a shape better (a narrow band filled that satin would sew cleaner, a satin too wide) and fill angles for flow (rows along a piece's length) and dimension (touching pieces set apart), and the problems check_design finds. What document settings would save trims (what_ifs) is tried on copies. With a picture of the stitches at about their real size on a screen, to judge whether it reads. Use it after generating or changing artwork, and fix what costs or reads badly without taking out shading, highlights or features.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         }),
@@ -937,6 +958,20 @@ pub fn tool_specs() -> Value {
 
 /// Tools that only look: they change nothing, and their results are what
 /// was asked for.
+/// A tool that reads the stitches (so they're planned before it runs).
+pub(crate) fn reads_stitches(name: &str) -> bool {
+    matches!(
+        name,
+        "get_design"
+            | "get_cuts"
+            | "render_preview"
+            | "check_design"
+            | "review_design"
+            | "export"
+            | "send_to_skitch"
+    )
+}
+
 fn only_reads(name: &str) -> bool {
     matches!(
         name,
@@ -1066,6 +1101,14 @@ fn check_args(name: &str, args: &Value) -> Result<(), String> {
     ))
 }
 
+/// Field `key` of `v`: an element, by number, of an array.
+fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    match key.parse::<usize>() {
+        Ok(i) if v.is_array() => v.get(i),
+        _ => v.get(key),
+    }
+}
+
 /// Replace "$N.path" strings in `v` by that field of step N's result.
 fn resolve_refs(v: &Value, results: &[Value]) -> Result<Value, String> {
     Ok(match v {
@@ -1080,12 +1123,48 @@ fn resolve_refs(v: &Value, results: &[Value]) -> Result<Value, String> {
             let mut cur = results
                 .get(n)
                 .ok_or(format!("{s}: there is no earlier step {n}"))?;
-            for key in path.split('.').filter(|k| !k.is_empty()) {
-                cur = match key.parse::<usize>() {
-                    Ok(i) if cur.is_array() => cur.get(i),
-                    _ => cur.get(key),
-                }
-                .ok_or(format!("{s}: step {n}'s result has no `{key}`"))?;
+            for (k, key) in path.split('.').filter(|k| !k.is_empty()).enumerate() {
+                // (A step that added one object: "$N.name" is its name, as
+                // for a tool that answers with the object itself.)
+                // (Whether the step answered in full, each object with
+                // its name, or tersely, with the names alone; and `made`
+                // as well as `added`, as `added_names` reads them.)
+                let only_added = || {
+                    let all: Vec<&Value> = ["added", "made"]
+                        .iter()
+                        .filter_map(|a| cur.get(*a).and_then(Value::as_array))
+                        .flatten()
+                        .collect();
+                    match all.as_slice() {
+                        [one] if k == 0 => field(one, key)
+                            .or_else(|| (key == "name" && one.is_string()).then_some(*one)),
+                        _ => None,
+                    }
+                };
+                cur = match field(cur, key).or_else(only_added) {
+                    Some(v) => v,
+                    None => {
+                        let has: Vec<String> = cur
+                            .as_object()
+                            .map(|o| o.keys().map(|k| format!("`{k}`")).collect())
+                            .unwrap_or_default();
+                        // (A terse step lists what it added by name alone.)
+                        let named = cur
+                            .get("added")
+                            .and_then(Value::as_array)
+                            .and_then(|a| a.first())
+                            .is_some_and(Value::is_string);
+                        let eg = if named { "added.0" } else { "added.0.name" };
+                        return Err(if has.is_empty() {
+                            format!("{s}: step {n}'s result has no `{key}`")
+                        } else {
+                            format!(
+                                "{s}: step {n}'s result has no `{key}`; it has {} (an object it added is \"${n}.{eg}\")",
+                                has.join(", ")
+                            )
+                        });
+                    }
+                };
             }
             cur.clone()
         }
@@ -1172,10 +1251,7 @@ impl Studio {
                     .collect();
                 match hits.as_slice() {
                     [i] => Ok(*i),
-                    [] => Err(format!(
-                        "no object named '{s}'. Objects: {}",
-                        self.names.join(", ")
-                    )),
+                    [] => Err(no_object_named(s, &self.names)),
                     _ => Err(format!(
                         "'{s}' matches several objects: {}",
                         hits.iter()
@@ -1817,16 +1893,7 @@ impl Studio {
             return ToolResult::error(e);
         }
         // Inside a batch, only a step that reads the stitches waits for them.
-        let reads = matches!(
-            name,
-            "get_design"
-                | "get_cuts"
-                | "render_preview"
-                | "check_design"
-                | "review_design"
-                | "export"
-                | "send_to_skitch"
-        );
+        let reads = reads_stitches(name);
         if reads {
             self.plan_now();
         }
@@ -4000,11 +4067,29 @@ impl Studio {
                 .and_then(parse_hex)
                 .ok_or("preview_color must look like #rrggbb")?;
         }
+        let on = [
+            ("over_sewn", s.over_sewn),
+            ("connect_mm", s.connect_mm > 0.0),
+            ("blend_mm", s.blend_mm > 0.0),
+        ];
         self.structural(|d| {
             d.settings = s;
             Ok(())
         })
         .map_err(|e| e.to_string())?;
+        // Who turned each trim setting on: the agent, or the person (a card
+        // of choices applies the person's).
+        let by_agent = !self.person_choosing;
+        let set = self.agent_set.entry(self.session.rec).or_default();
+        for (key, on) in on {
+            if args.get(key).is_some() {
+                if on && by_agent {
+                    set.insert(key);
+                } else {
+                    set.remove(key);
+                }
+            }
+        }
         self.replan_soon();
         Ok(ToolResult::json(&self.design_json()["document"]))
     }
@@ -4139,11 +4224,14 @@ impl Studio {
                 }
             }
         }
-        let bridges = d.bridges.len();
+        let bridges = self.bridges_in_view();
         // The settings that are the person's to choose (they can show on
         // the fabric), tried on copies: what each would save.
         let what_ifs = self.trim_what_ifs(trims);
         let (stitch_types, fill_angles) = self.stitch_suggestions();
+        let (underlay_off, too_open, same_direction, common_angle) = self.sewing_basics();
+        let (outline_only, border, small_lettering, underlay_mismatch, lines_on_ground, stray_loops) =
+            self.finishing_checks();
         let count = |l: Level| self.issues.iter().filter(|x| x.level == l).count();
         // Everything the Issues button counts, notes too (holes, piled
         // thread, covered objects are notes): the person sees them all.
@@ -4153,8 +4241,77 @@ impl Studio {
             .take(30)
             .map(|x| issue_json(x, &self.names))
             .collect();
-        // What to do, most costly first.
+        // What to do: the sewing itself first (what an embroiderer looks at
+        // before anything else), then what it costs.
         let mut findings: Vec<String> = Vec::new();
+        // (The trim settings the agent turned on itself; the rest are the
+        // person's, and stay as they are.)
+        let mine = |k: &str| self.agent_set.get(&self.session.rec).is_some_and(|s| s.contains(k));
+        if !underlay_off.is_empty() {
+            findings.push(format!(
+                "{} object(s) sew with no underlay where they need it (underlay_off). Underlay holds the cloth still and lifts the top stitches: without it a fill sinks, puckers the cloth and shows it between its rows, and a wide satin's edges go ragged. Put it back (set_object with each one's fix); turn underlay off only on a fleck too small for it.",
+                underlay_off.len()
+            ));
+        }
+        if !too_open.is_empty() {
+            findings.push(format!(
+                "{} object(s) sew their rows further apart than the fabric's usual (too_open): the cloth shows between them, so they read as stripes or outlines rather than filled in. Set them back to the usual (set_object spacing_mm null). A lighter look is a different stitch type or a thread a shade off, never open rows. (Only a ground, a background fill other pieces sit on, may be sewn lighter, and only on cloth close to its thread's color: up to twice the usual spacing, still with underlay.)",
+                too_open.len()
+            ));
+        }
+        if !same_direction.is_empty() || common_angle.is_some() {
+            let most = common_angle
+                .map(|(a, n, of)| format!(" {n} of the {of} fills run at {a}°;"))
+                .unwrap_or_default();
+            findings.push(format!(
+                "Fills running the same way pull the same way:{most} {} sit on a fill at its own angle (same_direction). Rows that run on from the rows beside them add their pull together, which puckers the cloth and gaps the edges, and the shapes don't stand apart. Give each piece its own direction: along its length where it has one (fill_angles), and at least 30° from what it sits on or touches; a background ground at a different angle from everything on it.",
+                same_direction.len()
+            ));
+        }
+        if !underlay_mismatch.is_empty() {
+            findings.push(format!(
+                "{} satin(s) have underlay set by hand that doesn't suit their width (underlay_mismatch): set them back to auto (set_object satin_underlay \"auto\"), which puts none under 1.5 mm, a center walk up to 4 mm and an edge walk with zigzag above.",
+                underlay_mismatch.len()
+            ));
+        }
+        if !outline_only.is_empty() {
+            findings.push(format!(
+                "{} shape(s) are sewn only round their edge with nothing filling them (outline_only): they read as empty outlines. Look at each close up; fill the ones meant to be solid (set_object kind fill), and leave rings, frames and line drawings.",
+                outline_only.len()
+            ));
+        }
+        if !lines_on_ground.is_empty() {
+            findings.push(format!(
+                "{} line(s) are sewn across the background ground over nothing else (lines_on_ground). Keep a ground plain: delete each one that isn't part of the picture; if one is meant (a road, a horizon), keep it and say so in your summary.",
+                lines_on_ground.len()
+            ));
+        }
+        if !stray_loops.is_empty() {
+            findings.push(format!(
+                "{} small shape(s) sit inside another color sewn only as a loop of running stitch (stray_loops): usually specks the trace left. Look at each close up; delete the stray ones, and sew the ones that are real details as fill.",
+                stray_loops.len()
+            ));
+        }
+        if let Some(b) = &border {
+            findings.push(format!(
+                "The patch border {}: {}.",
+                b["object"].as_str().unwrap_or(""),
+                b["why"].as_str().unwrap_or("")
+            ));
+        }
+        if !small_lettering.is_empty() {
+            findings.push(format!(
+                "{} lettering object(s) are too small to read in thread (small_lettering, each with its tallest letter): make them bigger, or fewer words larger. Lettering is the person's message, so if it can't grow, ask them what to do with offer_choices.",
+                small_lettering.len()
+            ));
+        }
+        if self.doc.settings.over_sewn {
+            findings.push(if mine("over_sewn") {
+                "You turned Sew over fill on: where an object's thread can't get from one part to the next out of sight it runs across finished fill, and those lines show on top of it and clutter it. Turn it off (set_document over_sewn false) unless the person asks for it: a trim is cheaper than a line across the work.".to_string()
+            } else {
+                "Sew over fill is on, as the person set it: the lines its thread leaves across finished fill are their trade-off for fewer trims. Leave it, and say what it costs in your summary.".to_string()
+            });
+        }
         if trims > 0 {
             let top: Vec<String> = worst
                 .iter()
@@ -4169,9 +4326,11 @@ impl Studio {
         }
         // The setting that saves the most and doesn't show: set it. Those
         // that save more but show are the person's to choose.
+        // (Never sewing over fill: its thread lies across finished stitching,
+        // which an embroiderer sees as clutter even in its own color.)
         let hidden = what_ifs
             .iter()
-            .filter(|w| w["shows"] == false)
+            .filter(|w| w["shows"] == false && w["set_document"].get("over_sewn").is_none())
             .max_by_key(|w| w["saves"].as_u64().unwrap_or(0));
         if let Some(h) = hidden {
             findings.push(format!(
@@ -4232,9 +4391,11 @@ impl Studio {
             ));
         }
         if bridges > 0 {
-            findings.push(format!(
-                "{bridges} gap(s) sewn across in plain view (the document's connect_mm): the thread shows there. That's the person's choice; mention it."
-            ));
+            findings.push(if mine("connect_mm") {
+                format!("{bridges} gap(s) you had sewn across (connect_mm) show on what they cross. Set connect_mm back to 0, or to what saves trims without showing (what_ifs), unless the person asks for it.")
+            } else {
+                format!("{bridges} gap(s) are sewn across where the thread shows (connect_mm, the person's setting). That's their trade-off: leave it, and say what it costs in your summary.")
+            });
         }
         if !faint.is_empty() {
             findings.push("A thread is close to the fabric's color and will barely show: use a lighter or darker shade, or an outline.".into());
@@ -4244,7 +4405,7 @@ impl Studio {
         }
         if !self.issues.is_empty() {
             findings.push(format!(
-                "The Issues button shows the person {} issue(s): {} error(s), {} warning(s), {} note(s) (each in problems, with its object). Fix every error and warning. Fix the notes that are about the sewing: needle holes bunched in one spot, thread piled thick, an object covered so it won't sew, thread crossing stitching already sewn. Notes that only say what the planner did (a wide satin split) can stay. Run review_design again after, and say in your summary which issues are left and why.",
+                "The Issues button shows the person {} issue(s): {} error(s), {} warning(s), {} note(s) (each in problems, with its object). Fix every error and warning. Fix the notes that are about the sewing: needle holes bunched in one spot, thread piled thick, an object covered so it won't sew, thread crossing stitching already sewn. Notes that only say what the planner did (a wide satin split), or come from a trim setting the person chose (Sew over fill, Connect, Blend), can stay. Run review_design again after, and say in your summary which issues are left and why.",
                 self.issues.len(),
                 count(Level::Error),
                 count(Level::Warning),
@@ -4269,6 +4430,15 @@ impl Studio {
             "what_ifs": what_ifs,
             "stitch_types": stitch_types,
             "fill_angles": fill_angles,
+            "underlay_off": underlay_off,
+            "too_open": too_open,
+            "same_direction": same_direction,
+            "underlay_mismatch": underlay_mismatch,
+            "outline_only": outline_only,
+            "patch_border": border,
+            "small_lettering": small_lettering,
+            "lines_on_ground": lines_on_ground,
+            "stray_loops": stray_loops,
             "threads_in_more_than_one_block": repeated,
             "small_pieces": small,
             "gaps_sewn_in_view": bridges,
@@ -4334,10 +4504,12 @@ impl Studio {
             .iter()
             .flat_map(|c| c.steps.as_array().cloned().unwrap_or_default())
             .collect();
+        self.person_choosing = true;
         let r = self.run_tool(
             "batch",
             &json!({ "steps": steps, "label": format!("Applied {}", labels.join(", ")) }),
         );
+        self.person_choosing = false;
         if r.is_error {
             let said = serde_json::from_str::<Value>(&text_of(&r))
                 .ok()
@@ -4566,7 +4738,18 @@ impl Studio {
             let width = 2.0 * area / outline / 10.0;
             let b = shape_bounds(s);
             let long = b.width().max(b.height()) / 10.0;
-            let band = (1.0..=4.0).contains(&width) && long >= 4.0 * width;
+            // (A narrow average isn't enough: a lobed flower or leaf has a
+            // long outline for its area too. A band is gone once shrunk by
+            // a little over half its width; a broad shape keeps a core.)
+            let band = (1.0..=4.0).contains(&width)
+                && long >= 4.0 * width
+                && {
+                    let core: f64 = zigzag::boolean::offset(rings, *rule, -0.6 * width * 10.0)
+                        .iter()
+                        .map(|r| zigzag::boolean::ring_area(r))
+                        .sum();
+                    core.abs() < 0.05 * area
+                };
             match kind {
                 // (A band: no wider than a satin sews well, and long for
                 // its width; not a broad piece with a long outline.)
@@ -4650,6 +4833,467 @@ impl Studio {
             .collect();
         types.truncate(20);
         (types, angles)
+    }
+
+    /// What an embroiderer checks first, before looks or cost: underlay
+    /// under what needs it, rows close enough to cover the cloth, and fills
+    /// that don't all pull the same way. (underlay_off, too_open,
+    /// same_direction, and the angle most fills share when most do.)
+    fn sewing_basics(&self) -> (Vec<Value>, Vec<Value>, Vec<Value>, Option<(f64, usize, usize)>) {
+        let shapes = &self.doc.shapes;
+        let f = self.doc.settings.fabric();
+        let d = &self.design;
+        let sewn = |i: usize| d.per_shape.get(i).copied().unwrap_or(0) > 0;
+        let name = |i: usize| self.names.get(i).cloned().unwrap_or_default();
+        let apart = |a: f64, b: f64| {
+            let d = (a - b).abs() % 180.0;
+            d.min(180.0 - d)
+        };
+        let mut place = vec![usize::MAX; shapes.len()];
+        for (n, &i) in d.sew_order.iter().enumerate() {
+            if let Some(p) = place.get_mut(i) {
+                *p = n;
+            }
+        }
+        let bounds: Vec<zigzag::geom::Bounds> = shapes.iter().map(shape_bounds).collect();
+        let is_fill = |i: usize| {
+            sewn(i)
+                && matches!(shapes[i].geometry, Geometry::Fill { .. })
+                && shapes[i].params.kind.unwrap_or(Kind::Fill) == Kind::Fill
+        };
+        let fills: Vec<usize> = (0..shapes.len()).filter(|&i| is_fill(i)).collect();
+        // The fill sewn before `i` whose outline holds it, nearest first.
+        let under = |i: usize| {
+            let b = bounds[i];
+            fills
+                .iter()
+                .copied()
+                .filter(|&j| {
+                    j != i && place[j] < place[i] && {
+                        let u = bounds[j];
+                        u.min.x <= b.min.x && u.min.y <= b.min.y && u.max.x >= b.max.x && u.max.y >= b.max.y
+                    }
+                })
+                .max_by_key(|&j| place[j])
+        };
+        // A ground: a fill three or more others are sewn on. It may be
+        // sewn lighter (a patch's background is), but not without underlay.
+        let mut on = vec![0usize; shapes.len()];
+        for &i in &fills {
+            if let Some(j) = under(i) {
+                on[j] += 1;
+            }
+        }
+        let (mut underlay_off, mut too_open) = (Vec::new(), Vec::new());
+        for i in (0..shapes.len()).filter(|&i| sewn(i)) {
+            let s = &shapes[i];
+            let p = &s.params;
+            // (Its narrower side, mm: a fleck under 3 mm can go without.)
+            let small = bounds[i].width().min(bounds[i].height()) / 10.0;
+            match p.kind.unwrap_or(Kind::Fill) {
+                Kind::Fill if is_fill(i) => {
+                    if !p.underlay_on() && small >= 3.0 {
+                        underlay_off.push(json!({
+                            "object": name(i), "kind": "fill", "fix": { "underlay": true },
+                            "why": "a fill with no underlay sinks into the cloth, puckers it and shows it between its rows",
+                        }));
+                    }
+                    let (s_now, s_std) = (p.fill_spacing(&f), f.fill_spacing);
+                    // (Lighter only where the cloth between its rows is close
+                    // to its thread: navy rows on cream read as stripes.)
+                    let blends = zigzag::formats::perceptual_distance(s.color, self.doc.settings.cloth) < 20.0;
+                    let light = if on[i] >= 3 && blends { 2.0 } else { 1.5 };
+                    if s_now > s_std * light {
+                        too_open.push(json!({
+                            "object": name(i), "kind": "fill", "spacing_mm": mm(s_now), "usual_mm": mm(s_std),
+                            "fix": { "spacing_mm": null },
+                            "why": "rows this far apart leave the cloth showing between them: it reads as stripes, not filled in",
+                        }));
+                    }
+                }
+                Kind::Satin => {
+                    let w = crate::app::mean_satin_width(s);
+                    if w >= f.satin_underlay_from.max(1.5) && p.satin_underlay_for(&f, w) == 0 {
+                        underlay_off.push(json!({
+                            "object": name(i), "kind": "satin", "width_mm": mm(w),
+                            "fix": { "underlay": true, "satin_underlay": "auto" },
+                            "why": "a satin this wide with no underlay sinks, and its edges pull in ragged",
+                        }));
+                    }
+                    let (s_now, s_std) = (p.satin_spacing(&f), f.satin_spacing);
+                    if s_now > s_std * 1.3 {
+                        too_open.push(json!({
+                            "object": name(i), "kind": "satin", "spacing_mm": mm(s_now), "usual_mm": mm(s_std),
+                            "fix": { "spacing_mm": null },
+                            "why": "stitches this far apart leave the cloth showing through the column",
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Fills sewn on (or cut into) a fill sewn before them, at its
+        // angle: their rows run on from its rows, so the pull of both adds
+        // up along one line and the edge between them doesn't read.
+        let angle = |i: usize| crate::widgets::normalize_angle(shapes[i].params.fill_angle());
+        let mut same_direction = Vec::new();
+        for &i in &fills {
+            if let Some(j) = under(i)
+                && apart(angle(i), angle(j)) < 20.0
+            {
+                // Along its length where that's well off the ground's;
+                // else 45° off it, turning one way and the next the other,
+                // so the pieces on it don't all end up parallel again.
+                let along = match &shapes[i].geometry {
+                    Geometry::Fill { rings, .. } => principal_axis(rings)
+                        .filter(|&(a, elong)| elong >= 1.6 && apart(a, angle(j)) >= 30.0)
+                        .map(|(a, _)| a),
+                    _ => None,
+                };
+                let turn = if same_direction.len() % 2 == 0 { 45.0 } else { -45.0 };
+                let suggest = along.unwrap_or(angle(j) + turn);
+                same_direction.push(json!({
+                    "object": name(i), "angle_now": angle(i).round(), "sits_on": name(j), "its_angle": angle(j).round(),
+                    "suggest": crate::widgets::normalize_angle(suggest).round(),
+                    "why": "its rows run the same way as the fill it sits on, so their pull adds up and the edge between them doesn't read: turn it at least 30° from it, along its length where it has one",
+                }));
+            }
+        }
+        // Most of the fills at one angle (usually the 0° they start at).
+        let mut common = None;
+        if fills.len() >= 5 {
+            let best = fills
+                .iter()
+                .map(|&i| {
+                    let a = angle(i);
+                    (a, fills.iter().filter(|&&j| apart(a, angle(j)) < 10.0).count())
+                })
+                .max_by_key(|x| x.1);
+            if let Some((a, n)) = best
+                && n * 10 >= fills.len() * 6
+            {
+                common = Some((a.round(), n, fills.len()));
+            }
+        }
+        same_direction.truncate(30);
+        underlay_off.truncate(30);
+        too_open.truncate(30);
+        (underlay_off, too_open, same_direction, common)
+    }
+
+    /// The rest of an embroiderer's checklist: shapes sewn only as an
+    /// outline with nothing filling them, a patch border that isn't sewn
+    /// last (or is too narrow to hold the edge), lettering too small to
+    /// read in thread, and satin underlay set by hand that doesn't suit
+    /// the column's width.
+    fn finishing_checks(&self) -> (Vec<Value>, Option<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+        let shapes = &self.doc.shapes;
+        let d = &self.design;
+        let f = self.doc.settings.fabric();
+        let sewn = |i: usize| d.per_shape.get(i).copied().unwrap_or(0) > 0;
+        let name = |i: usize| self.names.get(i).cloned().unwrap_or_default();
+        let bounds: Vec<zigzag::geom::Bounds> = shapes.iter().map(shape_bounds).collect();
+        let area = |b: &zigzag::geom::Bounds| b.width().max(0.0) * b.height().max(0.0);
+        let live: Vec<usize> = (0..shapes.len()).filter(|&i| sewn(i)).collect();
+        let text = |i: usize| self.doc.lettering(i).is_some() || self.doc.records_text(i);
+        let kind = |i: usize| shapes[i].params.kind.unwrap_or(Kind::Fill);
+        // Sewn as a solid shape: a fill, or a satin across the shape.
+        let solid = |i: usize| {
+            matches!(shapes[i].geometry, Geometry::Fill { .. })
+                && !matches!(kind(i), Kind::Run | Kind::Skip | Kind::Manual)
+                && !(kind(i) == Kind::Satin && shapes[i].params.is_border())
+        };
+        // Sewn only round its edge.
+        let edge_only = |i: usize| match &shapes[i].geometry {
+            Geometry::Fill { .. } => kind(i) == Kind::Run || (kind(i) == Kind::Satin && shapes[i].params.is_border()),
+            Geometry::Stroke { lines, .. } => !shapes[i].outline && lines.iter().any(|(_, closed)| *closed),
+        };
+
+        let mut outline_only = Vec::new();
+        for &i in &live {
+            let b = bounds[i];
+            let small = b.width().min(b.height()) / 10.0;
+            if small < 4.0 || !edge_only(i) || text(i) {
+                continue;
+            }
+            // Something solid about its size over most of it: it's filled.
+            let filled = live.iter().any(|&j| {
+                j != i && solid(j) && area(&bounds[j]) <= 4.0 * area(&b) && {
+                    let u = bounds[j];
+                    let w = (u.max.x.min(b.max.x) - u.min.x.max(b.min.x)).max(0.0);
+                    let h = (u.max.y.min(b.max.y) - u.min.y.max(b.min.y)).max(0.0);
+                    w * h >= 0.5 * area(&b)
+                }
+            });
+            if !filled {
+                outline_only.push(json!({
+                    "object": name(i), "kind": kind_name(kind(i)), "size_mm": mm(small),
+                    "why": "sewn only round its edge with nothing filling it, so it reads as an empty outline rather than a shape: if it's meant to be solid, sew it as a fill (set_object kind fill, or a filled shape under it); a ring, frame or line drawing meant as an outline is fine",
+                }));
+            }
+        }
+        outline_only.truncate(20);
+
+        // A patch border: a satin round the edge that holds everything else.
+        let border = live
+            .iter()
+            .copied()
+            .filter(|&i| kind(i) == Kind::Satin && edge_only(i))
+            .filter(|&i| {
+                let b = bounds[i];
+                let others: Vec<usize> = live.iter().copied().filter(|&j| j != i).collect();
+                let inside = others
+                    .iter()
+                    .filter(|&&j| {
+                        let u = bounds[j];
+                        u.min.x >= b.min.x - 10.0
+                            && u.min.y >= b.min.y - 10.0
+                            && u.max.x <= b.max.x + 10.0
+                            && u.max.y <= b.max.y + 10.0
+                    })
+                    .count();
+                others.len() >= 3 && inside * 10 >= others.len() * 9
+            })
+            .max_by(|&a, &b| area(&bounds[a]).total_cmp(&area(&bounds[b])))
+            .and_then(|i| {
+                let last = d.sew_order.iter().rev().copied().find(|&j| sewn(j));
+                let width = crate::app::mean_satin_width(&shapes[i]);
+                let mut why = Vec::new();
+                if last != Some(i) {
+                    why.push("it isn't sewn last: a border sewn early perforates the backing, and what's sewn after it pulls the patch out of shape inside it. Move it to the end of the sewing order (move_object to the last place)");
+                }
+                if width < 2.5 {
+                    why.push("it's narrower than 2.5 mm: if this is a patch to be cut out, its edge needs 3 to 5 mm of satin to cover the cut and hold it (as a frame sewn on a garment it's fine)");
+                }
+                (!why.is_empty()).then(|| {
+                    json!({ "object": name(i), "width_mm": mm(width), "sewn_last": last == Some(i), "why": why.join("; ") })
+                })
+            });
+
+        // Lettering: its tallest letter, against what reads in thread.
+        let least = if self.doc.settings.hat_order { 6.5 } else { 5.0 };
+        let mut small_lettering = Vec::new();
+        for &i in live.iter().filter(|&&i| text(i)) {
+            let Geometry::Fill { rings, rule } = &shapes[i].geometry else {
+                continue;
+            };
+            let tallest = zigzag::stitch::satin::components(rings, *rule)
+                .iter()
+                .filter_map(|c| c.first())
+                .map(|r| {
+                    let (lo, hi) = r.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+                    (hi - lo) / 10.0
+                })
+                .fold(0.0, f64::max);
+            if tallest > 0.0 && tallest < least {
+                small_lettering.push(json!({
+                    "object": name(i), "tallest_letter_mm": mm(tallest), "least_mm": least,
+                    "why": format!("letters under {least} mm tall{} close up in thread and won't read: make it bigger, or say fewer words larger", if least > 5.0 { " on a cap" } else { "" }),
+                }));
+            }
+        }
+
+        // Satin underlay set by hand that doesn't suit the column.
+        let mut underlay_mismatch = Vec::new();
+        for &i in live.iter().filter(|&&i| kind(i) == Kind::Satin) {
+            let p = &shapes[i].params;
+            let Some(m) = p.satin_underlay else { continue };
+            if !p.underlay_on() || m == 0 {
+                continue;
+            }
+            let w = crate::app::mean_satin_width(&shapes[i]);
+            let heavy = underlay::CONTOUR | underlay::ZIGZAG;
+            let why = if w >= 5.0 && m & heavy == 0 {
+                "a center walk alone can't hold a column this wide: it needs an edge walk and zigzag under it"
+            } else if w < f.satin_underlay_from.max(1.5) && m & heavy != 0 {
+                "an edge walk or zigzag under a column this narrow piles thread and pokes out of its sides"
+            } else {
+                continue;
+            };
+            underlay_mismatch.push(json!({
+                "object": name(i), "width_mm": mm(w), "fix": { "satin_underlay": "auto" }, "why": why,
+            }));
+        }
+        underlay_mismatch.truncate(20);
+
+        // Grounds: fills that three or more others are sewn on.
+        let mut place = vec![usize::MAX; shapes.len()];
+        for (n, &i) in d.sew_order.iter().enumerate() {
+            if let Some(p) = place.get_mut(i) {
+                *p = n;
+            }
+        }
+        let holds = |g: usize, i: usize| {
+            let (u, b) = (bounds[g], bounds[i]);
+            u.min.x <= b.min.x && u.min.y <= b.min.y && u.max.x >= b.max.x && u.max.y >= b.max.y
+        };
+        let grounds: Vec<usize> = live
+            .iter()
+            .copied()
+            .filter(|&g| {
+                solid(g)
+                    && kind(g) == Kind::Fill
+                    && live.iter().filter(|&&i| i != g && solid(i) && place[g] < place[i] && holds(g, i)).count() >= 3
+            })
+            .collect();
+        let inside = |j: usize, p: P| match &shapes[j].geometry {
+            Geometry::Fill { rings, rule } => zigzag::geom::point_inside(rings, *rule, p),
+            Geometry::Stroke { .. } => false,
+        };
+        // The lines a running stitch follows.
+        let run_lines = |i: usize| -> Vec<Vec<P>> {
+            match &shapes[i].geometry {
+                Geometry::Fill { rings, .. } => rings.iter().map(|r| {
+                    let mut r = r.clone();
+                    if let Some(&first) = r.first() {
+                        r.push(first);
+                    }
+                    r
+                }).collect(),
+                Geometry::Stroke { lines, .. } => lines.iter().map(|(l, _)| l.clone()).collect(),
+            }
+        };
+        let is_run = |i: usize| {
+            !shapes[i].outline
+                && !text(i)
+                && match &shapes[i].geometry {
+                    Geometry::Fill { .. } => kind(i) == Kind::Run,
+                    Geometry::Stroke { .. } => matches!(kind(i), Kind::Run) || shapes[i].params.kind.is_none(),
+                }
+        };
+        let flagged: Vec<String> = outline_only.iter().filter_map(|x| x["object"].as_str().map(str::to_string)).collect();
+
+        // Lines sewn across a ground, over nothing else: what's not part of
+        // the picture there is clutter on the background.
+        let mut lines_on_ground = Vec::new();
+        if !grounds.is_empty() {
+            for &i in live.iter().filter(|&&i| is_run(i) && !flagged.contains(&name(i))) {
+                let pts: Vec<P> = run_lines(i)
+                    .iter()
+                    .flat_map(|l| zigzag::geom::sample_by_arclength(l, 10.0).into_iter().map(|(p, _)| p))
+                    .collect();
+                let length = run_lines(i).iter().map(|l| zigzag::geom::polyline_length(l)).sum::<f64>() / 10.0;
+                if pts.len() < 4 || length < 10.0 {
+                    continue;
+                }
+                let bare = pts
+                    .iter()
+                    .filter(|&&p| {
+                        grounds.iter().any(|&g| g != i && inside(g, p))
+                            && !live.iter().any(|&j| j != i && !grounds.contains(&j) && solid(j) && inside(j, p))
+                    })
+                    .count();
+                if bare * 2 >= pts.len() {
+                    lines_on_ground.push(json!({
+                        "object": name(i), "length_mm": mm(length),
+                        "why": "a line sewn across the ground over nothing else: unless it's part of the picture (a road, a horizon, a motion line you meant), it's clutter on the background, and its thread lies on top of the ground's rows",
+                    }));
+                }
+            }
+        }
+        lines_on_ground.truncate(20);
+
+        // Small filled shapes sewn only as their outline, inside a shape of
+        // another color: what tracing leaves behind (a speck, a stray
+        // highlight), sewn as a little loop of running stitch.
+        let mut stray_loops = Vec::new();
+        for &i in live.iter().filter(|&&i| matches!(shapes[i].geometry, Geometry::Fill { .. }) && is_run(i)) {
+            let b = bounds[i];
+            let big = b.width().max(b.height()) / 10.0;
+            if big >= 8.0 {
+                continue;
+            }
+            let c = P::new((b.min.x + b.max.x) / 2.0, (b.min.y + b.max.y) / 2.0);
+            // On another color's shape, or in a hole the trace left in one
+            // (its outline all round it).
+            let other = |j: usize| j != i && solid(j) && !grounds.contains(&j) && shapes[j].color != shapes[i].color;
+            let on = live
+                .iter()
+                .copied()
+                .find(|&j| other(j) && inside(j, c))
+                .or_else(|| live.iter().copied().find(|&j| other(j) && holds(j, i)));
+            if let Some(j) = on {
+                stray_loops.push(json!({
+                    "object": name(i), "size_mm": mm(big), "inside": name(j),
+                    "why": "a small filled shape sewn only as a loop of running stitch inside another color: usually a speck the trace left. Delete it, or if it's a detail that matters (an eye, a highlight), sew it as fill (set_object kind fill) when it's at least 1.5 mm",
+                }));
+            }
+        }
+        stray_loops.truncate(20);
+        (outline_only, border, small_lettering, underlay_mismatch, lines_on_ground, stray_loops)
+    }
+
+    /// The gaps sewn across (the document's Connect) whose thread shows on
+    /// what it lies over: another color, or cloth it stands out on, with
+    /// nothing sewn later to cover it. (A gap across its own color, or one
+    /// a later object covers, is out of sight, and isn't counted.)
+    fn bridges_in_view(&self) -> usize {
+        let d = &self.design;
+        let shapes = &self.doc.shapes;
+        let cloth = self.doc.settings.cloth;
+        let mut place = vec![usize::MAX; shapes.len()];
+        for (n, &i) in d.sew_order.iter().enumerate() {
+            if let Some(p) = place.get_mut(i) {
+                *p = n;
+            }
+        }
+        let covers: Vec<usize> = (0..shapes.len())
+            .filter(|&i| {
+                d.per_shape.get(i).copied().unwrap_or(0) > 0
+                    && matches!(shapes[i].geometry, Geometry::Fill { .. })
+                    && !matches!(shapes[i].params.kind.unwrap_or(Kind::Fill), Kind::Run | Kind::Skip | Kind::Manual)
+                    && !shapes[i].params.is_border()
+            })
+            .collect();
+        let inside = |j: usize, q: P| match &shapes[j].geometry {
+            Geometry::Fill { rings, rule } => zigzag::geom::point_inside(rings, *rule, q),
+            Geometry::Stroke { .. } => false,
+        };
+        let mut shown = 0;
+        for &(a, b) in &d.bridges {
+            // The stitch it is: its thread, and the object it's sewn for.
+            let mut found = None;
+            'find: for (bi, blk) in d.blocks.iter().enumerate() {
+                for (ri, run) in blk.runs.iter().enumerate() {
+                    if let Some(k) = run.pts.windows(2).position(|w| w[0] == a && w[1] == b) {
+                        let shape = d
+                            .stitch_shapes
+                            .get(bi)
+                            .and_then(|x| x.get(ri))
+                            .and_then(|x| x.iter().filter(|(pos, _)| *pos <= k + 1).next_back())
+                            .map(|&(_, s)| s);
+                        found = Some((blk.color, shape));
+                        break 'find;
+                    }
+                }
+            }
+            let Some((thread, shape)) = found else {
+                shown += 1;
+                continue;
+            };
+            let at = shape.map_or(usize::MAX, |s| place[s]);
+            let n = (a.dist(b) / 5.0).ceil().max(1.0) as usize;
+            let showing = (0..n)
+                .filter(|&k| {
+                    let q = a.lerp(b, (k as f64 + 0.5) / n as f64);
+                    if covers.iter().any(|&j| place[j] > at && place[j] != usize::MAX && inside(j, q)) {
+                        return false;
+                    }
+                    let under = covers
+                        .iter()
+                        .copied()
+                        .filter(|&j| place[j] <= at && inside(j, q))
+                        .max_by_key(|&j| place[j])
+                        .map_or(cloth, |j| shapes[j].color);
+                    zigzag::design::contrast(thread, under) > 0.5
+                })
+                .count();
+            // (A millimetre of it in sight is a line you see.)
+            if showing as f64 * a.dist(b) / n as f64 >= 10.0 {
+                shown += 1;
+            }
+        }
+        shown
     }
 
     /// Settings that would cut trims, each tried on a copy of the design
@@ -5058,6 +5702,29 @@ impl Studio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terse_steps_one_added_object_is_named_by_dollar_name() {
+        // (A terse step lists what it added by name alone; `made` too.)
+        let terse = [json!({ "ok": true, "added": ["leaf"] })];
+        assert_eq!(resolve_refs(&json!("$0.name"), &terse).unwrap(), "leaf");
+        let made = [json!({ "ok": true, "made": [{ "name": "stem" }] })];
+        assert_eq!(resolve_refs(&json!("$0.name"), &made).unwrap(), "stem");
+        // And the hint for a miss names a reference that works.
+        let two = [json!({ "ok": true, "added": ["a", "b"] })];
+        let e = resolve_refs(&json!("$0.name"), &two).unwrap_err();
+        assert!(e.contains("\"$0.added.0\"") && !e.contains("added.0.name"), "{e}");
+    }
+
+    #[test]
+    fn a_missing_name_lists_a_dozen_objects_not_hundreds() {
+        let few: Vec<String> = ["Face", "Mouth"].map(String::from).to_vec();
+        assert_eq!(no_object_named("Hat", &few), "no object named 'Hat'. Objects: Face, Mouth");
+        let many: Vec<String> = (0..80).map(|i| format!("trace {i}")).collect();
+        let why = no_object_named("Illustrated blue ground", &many);
+        assert!(why.contains("trace 11, and 68 more (get_design lists them all)"), "{why}");
+        assert!(!why.contains("trace 12"), "{why}");
+    }
     use crate::app::Studio;
     use std::io::{Read, Write};
 
@@ -6264,6 +6931,143 @@ mod tests {
     }
 
     #[test]
+    fn review_design_finds_specks_left_by_a_trace_and_lines_across_the_ground() {
+        let mut s = Studio::with_file(None, None);
+        // A ground with a flower on it; a speck sewn as a loop inside the
+        // flower, another in a hole the trace left in it, a line across
+        // the bare ground, and an eye drawn as a stroke (a detail, kept).
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="90mm" height="70mm" viewBox="0 0 90 70">
+            <rect id="Ground" x="5" y="5" width="80" height="60" fill="#173da5"/>
+            <path id="Flower" d="M15 15 H45 V40 H15 Z M33 20 H38 V25 H33 Z" fill="#f47b20" fill-rule="evenodd"/>
+            <rect id="Leaf" x="55" y="40" width="12" height="8" fill="#67962b"/>
+            <rect id="Stem" x="60" y="15" width="3" height="20" fill="#67962b"/>
+            <circle id="Speck_run" cx="22" cy="30" r="1.5" fill="#1f3655"/>
+            <rect id="Hole_run" x="33" y="20" width="5" height="5" fill="#1f3655"/>
+            <path id="Road" d="M50 58 L82 52" fill="none" stroke="#0b3d91" stroke-width="0.3"/>
+            <path id="Eye" d="M24 20 L28 20" fill="none" stroke="#1f3655" stroke-width="0.3"/></svg>"##;
+        ok(s.run_tool("add_svg", &json!({ "svg": svg, "replace": true })));
+        let v: Value =
+            serde_json::from_str(&text(&s.run_tool("review_design", &json!({})))).unwrap();
+        let names = |k: &str| -> Vec<String> {
+            v[k].as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["object"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let stray = names("stray_loops");
+        assert!(stray.iter().any(|n| n.starts_with("Speck")), "{v}");
+        assert!(stray.iter().any(|n| n.starts_with("Hole")), "{v}");
+        assert!(!stray.iter().any(|n| n.starts_with("Eye")), "{v}");
+        let lines = names("lines_on_ground");
+        assert!(lines.iter().any(|n| n.starts_with("Road")), "{v}");
+        assert!(!lines.iter().any(|n| n.starts_with("Eye")), "on the flower: {v}");
+    }
+
+    #[test]
+    fn review_design_finds_empty_outlines_border_order_small_text_and_underlay() {
+        let mut s = Studio::with_file(None, None);
+        // A patch: a ground, a blank ring and an empty-looking square sewn
+        // round their edge (the square has a fill of its size under it), a
+        // wide satin with only a center walk, and a 2 mm border sewn first.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="90mm" height="70mm" viewBox="0 0 90 70">
+            <rect id="Edge_satin_w=2" x="5" y="5" width="80" height="60" rx="6" fill="none" stroke="#76ced2" stroke-width="2"/>
+            <rect id="Ground" x="6" y="6" width="78" height="58" fill="#173da5"/>
+            <circle id="Wheel_run" cx="25" cy="25" r="8" fill="#feba35"/>
+            <rect id="Box" x="45" y="15" width="14" height="14" fill="#f47b20"/>
+            <rect id="Box_line_run" x="45" y="15" width="14" height="14" fill="#1f3655"/>
+            <rect id="Bar_satin_ul=center" x="15" y="44" width="40" height="6" fill="#fff1d0"/></svg>"##;
+        ok(s.run_tool("add_svg", &json!({ "svg": svg, "replace": true })));
+        ok(s.run_tool("add_text", &json!({ "text": "hi", "size_mm": 3.0 })));
+        let review = |s: &mut Studio| -> Value {
+            serde_json::from_str(&text(&s.run_tool("review_design", &json!({})))).unwrap()
+        };
+        let has = |v: &Value, k: &str, n: &str| {
+            v[k].as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["object"].as_str().unwrap().starts_with(n))
+        };
+        let v = review(&mut s);
+        assert!(has(&v, "outline_only", "Wheel"), "{v}");
+        assert!(!has(&v, "outline_only", "Box"), "a fill sits under it: {v}");
+        assert!(has(&v, "underlay_mismatch", "Bar"), "{v}");
+        assert!(v["small_lettering"].as_array().unwrap().len() == 1, "{v}");
+        let b = &v["patch_border"];
+        assert!(b["object"].as_str().unwrap().starts_with("Edge"), "{v}");
+        assert_eq!(b["sewn_last"], false, "{v}");
+        assert!(b["why"].as_str().unwrap().contains("2.5 mm"), "{v}");
+
+        // Fixed as the review says: nothing left to report.
+        let last = s.doc.shapes.len() - 1;
+        ok(s.run_tool("move_object", &json!({ "object": b["object"], "to": last })));
+        ok(s.run_tool("set_object", &json!({ "object": b["object"], "width_mm": 4.0 })));
+        ok(s.run_tool("set_object", &json!({ "object": "Bar_satin_ul=center", "satin_underlay": "auto" })));
+        let t = (0..s.doc.shapes.len()).find(|&i| s.doc.lettering(i).is_some()).unwrap();
+        ok(s.run_tool("edit_text", &json!({ "object": t, "size_mm": 8.0 })));
+        let v = review(&mut s);
+        assert!(v["patch_border"].is_null(), "{v}");
+        assert!(v["underlay_mismatch"].as_array().unwrap().is_empty(), "{v}");
+        assert!(v["small_lettering"].as_array().unwrap().is_empty(), "{v}");
+    }
+
+    #[test]
+    fn review_design_puts_underlay_spacing_and_direction_first() {
+        let mut s = Studio::with_file(None, None);
+        // A patch ground with no underlay and open rows, two pieces on it at
+        // its angle (one open too), a satin bar with no underlay, and Sew
+        // over fill on: what an embroiderer sent back about a design.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="60mm" viewBox="0 0 80 60">
+            <rect id="Ground_fill_a=0_s=0.42_u=0" x="5" y="5" width="70" height="50" fill="#173da5"/>
+            <rect id="Leaf_fill" x="12" y="12" width="20" height="12" fill="#67962b"/>
+            <rect id="Bag_fill_s=0.4_u=0" x="40" y="12" width="14" height="14" fill="#feba35"/>
+            <rect id="Bar_satin_ul=none" x="12" y="40" width="40" height="4" fill="#fff1d0"/></svg>"##;
+        ok(s.run_tool("add_svg", &json!({ "svg": svg, "replace": true })));
+        ok(s.run_tool("set_document", &json!({ "over_sewn": true })));
+        let review = |s: &mut Studio| -> Value {
+            serde_json::from_str(&text(&s.run_tool("review_design", &json!({})))).unwrap()
+        };
+        let names = |v: &Value, k: &str| -> Vec<String> {
+            v[k].as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["object"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let v = review(&mut s);
+        let off = names(&v, "underlay_off");
+        assert!(off.iter().any(|n| n.starts_with("Ground")), "{v}");
+        assert!(off.iter().any(|n| n.starts_with("Bag")), "{v}");
+        assert!(off.iter().any(|n| n.starts_with("Bar")), "{v}");
+        assert!(!off.iter().any(|n| n.starts_with("Leaf")), "{v}");
+        let open = names(&v, "too_open");
+        assert!(open.iter().any(|n| n.starts_with("Ground")) && open.iter().any(|n| n.starts_with("Bag")), "{v}");
+        let same = names(&v, "same_direction");
+        assert!(same.iter().any(|n| n.starts_with("Leaf")) && same.iter().any(|n| n.starts_with("Bag")), "{v}");
+        let findings = v["findings"].as_array().unwrap();
+        assert!(findings[0].as_str().unwrap().contains("underlay"), "{v}");
+        assert!(v["findings"].to_string().contains("You turned Sew over fill on"), "{v}");
+
+        // Taken: each fix as the review gives it, and nothing left to say.
+        for (k, fix) in [("underlay_off", "fix"), ("too_open", "fix")] {
+            for x in v[k].as_array().unwrap() {
+                let mut args = x[fix].clone();
+                args["object"] = x["object"].clone();
+                ok(s.run_tool("set_object", &args));
+            }
+        }
+        for x in v["same_direction"].as_array().unwrap() {
+            ok(s.run_tool("set_object", &json!({ "object": x["object"], "angle": x["suggest"] })));
+        }
+        ok(s.run_tool("set_document", &json!({ "over_sewn": false })));
+        let v = review(&mut s);
+        for k in ["underlay_off", "too_open", "same_direction"] {
+            assert!(v[k].as_array().unwrap().is_empty(), "{k}: {v}");
+        }
+        assert!(!v["findings"].to_string().contains("Sew over fill"), "{v}");
+    }
+
+    #[test]
     fn review_design_suggests_satin_for_bands_and_angles_for_flow_and_dimension() {
         let mut s = Studio::with_file(None, None);
         // A band 2 mm wide (and a diagonal one), a broad square, an arm
@@ -7143,7 +7947,7 @@ mod tests {
             assert!(body.contains("-32601"));
         });
         while !client.is_finished() {
-            studio.handle_mcp();
+            studio.handle_mcp(None);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         client.join().unwrap();
@@ -7152,6 +7956,82 @@ mod tests {
             4,
             "the agent's artwork is on the canvas"
         );
+    }
+
+    /// A big design's edit, asked for a short answer, is planned on the
+    /// worker: the UI thread goes on between frames, and the answer (with
+    /// what the edit broke) goes once the plan is back.
+    #[test]
+    fn a_slow_designs_edit_is_answered_once_the_worker_has_planned_it() {
+        let server = crate::mcp::start(0, tool_specs(), INSTRUCTIONS.into(), || {}).unwrap();
+        let port = server.addr.port();
+        let path =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg"));
+        let mut studio = Studio::with_file(Some(path), None);
+        studio.replan();
+        studio.mcp = Some(server);
+        // As if its last plan had been slow.
+        studio.planner.slow = true;
+        let sun = studio.names.iter().position(|n| n == "sun").unwrap();
+        let before = studio.design.per_shape[sun];
+        let ctx = eframe::egui::Context::default();
+        let client = std::thread::spawn(move || {
+            let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_object","arguments":{"object":"sun","spacing_mm":0.8,"terse":true}}});
+            let (_, body) = http(port, &call.to_string(), None);
+            // And the next call, which waits for it.
+            let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_design","arguments":{}}});
+            let (_, next) = http(port, &call.to_string(), None);
+            (body, next)
+        });
+        let mut waited = false;
+        while !client.is_finished() {
+            studio.handle_mcp(Some(&ctx));
+            waited |= studio.mcp_waiting.is_some();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (body, next) = client.join().unwrap();
+        assert!(waited, "the answer waited for the worker's plan");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["result"]["isError"], false, "{body}");
+        let answer: Value =
+            serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(answer["ok"], true);
+        assert!(answer["new_problems"].is_array(), "{answer}");
+        let v: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(v["result"]["isError"], false, "{next}");
+        // The plan it answered after is the edit's.
+        assert!(!studio.planner.pending && studio.mcp_waiting.is_none());
+        assert_ne!(studio.design.per_shape[sun], before);
+    }
+
+    /// "$N.name" names what step N added, when it added one object (as an
+    /// agent writes it for combine_shapes, say); with more, the error says
+    /// what the result has and how to name one.
+    #[test]
+    fn a_batch_step_names_the_one_object_an_earlier_step_added() {
+        let mut s = Studio::with_file(None, None);
+        let one = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path id="leaf" fill="#336633" d="M0 0 H10 V10 H0 Z"/></svg>"##;
+        let r = s.run_tool(
+            "batch",
+            &json!({ "steps": [
+                { "tool": "add_svg", "arguments": { "svg": one, "width_mm": 20.0 } },
+                { "tool": "set_object", "arguments": { "object": "$0.name", "color": "#f47b20" } },
+            ] }),
+        );
+        ok(r);
+        let leaf = s.names.iter().position(|n| n == "leaf").unwrap();
+        assert_eq!(s.doc.shapes[leaf].color, [0xf4, 0x7b, 0x20]);
+        // More than one: which isn't guessed.
+        let r = s.run_tool(
+            "batch",
+            &json!({ "steps": [
+                { "tool": "add_svg", "arguments": { "svg": BADGE, "width_mm": 20.0 } },
+                { "tool": "set_object", "arguments": { "object": "$0.name", "angle": 30 } },
+            ] }),
+        );
+        assert!(r.is_error);
+        let e = text(&r);
+        assert!(e.contains("`added`") && e.contains("$0.added.0.name"), "{e}");
     }
 
     #[test]

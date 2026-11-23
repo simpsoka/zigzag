@@ -139,16 +139,54 @@ pub fn load_file(path: &std::path::Path) -> Result<Vec<Shape>> {
     load(&data)
 }
 
+/// The fonts lettering can use: the system's, and any added since
+/// ([`add_fonts`]).
 pub fn fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
-    // Loading system fonts is slow; do it once per process.
-    static DB: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
-        std::sync::OnceLock::new();
-    DB.get_or_init(|| {
+    let db = fonts_cell()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(db) = db {
+        return db;
+    }
+    let mut w = fonts_cell().write().unwrap_or_else(|e| e.into_inner());
+    // (Another thread may have loaded them while this one waited.)
+    w.get_or_insert_with(|| {
+        // Loading system fonts is slow; do it once per process.
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
         std::sync::Arc::new(db)
     })
     .clone()
+}
+
+fn fonts_cell() -> &'static std::sync::RwLock<Option<std::sync::Arc<usvg::fontdb::Database>>> {
+    static DB: std::sync::RwLock<Option<std::sync::Arc<usvg::fontdb::Database>>> =
+        std::sync::RwLock::new(None);
+    &DB
+}
+
+/// Make font files usable for lettering from now on: fonts downloaded from
+/// ZigZag's catalogue into the app's own folder, say. Designs parsed before
+/// keep the fonts they were parsed with; anything parsed after sees these.
+/// Returns how many faces were added (a file can hold several).
+pub fn add_fonts(files: &[std::path::PathBuf]) -> usize {
+    // (The system's, loaded first if they weren't yet.)
+    fontdb();
+    // Held from reading the fonts there are to putting the longer list
+    // back, so two calls at once don't each drop the other's.
+    let mut cell = fonts_cell().write().unwrap_or_else(|e| e.into_inner());
+    let mut db = cell.as_deref().cloned().unwrap_or_default();
+    let before = db.len();
+    for f in files {
+        // A file that isn't a font adds nothing (fontdb logs it).
+        let _ = db.load_font_file(f);
+    }
+    let added = db.len() - before;
+    if added > 0 {
+        *cell = Some(std::sync::Arc::new(db));
+    }
+    added
 }
 
 /// The font database for parsing one SVG: the system fonts only when it
@@ -427,13 +465,9 @@ fn import_text(text: &usvg::Text, inherited: &Inherit, out: &mut Vec<Shape>) {
     let ctx = inherited.child(text.id());
     let mut rings = Vec::new();
     let mut color = None;
-    // Flattened glyph paths are in the text's own space.
-    collect_glyphs(
-        text.flattened(),
-        text.abs_transform(),
-        &mut rings,
-        &mut color,
-    );
+    // (Flattened glyph paths carry their whole transform, the text's
+    // included: usvg 0.50 made it absolute.)
+    collect_glyphs(text.flattened(), &mut rings, &mut color);
     if !rings.is_empty() {
         let params = Params {
             kind: Some(ctx.base.kind.unwrap_or(Kind::Fill)),
@@ -457,19 +491,14 @@ fn import_text(text: &usvg::Text, inherited: &Inherit, out: &mut Vec<Shape>) {
     }
 }
 
-fn collect_glyphs(
-    g: &usvg::Group,
-    base: usvg::Transform,
-    rings: &mut Vec<Polyline>,
-    color: &mut Option<[u8; 3]>,
-) {
+fn collect_glyphs(g: &usvg::Group, rings: &mut Vec<Polyline>, color: &mut Option<[u8; 3]>) {
     for node in g.children() {
         match node {
-            usvg::Node::Group(g) => collect_glyphs(g, base, rings, color),
+            usvg::Node::Group(g) => collect_glyphs(g, rings, color),
             usvg::Node::Path(p) => {
                 if let Some(f) = p.fill() {
                     color.get_or_insert(paint_color(f.paint()));
-                    let ts = base.pre_concat(p.abs_transform());
+                    let ts = p.abs_transform();
                     rings.extend(
                         flatten_path(p.data(), ts)
                             .into_iter()
@@ -691,5 +720,42 @@ mod tests {
         assert_eq!(name_words("wave 1 satin w=2.4"), vec!["wave", "1"]);
         assert_eq!(name_words("sun_fill_a_x3D_-30_#2"), vec!["sun"]);
         assert!(name_words("tl-12").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod added_fonts_tests {
+    use super::*;
+
+    #[test]
+    fn fonts_added_after_launch_are_there_for_whatever_is_parsed_next() {
+        // Any installed font file, copied where the app would keep downloads.
+        let Some(src) = fontdb().faces().find_map(|f| match &f.source {
+            usvg::fontdb::Source::File(p) if p.extension().is_some_and(|e| e == "ttf") => {
+                Some(p.clone())
+            }
+            _ => None,
+        }) else {
+            return; // no font files on this machine
+        };
+        let dir = std::env::temp_dir().join(format!("zigzag-fonts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("downloaded.ttf");
+        std::fs::copy(&src, &copy).unwrap();
+        let junk = dir.join("not-a-font.ttf");
+        std::fs::write(&junk, b"hello").unwrap();
+
+        let before = fontdb().len();
+        assert_eq!(add_fonts(std::slice::from_ref(&junk)), 0);
+        assert_eq!(fontdb().len(), before);
+        let added = add_fonts(&[copy.clone()]);
+        assert!(added > 0);
+        assert_eq!(fontdb().len(), before + added);
+        assert!(
+            fontdb()
+                .faces()
+                .any(|f| matches!(&f.source, usvg::fontdb::Source::File(p) if p == &copy))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

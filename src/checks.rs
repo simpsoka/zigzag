@@ -621,6 +621,12 @@ pub fn check(
         if e.rows < EXPOSED_ROWS {
             continue;
         }
+        // (Nor what a trim setting sews in sight by choice: a gap sewn
+        // across by Connect, or anything with Sew over fill on. Those
+        // lines are the person's trade for fewer cuts, not a fault.)
+        if opt.over_sewn || e.how == crate::design::TravelHow::Open {
+            continue;
+        }
         match shows.iter_mut().find(|(s, _)| *s == e.shape) {
             Some((_, rows)) => *rows += e.rows,
             None => shows.push((e.shape, e.rows)),
@@ -631,12 +637,7 @@ pub fn check(
             Some(shape),
             Level::Info,
             format!(
-                "The thread crosses {rows} rows of stitches already sewn on its way from one part of this object to the next, and shows on top of them.{}",
-                if opt.over_sewn {
-                    " Turn off Sew over fill (Document panel) to cut it there instead."
-                } else {
-                    ""
-                }
+                "The thread crosses {rows} rows of stitches already sewn on its way from one part of this object to the next, and shows on top of them."
             ),
         );
     }

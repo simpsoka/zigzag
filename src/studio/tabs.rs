@@ -59,6 +59,8 @@ pub struct Tab {
     pub(crate) saved: Option<(u64, Snap)>,
     /// Which recovery file is its (see `session::recovery_file`).
     pub(crate) rec: u32,
+    /// Its plan as kept beside its recovery file.
+    pub(crate) plan: crate::session::KeptPlan,
     /// Its conversation with the agent (each document has its own).
     pub(crate) chat: crate::agent::Chat,
     /// What the agent deleted from it (see `Studio::deleted_names`).
@@ -89,9 +91,21 @@ impl Tab {
             plan_cache: PlanCache::default(),
             saved: None,
             rec,
+            plan: Default::default(),
             chat: Default::default(),
             deleted_names: Vec::new(),
         }
+    }
+
+    /// Its plan is of the document as it is (it was planned when it was
+    /// last in front, and hasn't changed since).
+    pub(crate) fn plan_is_current(&self) -> bool {
+        !self.dirty
+    }
+
+    /// The plan it shows, and what the checks found in it.
+    pub(crate) fn plan_shown(&self) -> (&Design, &[Issue]) {
+        (&self.design, &self.issues)
     }
 
     /// The selected object's index.
@@ -234,7 +248,7 @@ impl Studio {
         swap(&mut self.player, &mut t.player);
         swap(&mut self.plan_cache, &mut t.plan_cache);
         swap(&mut self.deleted_names, &mut t.deleted_names);
-        self.session.swap_doc(&mut t.saved, &mut t.rec);
+        self.session.swap_doc(&mut t.saved, &mut t.rec, &mut t.plan);
         self.agent.swap_chat(&mut t.chat);
     }
 
@@ -303,6 +317,8 @@ impl Studio {
         self.view_tools.lasso.clear();
         self.view_tools.build.cancel();
         self.cancel_previews();
+        // (The share panel is this document's.)
+        self.share.open = None;
         self.layout.offset_dialog = None;
         self.layout.cleanup_dialog = None;
         self.layout.swatch_dialog = None;
@@ -340,6 +356,13 @@ impl Studio {
         self.replans += 1;
         *self.satin_memo.borrow_mut() = None;
         self.leave_review();
+        // Planned here or on the worker as this document's own plans go,
+        // not the last one's. One with stitches to show while it's planned
+        // again (kept from last time, or from before an edit an agent made
+        // at the back) shows them, rather than holding the window up.
+        let slow = self.plan_ms > crate::planner::SLOW_MS
+            || (self.dirty && self.design.stitch_count() > 0);
+        self.planner.entered(slow);
     }
 
     /// Bring tab `j` to the front.

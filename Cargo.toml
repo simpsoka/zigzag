@@ -1,6 +1,6 @@
 [package]
 name = "zigzag"
-version = "0.1.7"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.95"
 description = "Fast SVG-to-embroidery pipeline (PES, DST, Brother PEN) with direct Brother Skitch (PP1) upload"
@@ -29,7 +29,7 @@ required-features = ["gui"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-usvg = "0.45"
+usvg = "0.50"
 svgtypes = "0.15"
 # Glyph advances for the text caret (the version usvg itself uses).
 ttf-parser = "0.25"
@@ -47,8 +47,8 @@ eframe = { version = "0.37", optional = true, default-features = false, features
 ] }
 rfd = { version = "0.17", optional = true }
 i_overlay = { version = "9", default-features = false }
-roxmltree = { version = "0.20", default-features = false }
-resvg = { version = "0.45", default-features = false }
+roxmltree = { version = "0.21", default-features = false }
+resvg = { version = "0.50", default-features = false }
 serde_json = "1.0.154"
 base64 = "0.23.1"
 

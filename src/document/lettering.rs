@@ -207,12 +207,16 @@ impl TextSpec {
     }
 }
 
-/// Font families available to lettering, sorted.
+/// Font families available to lettering, sorted. (Not the ones a Mac or
+/// an iPad keeps for its own interface, whose names start with a dot:
+/// keyboard caps, clock numerals and the like. A design that names one is
+/// still set in it.)
 pub fn font_families() -> Vec<String> {
     let db = svg::fontdb();
     let mut v: Vec<String> = db
         .faces()
         .flat_map(|f| f.families.first().map(|(n, _)| n.clone()))
+        .filter(|n| !n.starts_with('.'))
         .collect();
     v.sort_by_key(|s| s.to_lowercase());
     v.dedup();
@@ -1176,6 +1180,17 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fonts_offered_leave_out_the_systems_own() {
+        // (A Mac has eighty-odd of them, an iPad sixty: `.Keycaps`,
+        // `.SF Compact`, `.LastResort`…)
+        let fonts = font_families();
+        assert!(fonts.iter().all(|f| !f.starts_with('.')), "{fonts:?}");
+        // And what a new text is set in is one of those offered, where
+        // there are any.
+        assert!(fonts.is_empty() || fonts.contains(&default_font()));
+    }
 
     #[test]
     fn lines_alignment_scale_and_case_round_trip() {

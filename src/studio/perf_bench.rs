@@ -552,7 +552,7 @@ fn making_and_aligning() {
         let n = h.state().doc.shapes.len();
         let i = n - 3;
         for guides in [true, false] {
-            h.state_mut().view_tools.smart_guides = guides;
+            h.state_mut().prefs.smart_guides = guides;
             let at = h.state().view.to_screen(
                 rect,
                 crate::app::shape_bounds(&h.state().doc.shapes[i]).center(),
@@ -598,7 +598,7 @@ fn making_and_aligning() {
             settle(&mut h);
         }
         // An object of the design itself, the same way (guides on).
-        h.state_mut().view_tools.smart_guides = true;
+        h.state_mut().prefs.smart_guides = true;
         let at = h.state().view.to_screen(
             rect,
             crate::app::shape_bounds(&h.state().doc.shapes[0]).center(),
@@ -972,7 +972,7 @@ fn sending_a_prompt() {
     h.state_mut().dock.reveal(crate::dock::PanelId::Agent);
     h.state_mut().agent.config = None;
     h.state_mut().agent.kind = crate::agent::AgentKind::Codex;
-    h.state_mut().agent.found = [None, None];
+    h.state_mut().agent.found = [None, None, None];
     h.run_steps(5);
     for round in 0..4 {
         h.state_mut().agent.prompt = format!("make it greener {round}");
@@ -998,4 +998,132 @@ fn sending_a_prompt() {
     }
     unsafe { std::env::remove_var("ZIGZAG_CODEX") };
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Bringing forward a tab that came back from the last session with
+/// unsaved changes: each stage, on every `recovery-*.svg` in the folder
+/// `ZIGZAG_RECOVERY` names (copies: the session there is rewritten).
+///
+/// `ZIGZAG_RECOVERY=<folder> cargo test --profile trial --features gui --bin zigzag-studio perf_bench::reopening -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn reopening_recovered_tabs() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("ZIGZAG_RECOVERY").expect("ZIGZAG_RECOVERY: a folder of recovery-*.svg"),
+    );
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("recovery-") && n.ends_with(".svg"))
+        })
+        .collect();
+    files.sort();
+    if let Ok(only) = std::env::var("ZIGZAG_ONLY") {
+        files.retain(|f| f.to_string_lossy().contains(&only));
+    }
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let badge = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg");
+    for f in &files {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        // (`ZIGZAG_COLD`: straight to the studio, as a launch is, nothing
+        // planned yet in this process.)
+        let cold = std::env::var_os("ZIGZAG_COLD").is_some();
+        let t = std::time::Instant::now();
+        let xml = std::fs::read_to_string(f).unwrap();
+        let read = ms(t);
+        let t = std::time::Instant::now();
+        let doc = zigzag::document::Document::from_svg(&xml, "untitled", None).unwrap();
+        let parse = ms(t);
+        if cold {
+            println!(
+                "{name}: {} objects; read {read:.1} ms, parse {parse:.1} ms",
+                doc.shapes.len()
+            );
+        }
+        let t = std::time::Instant::now();
+        let d = if cold {
+            Default::default()
+        } else {
+            doc.plan_cached(&mut Default::default())
+        };
+        let plan = ms(t);
+        let t = std::time::Instant::now();
+        let _ = doc.plan_cached(&mut Default::default());
+        let again = ms(t);
+        let t = std::time::Instant::now();
+        let issues = zigzag::checks::check(&doc.shapes, &d, &doc.plan_options(), None);
+        let check = ms(t);
+        if !cold {
+            println!(
+                "{name}: {} objects, {} stitches; read {read:.1} ms, parse {parse:.1} ms, plan {plan:.1} ms (again {again:.1} ms), checks {check:.1} ms ({} issues)",
+                doc.shapes.len(),
+                d.stitch_count(),
+                issues.len()
+            );
+        }
+
+        // In the studio: the session has the badge in front and this one
+        // behind it, as the app restores it.
+        let session = dir.join(format!("session-{name}"));
+        let _ = std::fs::remove_dir_all(&session);
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::copy(f, session.join("recovery-1.svg")).unwrap();
+        let meta = serde_json::json!({
+            "active": 0,
+            "tabs": [
+                {"name": "badge", "path": badge, "recovery": false, "recovery_file": "recovery.svg"},
+                {"name": "untitled", "path": null, "recovery": true, "recovery_file": "recovery-1.svg"},
+            ],
+        });
+        // First as it was (nothing kept beside the recovery file), then
+        // with the plan that first time kept.
+        for kept in [false, true] {
+            std::fs::write(session.join("session.json"), meta.to_string()).unwrap();
+            let mut studio = Studio::with_file(None, None);
+            studio.session = crate::session::SessionState::in_dir(Some(session.clone()));
+            let t = std::time::Instant::now();
+            assert!(studio.restore_session());
+            let restore = ms(t);
+            let mut h = Harness::builder()
+                .with_size(Vec2::new(1600.0, 1000.0))
+                .build_ui_state(|ui, s: &mut Studio| s.frame(ui), studio);
+            h.state_mut().planner.timed = true;
+            h.run_steps(5);
+            settle(&mut h);
+            // Click its tab: the frame that brings it forward, then frames
+            // until its stitches show, and until they're planned again.
+            let t = std::time::Instant::now();
+            h.state_mut().tabs.pending = Some(crate::tabs::TabOp::Switch(1));
+            h.step();
+            let first = ms(t);
+            let shown_first = h.state().design.stitch_count() > 0;
+            let mut frames = 1;
+            let mut slowest: f64 = first;
+            while h.state().design.stitch_count() == 0
+                || h.state().planner.pending
+                || h.state().dirty
+            {
+                let f = std::time::Instant::now();
+                h.step();
+                slowest = slowest.max(ms(f));
+                frames += 1;
+                if frames > 20000 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let all = ms(t);
+            println!(
+                "    {}: restore (launch) {restore:.1} ms; switch: first frame {first:.1} ms (stitches {}), planned after {all:.1} ms ({frames} frames, slowest {slowest:.1} ms)",
+                if kept { "plan kept" } else { "no plan kept" },
+                if shown_first { "shown" } else { "not yet" }
+            );
+            h.state_mut().write_session();
+            assert!(session.join("recovery-1.plan").exists());
+        }
+        let _ = std::fs::remove_dir_all(&session);
+    }
 }

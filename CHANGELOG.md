@@ -1,22 +1,33 @@
 # Changelog
 
-## 0.1.7 — 2026-11-20
+## 0.1.10 — 2026-11-22
 
-- Each design keeps its chats with the agent; paste or drop images into
-  the prompt, and type `/` for commands (model, effort, history, fix).
-- The agent can review a design before it's sewn, offer choices as a
-  card, align, combine and rename objects, and route a thread round a cut.
-- Blend in the Document panel sews across gaps where the thread is close
-  in color to what it crosses, instead of cutting.
-- Files open in the ZigZag window that's already running; Windows keeps
-  its open tabs and settings.
-- A failing agent tool or a malformed design no longer crashes the app.
+- The Agent panel has a Setup page: install an AI assistant and sign in
+  to it from the panel, with no terminal.
+- Google's Antigravity is a third agent, beside Codex and Claude Code.
+- A prompt sent while the agent server is off says why.
+- Jump Stitches and Smart Guides (View) are remembered between launches,
+  for every document.
+- The engine behind the zigzag.diy file checker is in ZigZag's library:
+  it reads a machine file's trims, notes what's wrong with the file and
+  fixes what its stitches alone allow.
 
-[Full release notes](packaging/releases/0.1.7.md)
-· [Downloads](https://github.com/simpsoka/zigzag/releases/tag/v0.1.7)
+[Full release notes](packaging/releases/0.1.10.md)
+· [Downloads](https://github.com/simpsoka/zigzag/releases/tag/v0.1.10)
 
 ## Previous releases
 
+- [0.1.9](packaging/releases/0.1.9.md): the agent reviews a design as an
+  embroiderer would, chosen trim settings are kept, pull-compensated
+  fills, Auto-Hide for the Agent panel, tabs that show their stitches at
+  once.
+- [0.1.8](packaging/releases/0.1.8.md): sharing to zigzag.diy, opening
+  shared designs, an account that syncs machines and palettes, variable
+  fonts, queued messages to the agent.
+
+- [0.1.7](packaging/releases/0.1.7.md): chats kept with each design, images
+  and slash commands in the prompt, design review, Blend, files opened in
+  the running window.
 - [0.1.6](packaging/releases/0.1.6.md): satin lettering read stroke by
   stroke with Corners, Break into Columns, Annotate and versions for the
   agent, stitch checks in Issues.

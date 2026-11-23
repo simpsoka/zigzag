@@ -1294,7 +1294,7 @@ impl Studio {
         let mods = DragMods {
             shift,
             alt: false,
-            snap: self.view_tools.smart_guides,
+            snap: self.prefs.smart_guides,
             tol: 0.0,
         };
         self.update_point_drag(q, mods);
@@ -1781,7 +1781,7 @@ mod tests {
     #[test]
     fn dragging_a_curved_segment_bends_it_under_the_pointer() {
         let mut h = studio();
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.key_press(Key::A);
         h.run_steps(1);
         let i = sun(&h);
@@ -2702,7 +2702,7 @@ mod tests {
     #[test]
     fn the_anchor_point_tool_converts_points_and_moves_handles_alone() {
         let mut h = square();
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.state_mut().set_selection(&[0]);
         h.key_press_modifiers(egui::Modifiers::SHIFT, Key::C);
         h.run_steps(2);
@@ -2750,7 +2750,7 @@ mod tests {
     #[test]
     fn add_and_delete_anchor_point_tools() {
         let mut h = square();
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.state_mut().request_fit();
         h.run_steps(3);
         let before = shape_bounds(&h.state().doc.shapes[0]);
@@ -2905,7 +2905,7 @@ mod tests {
     #[test]
     fn direct_selection_on_an_unselected_paths_outline_edits_it_right_away() {
         let mut h = square();
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.state_mut().request_fit();
         h.run_steps(3);
         h.state_mut().set_tool(Tool::Direct);

@@ -70,8 +70,31 @@ impl Palettes {
         else {
             return p;
         };
+        p.set_from_json(&v);
+        p
+    }
+
+    /// Your palettes as kept (`{"palettes": [...]}`); synced as they are.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "palettes": self.mine.iter().map(|p| serde_json::json!({
+                "name": p.name,
+                "colors": p.colors.iter().map(|&c| hex(c)).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>()
+        })
+    }
+
+    /// Your palettes, from what `to_json` wrote (another computer's).
+    pub fn set_from_json(&mut self, v: &serde_json::Value) {
+        // The palette shown stays the one shown, by its name, wherever
+        // it is in the new list (and a rename under way is of that one).
+        let shown = match self.source {
+            Source::Mine(k) => Some(self.mine.get(k).map(|p| p.name.clone())),
+            _ => None,
+        };
+        self.mine.clear();
         for e in v["palettes"].as_array().into_iter().flatten() {
-            p.mine.push(UserPalette {
+            self.mine.push(UserPalette {
                 name: e["name"].as_str().unwrap_or("Palette").to_string(),
                 colors: e["colors"]
                     .as_array()
@@ -81,17 +104,21 @@ impl Palettes {
                     .collect(),
             });
         }
-        p
+        if let Some(name) = shown {
+            match name.and_then(|n| self.mine.iter().position(|p| p.name == n)) {
+                Some(k) => self.source = Source::Mine(k),
+                None => {
+                    self.source = Source::default();
+                    self.renaming = None;
+                }
+            }
+        }
     }
 
     pub fn save(&self) {
+        crate::sync::touched();
         let Some(path) = &self.path else { return };
-        let v = serde_json::json!({
-            "palettes": self.mine.iter().map(|p| serde_json::json!({
-                "name": p.name,
-                "colors": p.colors.iter().map(|&c| hex(c)).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>()
-        });
+        let v = self.to_json();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -228,8 +255,9 @@ impl Studio {
                     let name = self.palettes.renaming.take().unwrap_or_default();
                     if let Source::Mine(k) = src
                         && !name.trim().is_empty()
+                        && let Some(p) = self.palettes.mine.get_mut(k)
                     {
-                        self.palettes.mine[k].name = name.trim().to_string();
+                        p.name = name.trim().to_string();
                         self.palettes.save();
                     }
                 }
@@ -258,7 +286,7 @@ impl Studio {
                 if choice != src {
                     self.palettes.source = choice;
                     if let Source::Chart(b) = choice {
-                        self.view_tools.brand = b;
+                        self.set_thread_chart(b);
                     }
                 }
             }
@@ -301,7 +329,7 @@ impl Studio {
                                 self.palettes
                                     .create(Some(kit.name.to_string()), kit.colors());
                                 // Name threads after the kit's brand.
-                                self.view_tools.brand = kit.brand;
+                                self.set_thread_chart(kit.brand);
                                 ui.close();
                             }
                         }
@@ -433,6 +461,29 @@ impl Studio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palettes_from_another_computer_keep_the_one_shown_by_name() {
+        let mut p = Palettes::default();
+        for name in ["A", "B", "C"] {
+            p.mine.push(UserPalette {
+                name: name.into(),
+                colors: vec![],
+            });
+        }
+        p.source = Source::Mine(2);
+        p.renaming = Some("C".into());
+        // Fewer, in another order: still showing C, wherever it is now.
+        p.set_from_json(&serde_json::json!({ "palettes": [
+            { "name": "C", "colors": [] }, { "name": "A", "colors": [] },
+        ] }));
+        assert_eq!(p.source, Source::Mine(0));
+        assert!(p.renaming.is_some());
+        // Gone: back to the chart, and nothing being renamed.
+        p.set_from_json(&serde_json::json!({ "palettes": [{ "name": "A", "colors": [] }] }));
+        assert_eq!(p.source, Source::default());
+        assert!(p.renaming.is_none());
+    }
 
     #[test]
     fn palettes_are_remembered() {

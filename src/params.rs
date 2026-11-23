@@ -251,7 +251,7 @@ pub const FABRICS: [Fabric; 4] = [
         about: "Stable woven fabric. Classic densities.",
         fill_spacing: 0.25,
         fill_len: 3.0,
-        fill_pull: 0.0,
+        fill_pull: 0.2,
         fill_edge_walk: false,
         fill_underlay_spacing: 1.5,
         satin_spacing: 0.4,

@@ -52,6 +52,8 @@ pub struct SessionState {
     /// The recovery file of the document in front (see [`recovery_file`]);
     /// each tab has its own.
     pub(crate) rec: u32,
+    /// The document in front's plan as kept beside its recovery file.
+    pub(crate) plan: KeptPlan,
     /// What `session.json` last said.
     saved_meta: Option<serde_json::Value>,
     /// The last session is being brought back: the first frame that
@@ -74,6 +76,56 @@ pub(crate) fn recovery_file(rec: u32) -> String {
     } else {
         format!("recovery-{rec}.svg")
     }
+}
+
+/// A recovery file's kept plan (see `plan_keep.rs`): `recovery-3.plan`
+/// beside `recovery-3.svg`.
+fn plan_file(svg: &Path) -> PathBuf {
+    svg.with_extension("plan")
+}
+
+/// Where a document's plan stands with the file kept beside its recovery
+/// file (each tab has its own).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeptPlan {
+    /// The `plan_keep::key_of` of its recovery file as written (or read).
+    pub(crate) key: Option<u64>,
+    /// Its plan for that is kept (or was tried and couldn't be).
+    pub(crate) kept: bool,
+}
+
+impl KeptPlan {
+    /// The recovery file was just written with `text`.
+    fn written(text: &str) -> KeptPlan {
+        KeptPlan {
+            key: Some(crate::plan_keep::key_of(text)),
+            kept: false,
+        }
+    }
+
+    /// Whether there's a plan to keep, given that `current` says the plan
+    /// shown is the document's as it is.
+    fn wanted(&self, current: bool) -> bool {
+        current && self.key.is_some() && !self.kept
+    }
+
+    /// Keep `design` (and its `issues`) beside the recovery file `svg`.
+    fn keep(&mut self, svg: &Path, offset: P, design: &Design, issues: &[zigzag::checks::Issue]) {
+        let Some(key) = self.key else {
+            return;
+        };
+        // (Tried once whatever happens: a disk that won't take it isn't
+        // asked again at every write.)
+        self.kept = true;
+        let bytes = crate::plan_keep::encode(key, offset, design, issues);
+        let _ = write_atomic_as(&plan_file(svg), &bytes, false);
+    }
+}
+
+/// A recovery file and the plan kept beside it go.
+fn remove_recovery(svg: &Path) {
+    let _ = std::fs::remove_file(svg);
+    let _ = std::fs::remove_file(plan_file(svg));
 }
 
 /// The recovery number in a recovery file's name.
@@ -118,18 +170,25 @@ impl SessionState {
 
     /// Swap what's kept about the document in front with a tab's (see
     /// `tabs.rs`).
-    pub(crate) fn swap_doc(&mut self, saved: &mut Option<(u64, Snap)>, rec: &mut u32) {
+    pub(crate) fn swap_doc(
+        &mut self,
+        saved: &mut Option<(u64, Snap)>,
+        rec: &mut u32,
+        plan: &mut KeptPlan,
+    ) {
         std::mem::swap(&mut self.saved_doc, saved);
         std::mem::swap(&mut self.rec, rec);
+        std::mem::swap(&mut self.plan, plan);
     }
 
     /// A tab was closed: its unsaved changes go with it.
     pub(crate) fn forget_recovery(&mut self, rec: u32) {
         if let Some(f) = self.file(&recovery_file(rec)) {
-            let _ = std::fs::remove_file(f);
+            remove_recovery(&f);
         }
         if rec == self.rec {
             self.saved_doc = None;
+            self.plan = KeptPlan::default();
         }
     }
 }
@@ -137,16 +196,16 @@ impl SessionState {
 /// Write `text` to `path` whole or not at all (a crash mid-write leaves the
 /// old file).
 pub(crate) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    write_atomic_as(path, text, false)
+    write_atomic_as(path, text.as_bytes(), false)
 }
 
 /// `write_atomic`, for a file only this user may read (on Unix `0600`,
 /// whatever the umask; elsewhere the settings folder is the user's own).
 pub(crate) fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    write_atomic_as(path, text, true)
+    write_atomic_as(path, text.as_bytes(), true)
 }
 
-fn write_atomic_as(path: &Path, text: &str, private: bool) -> std::io::Result<()> {
+fn write_atomic_as(path: &Path, text: &[u8], private: bool) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -173,7 +232,7 @@ fn write_atomic_as(path: &Path, text: &str, private: bool) -> std::io::Result<()
         }
         #[cfg(not(unix))]
         let _ = private;
-        f.write_all(text.as_bytes())?;
+        f.write_all(text)?;
         // On disk before it takes the old file's place: a power cut or a
         // kernel panic right after the rename can't leave an empty file.
         f.sync_all()?;
@@ -257,6 +316,7 @@ impl Studio {
         // back, and that changes which one is in front.)
         let changed = std::mem::take(&mut self.session.behind)
             || self.doc_unsaved_changed()
+            || (self.modified && self.session.plan.wanted(self.plan_is_current()))
             || self.session.saved_meta.as_ref() != Some(&self.session_meta(self.modified));
         if changed && self.session.due.is_none() {
             self.session.due = Some(now + SETTLE_S);
@@ -315,14 +375,24 @@ impl Studio {
                 match self.doc.to_svg() {
                     Ok(text) if write_atomic(&svg, &text).is_ok() => {
                         self.session.saved_doc = Some((self.doc.rev(), snapshot_of(&self.doc)));
+                        self.session.plan = KeptPlan::written(&text);
                     }
                     // Couldn't keep it: try again next change.
                     _ => return,
                 }
             } else {
-                let _ = std::fs::remove_file(&svg);
+                remove_recovery(&svg);
                 self.session.saved_doc = None;
+                self.session.plan = KeptPlan::default();
             }
+        }
+        // Its stitches as planned for what's in the recovery file, once
+        // they are.
+        if recovery && self.session.plan.wanted(self.plan_is_current()) {
+            let offset = self.doc.offset;
+            self.session
+                .plan
+                .keep(&svg, offset, &self.design, &self.issues);
         }
         // The tabs at the back, each in its own file.
         let active = self.tabs.active;
@@ -342,12 +412,22 @@ impl Studio {
                     match t.doc.to_svg() {
                         Ok(text) if write_atomic(&f, &text).is_ok() => {
                             t.saved = Some((t.doc.rev(), snapshot_of(&t.doc)));
+                            t.plan = KeptPlan::written(&text);
                         }
                         _ => return,
                     }
                 }
+                // (A tab at the back was planned when it was last in front,
+                // unless it's been changed since.)
+                if t.plan.wanted(t.plan_is_current()) {
+                    let (design, issues) = t.plan_shown();
+                    let mut plan = t.plan;
+                    plan.keep(&f, t.doc.offset, design, issues);
+                    t.plan = plan;
+                }
             } else if t.saved.take().is_some() {
-                let _ = std::fs::remove_file(&f);
+                remove_recovery(&f);
+                t.plan = KeptPlan::default();
             }
         }
         let meta = self.session_meta(recovery);
@@ -445,6 +525,7 @@ impl Studio {
                 .filter_map(|e| {
                     let svg = self.session.file(&recovery_file(rec_of(e)))?;
                     let aside = aside(&svg, "crashed");
+                    let _ = std::fs::remove_file(plan_file(&svg));
                     std::fs::rename(&svg, &aside).ok().map(|_| aside)
                 })
                 .collect();
@@ -537,10 +618,18 @@ impl Studio {
         let recovered = recovery_file.as_ref().and_then(|f| {
             let xml = std::fs::read_to_string(f).ok()?;
             match Document::from_svg(&xml, &name, path.clone()) {
-                Ok(doc) => Some(doc),
+                Ok(doc) => {
+                    // Its stitches as they were, if they were kept for it.
+                    let key = crate::plan_keep::key_of(&xml);
+                    let kept = std::fs::read(plan_file(f)).ok().and_then(|b| {
+                        crate::plan_keep::decode(&b, key, doc.shapes.len(), doc.offset)
+                    });
+                    Some((doc, key, kept))
+                }
                 Err(e) => {
                     // Unreadable: keep it rather than lose it, and say so.
                     let kept = aside(f, "unreadable");
+                    let _ = std::fs::remove_file(plan_file(f));
                     let _ = std::fs::rename(f, &kept);
                     unreadable = Some(format!(
                         "Couldn't read the unsaved changes to {name} ({e:#}); they're kept in {}.",
@@ -550,9 +639,23 @@ impl Studio {
                 }
             }
         });
-        let opened = if let Some(doc) = recovered {
+        let opened = if let Some((doc, key, kept)) = recovered {
             self.set_document(doc);
             self.modified = true;
+            self.session.plan = KeptPlan {
+                key: Some(key),
+                kept: kept.is_some(),
+            };
+            if let Some((design, issues)) = kept {
+                // Shown while it's planned again, on the worker: the first
+                // plan of a launch can take seconds (its letters split for
+                // the first time).
+                self.design = design;
+                self.issues = issues;
+                self.names = zigzag::svg::display_names(&self.doc.shapes);
+                self.replans += 1;
+                self.planner.expect_slow();
+            }
             self.status =
                 format!("Picked up where you left off: {name}, with its unsaved changes.");
             true
@@ -1048,6 +1151,131 @@ mod tests {
                 .any(|e| e.file_name().to_string_lossy().starts_with("recovery-")),
             "three's recovery is gone"
         );
+    }
+
+    /// A document that comes back with unsaved changes shows the stitches
+    /// it had straight away, kept beside its recovery file, while they're
+    /// planned again; kept stitches that aren't for what's in the recovery
+    /// file aren't shown.
+    #[test]
+    fn unsaved_changes_come_back_with_their_stitches() {
+        let dir = temp_dir("kept-plan");
+        let file = dir.join("logo.svg");
+        std::fs::write(&file, SVG).unwrap();
+        let mut a = studio_in(&dir);
+        a.load(&file);
+        a.structural(|d| d.delete(0)).unwrap();
+        a.write_session();
+        let plan = dir.join("recovery.plan");
+        assert!(!plan.exists(), "not until it's planned");
+        a.replan();
+        assert!(a.plan_is_current());
+        a.keep_session_at(0.0, false, false);
+        a.keep_session_at(100.0, false, false);
+        assert!(plan.exists(), "kept once it's planned");
+        let issues = a.issues.clone();
+        let pts = |d: &Design| -> Vec<P> {
+            d.blocks
+                .iter()
+                .flat_map(|b| &b.runs)
+                .flat_map(|r| r.pts.iter().copied())
+                .collect()
+        };
+        let count = a.design.stitch_count();
+        drop(a);
+
+        let mut b = studio_in(&dir);
+        assert!(b.restore_session());
+        assert!(b.dirty, "planned again all the same");
+        assert_eq!(b.design.stitch_count(), count, "shown at once");
+        assert_eq!(b.issues, issues);
+        // Where the document read back plans them (its artwork, one object
+        // gone, is placed again when it's read).
+        let shown = pts(&b.design);
+        b.replan();
+        let now = pts(&b.design);
+        assert_eq!(now.len(), shown.len());
+        let worst = now
+            .iter()
+            .zip(&shown)
+            .map(|(p, q)| (*p - *q).len())
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-6, "{worst}");
+        // (A first frame: the restore got through.)
+        b.keep_session_at(0.0, false, false);
+        drop(b);
+
+        // The recovery file changed (and its plan wasn't kept again): what's
+        // kept is for something else.
+        let svg = dir.join("recovery.svg");
+        let text = std::fs::read_to_string(&svg).unwrap();
+        std::fs::write(&svg, text.replace("#2c3e50", "#27ae60")).unwrap();
+        let mut c = studio_in(&dir);
+        assert!(c.restore_session());
+        c.keep_session_at(0.0, false, false);
+        assert_eq!(c.design.stitch_count(), 0, "nothing kept for this");
+
+        // Its changes let go: the kept plan goes with them.
+        c.replan();
+        c.write_session();
+        assert!(plan.exists());
+        c.discard_tab(0);
+        c.write_session();
+        assert!(!plan.exists() && !svg.exists());
+    }
+
+    /// Bringing such a tab forward shows its stitches in that frame, and
+    /// plans it again on the worker rather than holding the window up,
+    /// however quick the plans of the tab it came from were.
+    #[test]
+    fn a_tab_with_kept_stitches_comes_forward_at_once() {
+        use eframe::egui::Vec2;
+        let dir = temp_dir("kept-switch");
+        let (one, two) = (dir.join("one.svg"), dir.join("two.svg"));
+        std::fs::write(&one, SVG).unwrap();
+        std::fs::write(&two, SVG).unwrap();
+        let mut a = studio_in(&dir);
+        a.load(&one);
+        a.load(&two);
+        a.structural(|d| d.delete(0)).unwrap();
+        a.replan();
+        a.write_session();
+        a.switch_tab(0);
+        a.replan();
+        a.write_session();
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().ends_with(".plan")),
+            "two's stitches kept"
+        );
+        drop(a);
+
+        let mut b = studio_in(&dir);
+        assert!(b.restore_session());
+        assert_eq!(b.active_tab(), 0);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1400.0, 900.0))
+            .build_ui_state(|ui, s: &mut Studio| s.frame(ui), b);
+        h.state_mut().planner.timed = true;
+        h.run_steps(3);
+        // (One's plans are quick: they're made here.)
+        h.state_mut().planner.took(1.0);
+        h.state_mut().tabs.pending = Some(crate::tabs::TabOp::Switch(1));
+        h.step();
+        let s = h.state();
+        assert_eq!(s.active_tab(), 1);
+        assert!(s.design.stitch_count() > 0, "its stitches show");
+        assert!(s.planner.pending, "planned again on the worker");
+        for _ in 0..400 {
+            h.step();
+            if !h.state().planner.pending {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!h.state().planner.pending && !h.state().dirty);
     }
 
     /// Opening a file with ZigZag (from the command line, or the desktop's

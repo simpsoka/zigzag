@@ -53,7 +53,29 @@ impl Machines {
         m
     }
 
+    /// Your machines and their hoops, as kept (synced as they are; the
+    /// machine new documents start with is synced on its own).
+    pub fn mine_json(&self) -> serde_json::Value {
+        serde_json::json!({ "machines": self.mine.iter().map(Profile::to_json).collect::<Vec<_>>() })
+    }
+
+    /// Your machines, from what `mine_json` wrote (another computer's).
+    pub fn set_mine_json(&mut self, v: &serde_json::Value) {
+        self.mine = profile::parse_list(v)
+            .into_iter()
+            .filter(|p| profile::builtin().iter().all(|b| b.id != p.id))
+            .collect();
+        if self
+            .current
+            .as_deref()
+            .is_some_and(|id| self.find(id).is_none())
+        {
+            self.current = profile::builtin().first().map(|p| p.id.clone());
+        }
+    }
+
     pub fn save(&self) {
+        crate::sync::touched();
         let Some(path) = &self.path else { return };
         let v = serde_json::json!({
             "current": self.current,

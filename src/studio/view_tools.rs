@@ -33,8 +33,6 @@ pub struct ViewTools {
     pub marker_pick: Option<Marker>,
     /// A marker being dragged along the selected object's outline.
     pub marker_drag: Option<Marker>,
-    /// Snap to other objects and the hoop while dragging (⌘U).
-    pub smart_guides: bool,
     pub points: bool,
     /// Settings › General › Draw stitches on the GPU (off: egui's painter
     /// draws them).
@@ -91,7 +89,6 @@ impl Default for ViewTools {
             order_labels: false,
             marker_pick: None,
             marker_drag: None,
-            smart_guides: true,
             points: false,
             gpu_stitches: true,
             measure: None,
@@ -675,9 +672,54 @@ mod tests {
     }
 
     #[test]
+    fn a_floating_agent_panel_steps_away_for_the_canvas_and_the_tools_if_asked() {
+        use crate::dock::{PanelId, Place};
+        let mut h = studio(Some("badge.svg"));
+        let agent = PanelId::Agent;
+        h.state_mut().dock.move_panel(agent, Place::Float, None);
+        h.state_mut().dock.reveal(agent);
+        h.run_steps(2);
+        assert_eq!(h.state().dock.place_of(agent), Place::Float);
+        // (Top right of the canvas: clear of the panel in the lower left.)
+        let r = h.state().canvas_rect;
+        let at = Pos2::new(r.right() - 60.0, r.top() + 60.0);
+
+        // On as it comes; off, the panel stays.
+        assert!(h.state().dock.agent_auto_hide);
+        h.state_mut().dock.agent_auto_hide = false;
+        click_at(&mut h, at);
+        h.state_mut().set_tool(Tool::Pen);
+        h.run_steps(2);
+        assert!(h.state().dock.visible(agent));
+
+        // On: a click on the canvas puts it away...
+        h.state_mut().dock.agent_auto_hide = true;
+        h.state_mut().set_tool(Tool::Select);
+        h.state_mut().dock.reveal(agent);
+        h.run_steps(2);
+        click_at(&mut h, at);
+        assert!(!h.state().dock.visible(agent));
+        // ...and so does picking another tool, but not the one in hand.
+        h.state_mut().dock.reveal(agent);
+        h.run_steps(2);
+        h.state_mut().set_tool(Tool::Select);
+        assert!(h.state().dock.visible(agent));
+        h.state_mut().set_tool(Tool::Hand);
+        assert!(!h.state().dock.visible(agent));
+
+        // Not while pinning notes for the agent: those clicks are for it.
+        h.state_mut().set_tool(Tool::Select);
+        h.state_mut().dock.reveal(agent);
+        h.state_mut().review.annotating = true;
+        h.run_steps(2);
+        click_at(&mut h, at);
+        assert!(h.state().dock.visible(agent));
+    }
+
+    #[test]
     fn measure_reads_distance_angle_and_size_in_the_unit() {
         let mut h = studio(None);
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.key_press(Key::I);
         h.run_steps(1);
         assert_eq!(h.state().tool, Tool::Measure);
@@ -708,7 +750,7 @@ mod tests {
     #[test]
     fn measure_snaps_to_the_grid_and_shift_keeps_it_level() {
         let mut h = studio(None);
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.state_mut().view_tools.grid = true;
         h.state_mut()
             .run_action(crate::commands::Action::Units(crate::units::Unit::In));

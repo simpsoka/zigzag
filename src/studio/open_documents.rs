@@ -42,11 +42,6 @@ pub fn on_arrival(wake: impl Fn() + Send + 'static) {
     }
 }
 
-/// Anything arrived since last time.
-pub fn pending() -> bool {
-    ARRIVED.lock().is_ok_and(|a| !a.is_empty())
-}
-
 /// The files that arrived since last time, in order.
 pub fn take() -> Vec<PathBuf> {
     ARRIVED

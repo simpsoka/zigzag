@@ -534,6 +534,20 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_says_why_the_server_is_off() {
+        // Another ZigZag holding the port isn't `--no-mcp`: the agent says which.
+        let mut s = Studio::with_file(None, None);
+        s.mcp_ui.port = Some(7878);
+        s.mcp_ui.start_error = Some("address in use".into());
+        s.agent.prompt = "make the sun bigger".into();
+        s.agent_send(&egui::Context::default());
+        let last = format!("{:?}", s.agent.log.last());
+        assert!(last.contains("couldn't start on port 7878"), "{last}");
+        assert!(!last.contains("--no-mcp"), "{last}");
+        assert!(!s.agent.running());
+    }
+
+    #[test]
     fn the_chip_says_when_the_server_is_off() {
         let mut s = Studio::with_file(None, None);
         s.mcp_ui.port = Some(7878);

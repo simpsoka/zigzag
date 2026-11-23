@@ -89,8 +89,20 @@ impl Document {
                 // ascent/descent, in font units.
                 let Some((adv, asc, desc)) = db
                     .with_face_data(g.font, |data, idx| {
-                        let face = ttf_parser::Face::parse(data, idx).ok()?;
-                        let gid = ttf_parser::GlyphId(g.id.0);
+                        let mut face = ttf_parser::Face::parse(data, idx).ok()?;
+                        // A variable font at the span's weight (and other
+                        // axes), as usvg drew it: a bolder weight is wider.
+                        // (Its optical size first, as usvg sets it, so an
+                        // `opsz` the text names wins.)
+                        let auto_opsz = (span.font_optical_sizing == usvg::FontOpticalSizing::Auto)
+                            .then(|| (*b"opsz", span.font_size.get()));
+                        for (tag, value) in auto_opsz
+                            .into_iter()
+                            .chain(span.variations.iter().map(|v| (v.tag, v.value)))
+                        {
+                            let _ = face.set_variation(ttf_parser::Tag::from_bytes(&tag), value);
+                        }
+                        let gid = ttf_parser::GlyphId(u16::try_from(g.id.0).ok()?);
                         Some((
                             face.glyph_hor_advance(gid).unwrap_or(0) as f32,
                             face.ascender() as f32,

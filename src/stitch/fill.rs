@@ -50,6 +50,10 @@ struct Row {
     y: f64,
     xa: f64,
     xb: f64,
+    /// The row's ends before pull widens them (inset for underlay): what
+    /// decides which rows it lies over.
+    ra: f64,
+    rb: f64,
     /// A stitch straight from the row before's end to this one's start
     /// would leave the shape (the ends are far apart along a slanting or
     /// wavy edge): the way between them is along the rows instead.
@@ -121,7 +125,7 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
         xs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         let mut w = 0;
         let mut start = 0.0;
-        let mut ivs = Vec::new();
+        let mut spans: Vec<(f64, f64)> = Vec::new();
         for &(x, d) in &xs {
             let was = rule.inside(w);
             w += d;
@@ -129,17 +133,44 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
             if !was && now {
                 start = x;
             } else if was && !now {
-                let (xa, xb) = (start + shrink, x - shrink);
-                if xb - xa >= min_row {
-                    ivs.push(Row {
-                        k,
-                        y,
-                        xa,
-                        xb,
-                        dogleg: false,
-                    });
-                }
+                spans.push((start, x));
             }
+        }
+        let mut ivs = Vec::new();
+        for (i, &(a, b)) in spans.iter().enumerate() {
+            // (Too narrow to sew is judged by the shape's own width:
+            // widening the rows for pull doesn't make a sliver or a neck
+            // sewable.)
+            if b - a - 2.0 * p.inset < min_row {
+                continue;
+            }
+            // Widened for pull, a row reaches past the outline, but not
+            // across a gap to the next row on its line: across a notch or
+            // a slit narrower than the two widenings and a pull's width of
+            // cloth left between, each side takes half of what's over.
+            let room = |gap: f64| {
+                if p.pull > 0.0 {
+                    ((gap - p.pull) * 0.5).clamp(0.0, p.pull)
+                } else {
+                    p.pull
+                }
+            };
+            let (mut ga, mut gb) = (p.pull, p.pull);
+            if i > 0 {
+                ga = room(a - spans[i - 1].1);
+            }
+            if let Some(n) = spans.get(i + 1) {
+                gb = room(n.0 - b);
+            }
+            ivs.push(Row {
+                k,
+                y,
+                xa: a + p.inset - ga,
+                xb: b - p.inset + gb,
+                ra: a + p.inset,
+                rb: b - p.inset,
+                dogleg: false,
+            });
         }
         rows.push(ivs);
     }
@@ -215,7 +246,7 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
                     .enumerate()
                     .filter(|(_, si)| {
                         let last = sections[**si].last().unwrap();
-                        last.xa < iv.xb && iv.xa < last.xb
+                        last.ra < iv.rb && iv.ra < last.rb
                     })
                     .map(|(i, _)| i)
                     .collect();
@@ -609,6 +640,64 @@ mod tests {
                 .all(|w| (w[0].y - w[1].y).abs() <= 9.0 + 1e-6),
             "no stitch up the side longer than three rows"
         );
+    }
+
+    #[test]
+    fn rows_widened_for_pull_stop_short_of_a_slit_and_skip_a_neck() {
+        // Two blocks side by side, a slit between: 0.2 mm wide, then 0.8.
+        let block = |x0: f64, x1: f64| {
+            vec![
+                P::new(x0, 0.0),
+                P::new(x1, 0.0),
+                P::new(x1, 20.0),
+                P::new(x0, 20.0),
+            ]
+        };
+        let mut p = params();
+        p.pull = 2.0;
+        let ends = |slit: f64| -> (f64, f64) {
+            let rings = [block(0.0, 50.0), block(50.0 + slit, 100.0)];
+            let secs = tatami(&rings, FillRule::NonZero, &p);
+            assert_eq!(secs.len(), 2, "slit {slit}: the sides stay apart");
+            let left = secs
+                .iter()
+                .flatten()
+                .filter(|q| q.x < 50.0 + slit * 0.5)
+                .map(|q| q.x)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let right = secs
+                .iter()
+                .flatten()
+                .filter(|q| q.x > 50.0 + slit * 0.5)
+                .map(|q| q.x)
+                .fold(f64::INFINITY, f64::min);
+            (left, right)
+        };
+        // Too narrow for both sides to widen: they keep to the outline.
+        let (l, r) = ends(2.0);
+        assert!(
+            (l - 50.0).abs() < 1e-6 && (r - 52.0).abs() < 1e-6,
+            "{l} {r}"
+        );
+        // Room enough: a full pull a side, a pull's width of cloth between.
+        let (l, r) = ends(8.0);
+        assert!(
+            (l - 52.0).abs() < 1e-6 && (r - 56.0).abs() < 1e-6,
+            "{l} {r}"
+        );
+        // And a strip narrower than a row may be isn't made sewable by
+        // widening it: 0.6 mm, rows 2 mm apart (1 mm the shortest).
+        p.spacing = 20.0;
+        let strip = [vec![
+            P::new(0.0, 0.0),
+            P::new(6.0, 0.0),
+            P::new(6.0, 200.0),
+            P::new(0.0, 200.0),
+        ]];
+        assert!(tatami(&strip, FillRule::NonZero, &p).is_empty());
+        p.pull = 0.0;
+        p.spacing = 5.0;
+        assert!(!tatami(&strip, FillRule::NonZero, &p).is_empty());
     }
 
     #[test]

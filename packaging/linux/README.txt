@@ -39,6 +39,15 @@ Keep the folder somewhere permanent and add it to PATH to use its tools
 from any terminal. For an MCP client, set its command to the absolute path
 of zigzag-mcp. Add --headless to use it without an open editor window.
 
+Open from zigzag.diy
+--------------------
+The Open button on a zigzag.diy share page opens the design in ZigZag. Each
+time zigzag-studio starts it writes ~/.local/share/applications/
+zigzag-studio.desktop (x-scheme-handler/zigzag, pointing at itself) and makes
+it the default with xdg-mime, so start it once from where you keep it (again
+after moving the folder). Designs it opens from links are saved in
+~/Downloads/ZigZag.
+
 Updates and checksums
 ---------------------
 Help > Check for Updates opens the latest download page. Extract the new

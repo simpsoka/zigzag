@@ -13,19 +13,35 @@ use std::fmt::Write;
 pub struct StitchBlock {
     pub color: [u8; 3],
     pub runs: Vec<Polyline>,
+    /// For each run: whether the thread was cut before it (the file said
+    /// trim, or, as DST and JEF say it, three or more jumps in a row).
+    pub trims: Vec<bool>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct StitchFile {
     pub name: String,
     pub blocks: Vec<StitchBlock>,
+    /// What's wrong with the file itself, in plain words (cut short, codes
+    /// it doesn't know, a header that disagrees with the stitches).
+    pub notes: Vec<String>,
 }
+
+/// Jumps in a row a machine takes as a trim, in formats with no trim of
+/// their own (DST, JEF): the usual setting.
+pub const JUMPS_FOR_TRIM: usize = 3;
 
 /// Builder that tracks position and splits runs/blocks.
 struct Builder {
     blocks: Vec<StitchBlock>,
     pos: P,
     jumped: bool,
+    /// Since the last stitch: a trim, and how many jumps.
+    trim: bool,
+    jumps: usize,
+    /// The file's end mark was read.
+    ended: bool,
+    notes: Vec<String>,
 }
 
 impl Builder {
@@ -34,6 +50,10 @@ impl Builder {
             blocks: vec![StitchBlock::default()],
             pos: P::default(),
             jumped: true,
+            trim: false,
+            jumps: 0,
+            ended: false,
+            notes: Vec::new(),
         }
     }
     fn stitch(&mut self, dx: f64, dy: f64) {
@@ -42,29 +62,66 @@ impl Builder {
         let blk = self.blocks.last_mut().unwrap();
         if self.jumped || blk.runs.is_empty() {
             blk.runs.push(vec![from]);
+            blk.trims.push(self.trim || self.jumps >= JUMPS_FOR_TRIM);
             self.jumped = false;
         }
+        self.trim = false;
+        self.jumps = 0;
         blk.runs.last_mut().unwrap().push(self.pos);
     }
     fn jump(&mut self, dx: f64, dy: f64) {
         self.pos = self.pos + P::new(dx, dy);
         self.jumped = true;
+        self.jumps += 1;
+    }
+    /// The thread is cut here (the move, if any, comes as a jump).
+    fn cut(&mut self) {
+        self.jumped = true;
+        self.trim = true;
     }
     fn color_change(&mut self) {
         self.blocks.push(StitchBlock::default());
         self.jumped = true;
+        self.trim = false;
+        self.jumps = 0;
     }
-    fn finish(mut self, colors: &[[u8; 3]]) -> Vec<StitchBlock> {
+    /// A note on the file itself (said once).
+    fn note(&mut self, what: impl Into<String>) {
+        let what = what.into();
+        if !self.notes.contains(&what) {
+            self.notes.push(what);
+        }
+    }
+    /// The blocks, and the notes (with one for a missing end mark, unless
+    /// `needs_end` is false: a format without one).
+    fn finish(mut self, colors: &[[u8; 3]], needs_end: bool) -> (Vec<StitchBlock>, Vec<String>) {
+        if needs_end && !self.ended {
+            self.note("It ends without the mark that closes a design: the file may have been cut short, so the end of the design may be missing.");
+        }
         for (i, b) in self.blocks.iter_mut().enumerate() {
             b.color = colors
                 .get(i)
                 .copied()
                 .unwrap_or(DEFAULT_COLORS[i % DEFAULT_COLORS.len()]);
-            // Drop the single-point runs left by jumps.
-            b.runs.retain(|r| r.len() >= 2);
+            // Drop the single-point runs left by jumps (a cut before one
+            // goes to the run after it).
+            let mut runs = Vec::with_capacity(b.runs.len());
+            let mut trims = Vec::with_capacity(b.runs.len());
+            let mut carry = false;
+            for (r, t) in b.runs.drain(..).zip(b.trims.drain(..)) {
+                if r.len() >= 2 {
+                    runs.push(r);
+                    trims.push(t || carry);
+                    carry = false;
+                } else {
+                    carry |= t;
+                }
+            }
+            b.runs = runs;
+            b.trims = trims;
         }
         self.blocks.retain(|b| !b.runs.is_empty());
-        self.blocks
+        (self.blocks, self.notes)
     }
 }
 
@@ -169,6 +226,7 @@ fn read_pec(d: &[u8], start: usize) -> Result<StitchFile> {
     let mut bld = Builder::new();
     while let (Some(&v1), Some(&v2)) = (d.get(i), d.get(i + 1)) {
         if v1 == 0xFF && v2 == 0x00 {
+            bld.ended = true;
             break;
         }
         if v1 == 0xFE && v2 == 0xB0 {
@@ -201,16 +259,29 @@ fn read_pec(d: &[u8], start: usize) -> Result<StitchFile> {
             y = signed7(v2);
             i += 1;
         }
+        if trim {
+            bld.cut();
+        }
         if jump || trim {
             bld.jump(x as f64, y as f64);
         } else {
             bld.stitch(x as f64, y as f64);
         }
     }
-    Ok(StitchFile {
-        name,
-        blocks: bld.finish(&palette),
-    })
+    // (A thread change with nothing sewn after it, just before the end, is
+    // a stop, not another thread.)
+    let stop_at_end = bld.blocks.len() > 1 && bld.blocks.last().is_some_and(|b| b.runs.is_empty());
+    let changes = bld.blocks.len() - usize::from(stop_at_end);
+    if changes != ncolors {
+        bld.note(format!(
+            "Its header lists {ncolors} thread{} but the stitches change thread {} time{}: a machine may show the wrong colours.",
+            if ncolors == 1 { "" } else { "s" },
+            changes.saturating_sub(1),
+            if changes == 2 { "" } else { "s" }
+        ));
+    }
+    let (blocks, notes) = bld.finish(&palette, true);
+    Ok(StitchFile { name, blocks, notes })
 }
 
 fn read_dst(d: &[u8]) -> Result<StitchFile> {
@@ -249,6 +320,7 @@ fn read_dst(d: &[u8]) -> Result<StitchFile> {
             + bit(b0, 7)
             - bit(b0, 6));
         if b2 & 0b1111_0011 == 0b1111_0011 {
+            bld.ended = true;
             break;
         } else if b2 & 0b1100_0011 == 0b1100_0011 {
             bld.color_change();
@@ -259,14 +331,12 @@ fn read_dst(d: &[u8]) -> Result<StitchFile> {
             bld.stitch(dx as f64, dy as f64);
         }
     }
-    Ok(StitchFile {
-        name,
-        blocks: bld.finish(&colors),
-    })
+    let (blocks, notes) = bld.finish(&colors, true);
+    Ok(StitchFile { name, blocks, notes })
 }
 
 /// EXP and JEF share the stitch encoding; `jump_code` differs (EXP 0x04, JEF 0x02).
-fn read_exp_like(d: &[u8], jump_code: u8, colors: &[[u8; 3]]) -> Vec<StitchBlock> {
+fn read_exp_like(d: &[u8], jump_code: u8, colors: &[[u8; 3]]) -> (Vec<StitchBlock>, Vec<String>) {
     let s8 = |b: u8| b as i8 as f64;
     let mut bld = Builder::new();
     let mut i = 0;
@@ -279,6 +349,7 @@ fn read_exp_like(d: &[u8], jump_code: u8, colors: &[[u8; 3]]) -> Vec<StitchBlock
         }
         let ctrl = b1;
         if ctrl == 0x10 {
+            bld.ended = true;
             break;
         }
         if i + 1 >= d.len() {
@@ -287,7 +358,8 @@ fn read_exp_like(d: &[u8], jump_code: u8, colors: &[[u8; 3]]) -> Vec<StitchBlock
         let (x, y) = (s8(d[i]), -s8(d[i + 1]));
         i += 2;
         match ctrl {
-            0x80 => bld.jumped = true,
+            // A trim (EXP's, and some JEF writers').
+            0x80 => bld.cut(),
             0x01 => {
                 bld.color_change();
                 if x != 0.0 || y != 0.0 {
@@ -297,10 +369,17 @@ fn read_exp_like(d: &[u8], jump_code: u8, colors: &[[u8; 3]]) -> Vec<StitchBlock
             0x02 if jump_code == 0x02 => bld.jump(x, y),
             0x02 => bld.stitch(x, y),
             0x04 => bld.jump(x, y),
-            _ => break,
+            other => {
+                bld.note(format!(
+                    "It has a code ZigZag doesn't know (0x{other:02X}, {} bytes in): what follows it was left out.",
+                    i - 4
+                ));
+                break;
+            }
         }
     }
-    bld.finish(colors)
+    // (EXP has no end mark: it just ends.)
+    bld.finish(colors, jump_code == 0x02)
 }
 
 fn read_jef(d: &[u8]) -> Result<StitchFile> {
@@ -316,9 +395,11 @@ fn read_jef(d: &[u8]) -> Result<StitchFile> {
         })
         .collect();
     let body = d.get(offset as usize..).unwrap_or_default();
+    let (blocks, notes) = read_exp_like(body, 0x02, &colors);
     Ok(StitchFile {
         name: String::new(),
-        blocks: read_exp_like(body, 0x02, &colors),
+        blocks,
+        notes,
     })
 }
 
@@ -339,10 +420,14 @@ pub fn read_stitch_file(data: &[u8], ext: &str) -> Result<StitchFile> {
         }
         "pec" => read_pec(data, 8),
         "dst" => read_dst(data),
-        "exp" => Ok(StitchFile {
-            name: String::new(),
-            blocks: read_exp_like(data, 0x04, &[]),
-        }),
+        "exp" => {
+            let (blocks, notes) = read_exp_like(data, 0x04, &[]);
+            Ok(StitchFile {
+                name: String::new(),
+                blocks,
+                notes,
+            })
+        }
         "jef" => read_jef(data),
         other => bail!("can't read .{other} files (PES, PEC, DST, EXP and JEF are supported)"),
     }

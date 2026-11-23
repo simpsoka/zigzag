@@ -1859,7 +1859,7 @@ impl Studio {
         let cloth = self.doc.settings.cloth;
         canvas::draw_hoop(&p, body, view, hw, hh, "", false, color32(cloth));
         let opts = DrawOptions {
-            show_jumps: self.show_jumps,
+            show_jumps: self.prefs.show_jumps,
             limit: usize::MAX,
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,
@@ -2315,6 +2315,7 @@ mod tests {
         h.state_mut().agent.found = [
             Some(Some(std::path::PathBuf::from("/usr/local/bin/claude"))),
             Some(Some(std::path::PathBuf::from("/usr/local/bin/codex"))),
+            Some(Some(std::path::PathBuf::from("/usr/local/bin/agy"))),
         ];
         h.run_steps(4);
         h

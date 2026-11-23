@@ -152,7 +152,7 @@ pub fn paint_grabber(ui: &egui::Ui, x: f32, ys: egui::Rangef, handle: egui::Id) 
 /// A floating (or flyout) panel's width: the Agent's conversation is wider.
 pub fn float_w(p: PanelId) -> f32 {
     match p {
-        PanelId::Agent => 360.0,
+        PanelId::Agent => 330.0,
         // Room for X and Y (W and H) with the reference point (the lock)
         // beside them, on one line.
         PanelId::Transform => FLOAT_W + 40.0,
@@ -160,16 +160,61 @@ pub fn float_w(p: PanelId) -> f32 {
     }
 }
 
+/// How near the window's side (points; on the left, past the tool strip)
+/// a dragged panel opens an empty dock there to drop into.
+const DOCK_EDGE: f32 = 32.0;
+
+/// An on/off item in a panel's menu: its words where the other items'
+/// are, a box at the far right with a tick when it's on, and the whole
+/// row to click.
+fn menu_toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    // (A menu's items fill its width; this one asks for room at the right
+    // for the box, beyond its words.)
+    let words = egui::WidgetText::from(label)
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button)
+        .size()
+        .x;
+    let pad = ui.spacing().button_padding.x;
+    let size = ui.spacing().icon_width;
+    let resp = ui.add(egui::Button::new(label).min_size(Vec2::new(words + 2.0 * pad + 3.0 * size, 0.0)));
+    if resp.clicked() {
+        *on = !*on;
+    }
+    let r = Rect::from_center_size(
+        egui::pos2(
+            resp.rect.right() - pad - size / 2.0,
+            resp.rect.center().y,
+        ),
+        Vec2::splat(size),
+    );
+    let v = ui.visuals().widgets.inactive;
+    ui.painter()
+        .rect(r, v.corner_radius, v.bg_fill, v.bg_stroke, egui::StrokeKind::Inside);
+    if *on {
+        icons::paint(ui.painter(), r.shrink(2.0), Icon::Check, ui.visuals().strong_text_color());
+    }
+    let state = *on;
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, state, label));
+    resp
+}
+
 /// Panel interaction that isn't saved: the open flyout, a panel being
 /// dragged, and where things were drawn this frame (for dropping).
 #[derive(Default)]
 pub struct DockUi {
     pub flyout: Option<PanelId>,
+    /// A panel's menu held open for a screenshot (capture mode's
+    /// `ZIGZAG_CAPTURE_SHOW=agent-menu`).
+    pub peek_menu: Option<PanelId>,
     drag: Option<PanelDrag>,
     /// Panels drawn this frame: (where, which, whole panel rect).
     drawn: Vec<(Place, PanelId, Rect)>,
     /// The dock columns this frame (left, right).
     columns: [Option<Rect>; 2],
+    /// A dock offered to the panel being dragged (left, right): from when
+    /// the pointer comes to that edge of the window, while it stays in the
+    /// dock. An empty dock opens then; a floating panel docks only then.
+    offered: [bool; 2],
     /// Where the panel being drawn lives.
     pub(crate) current: Option<Place>,
     /// Height of each dock column (for sizing the Layers list).
@@ -179,6 +224,9 @@ pub struct DockUi {
     /// In a window: how tall the panel's body may be, scrolling under its
     /// header (which stays put) past that.
     pub(crate) body_max: Option<f32>,
+    /// The most height a floating panel or flyout being shown has room
+    /// for (the Agent's keeps to it, whatever height it was given).
+    pub(crate) window_max: Option<f32>,
     /// The tab group being drawn: its lead and the tabs showing.
     tabs: Option<(PanelId, Vec<PanelId>)>,
     /// The Agent panel's whole height when it's pinned to the bottom of
@@ -263,11 +311,16 @@ pub struct DockState {
     /// as the Threads panel does and embroidery software's object lists.
     /// Off by default: what's on top is at the top, as in Illustrator.
     pub layers_sewing_order: bool,
+    /// The floating Agent panel steps out of the way when you click the
+    /// canvas or pick another tool (its menu's Auto-Hide); the
+    /// Agent button brings it back. On by default.
+    pub agent_auto_hide: bool,
     /// Where each panel lives.
     pub place: [Place; N],
     /// Panel order within the docks.
     pub order: Vec<PanelId>,
-    /// Top-left corners of floating panels.
+    /// Bottom-left corners of floating panels (so one collapses down to
+    /// its header where it was, not up): `IN_THE_CORNER` until moved.
     pub float_at: [Pos2; N],
     /// Each dock (left, right) collapsed to a strip of icons.
     pub iconic: [bool; 2],
@@ -279,6 +332,8 @@ pub struct DockState {
     pub task_bar: bool,
     /// How much of its dock the Agent panel takes (it sits at the bottom).
     pub agent_share: f32,
+    /// The floating Agent panel's height (its top edge drags it taller).
+    pub agent_float_h: f32,
     /// The unit lengths are shown in (View › Units).
     pub units: crate::units::Unit,
     /// Where the layout is remembered between launches (`None`: not saved).
@@ -287,11 +342,24 @@ pub struct DockState {
 
 fn default_place(p: PanelId) -> Place {
     match p {
-        // The conversation gets a whole dock; everything else is on the right.
-        PanelId::Agent => Place::Left,
+        // The conversation floats in the canvas's lower left (see
+        // `IN_THE_CORNER`). (Tests keep it docked, as the dock tests
+        // expect.) Everything else is on the right.
+        PanelId::Agent if cfg!(test) => Place::Left,
+        PanelId::Agent => Place::Float,
         _ => Place::Right,
     }
 }
+
+/// A floating Agent panel's height at first, and the least it's dragged to.
+pub const AGENT_FLOAT_H: f32 = 400.0;
+const AGENT_FLOAT_MIN: f32 = 220.0;
+
+/// A floating panel's place until it's moved: its lower-left corner in the
+/// canvas's (wherever that is as the window changes size). Where a panel
+/// goes when it's floated from its menu, and the Agent's at first. Not
+/// finite, so not saved.
+const IN_THE_CORNER: Pos2 = Pos2::new(f32::INFINITY, f32::INFINITY);
 
 impl Default for DockState {
     fn default() -> Self {
@@ -306,17 +374,17 @@ impl Default for DockState {
             collapsed: [false; N],
             show_palette: false,
             layers_sewing_order: false,
+            agent_auto_hide: true,
             units: Default::default(),
             place: ALL.map(default_place),
             order: ALL.to_vec(),
-            float_at: std::array::from_fn(|k| {
-                Pos2::new(360.0 + 24.0 * k as f32, 120.0 + 24.0 * k as f32)
-            }),
+            float_at: [IN_THE_CORNER; N],
             iconic: [false, false],
             tab_of: [None; N],
             active: [None; N],
             task_bar: true,
             agent_share: 0.55,
+            agent_float_h: AGENT_FLOAT_H,
             path: None,
         }
     }
@@ -431,12 +499,16 @@ impl DockState {
         d.right = v["right"].as_bool().unwrap_or(true);
         d.show_palette = v["show_palette"].as_bool().unwrap_or(false);
         d.layers_sewing_order = v["layers_sewing_order"].as_bool().unwrap_or(false);
+        d.agent_auto_hide = v["agent_auto_hide"].as_bool().unwrap_or(true);
         d.units = v["units"]
             .as_str()
             .and_then(crate::units::Unit::named)
             .unwrap_or_default();
         d.task_bar = v["task_bar"].as_bool().unwrap_or(true);
         d.agent_share = v["agent_share"].as_f64().unwrap_or(0.55).clamp(0.15, 0.95) as f32;
+        d.agent_float_h = v["agent_float_h"]
+            .as_f64()
+            .map_or(AGENT_FLOAT_H, |h| (h as f32).clamp(AGENT_FLOAT_MIN, 4000.0));
         for (k, id) in ALL.iter().enumerate() {
             let e = &v["panels"][id.key()];
             d.hidden[k] = e["hidden"].as_bool().unwrap_or(false);
@@ -447,7 +519,9 @@ impl DockState {
                 Some("float") => Place::Float,
                 _ => default_place(*id),
             };
-            if let (Some(x), Some(y)) = (e["x"].as_f64(), e["y"].as_f64()) {
+            // (Saved by its bottom; an older file's "y", its top, is left
+            // for the corner.)
+            if let (Some(x), Some(y)) = (e["x"].as_f64(), e["bottom"].as_f64()) {
                 d.float_at[k] = Pos2::new(x as f32, y as f32);
             }
         }
@@ -511,7 +585,7 @@ impl DockState {
                         "collapsed": self.collapsed[k],
                         "place": self.place[k].key(),
                         "x": self.float_at[k].x,
-                        "y": self.float_at[k].y,
+                        "bottom": self.float_at[k].y,
                         "tab_of": self.tab_of[k].map(|l| l.key()),
                         "active": self.active[k].map(|a| a.key()),
                     }),
@@ -523,9 +597,11 @@ impl DockState {
             "right": self.right,
             "show_palette": self.show_palette,
             "layers_sewing_order": self.layers_sewing_order,
+            "agent_auto_hide": self.agent_auto_hide,
             "units": self.units.suffix(),
             "task_bar": self.task_bar,
             "agent_share": self.agent_share,
+            "agent_float_h": self.agent_float_h,
             "panels": panels,
             "order": self.order.iter().map(|p| p.key()).collect::<Vec<_>>(),
             "iconic": { "left": self.iconic[0], "right": self.iconic[1] },
@@ -655,11 +731,12 @@ impl DockState {
     pub fn reset_layout(&mut self) {
         let path = self.path.take();
         let (show_palette, units) = (self.show_palette, self.units);
-        let layers_sewing_order = self.layers_sewing_order;
+        let (layers_sewing_order, agent_auto_hide) = (self.layers_sewing_order, self.agent_auto_hide);
         *self = DockState {
             path,
             show_palette,
             layers_sewing_order,
+            agent_auto_hide,
             units,
             ..DockState::default()
         };
@@ -690,7 +767,7 @@ impl Studio {
     /// ("Claude Code", "Codex").
     pub fn panel_name(&self, p: PanelId) -> &'static str {
         if p == PanelId::Agent {
-            self.agent.kind.name()
+            if self.agent.setup_page() { "Setup" } else { self.agent.kind.name() }
         } else {
             p.title()
         }
@@ -825,7 +902,7 @@ impl Studio {
                 let n = painter.text(
                     Pos2::new(a.right() + 4.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
-                    self.agent.kind.name(),
+                    self.panel_name(PanelId::Agent),
                     font,
                     p.text,
                 );
@@ -966,9 +1043,21 @@ impl Studio {
                     // (A menu's own buttons sit tight to the left: room.)
                     ui.spacing_mut().button_padding = Vec2::new(12.0, 4.0);
                     use crate::agent::AgentKind;
+                    // Setup: installing and signing in, for any of them.
+                    let setup = self.agent.setup_page();
+                    if ui.add(egui::Button::new("Setup").selected(setup)).clicked() {
+                        // (Leaving a sign-in for Setup stops it: Setup can
+                        // start another.)
+                        if matches!(self.agent.setup.step, crate::agent_setup::Step::SigningIn(_)) {
+                            self.agent.setup.cancel();
+                        }
+                        self.agent.on_setup = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     for k in AgentKind::ALL {
                         if ui
-                            .add(egui::Button::new(k.name()).selected(self.agent.kind == k))
+                            .add(egui::Button::new(k.name()).selected(!setup && self.agent.kind == k))
                             .clicked()
                         {
                             self.agent.set_kind(k);
@@ -1022,6 +1111,12 @@ impl Studio {
         mresp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} menu", id.title()))
         });
+        // (Held open, for a screenshot that only shows it.)
+        if self.dock_ui.peek_menu == Some(id)
+            && !egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&mresp))
+        {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&mresp));
+        }
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&mresp));
         if mresp.hovered() || open {
             ui.painter().rect_filled(mrect, 4.0, p.hover);
@@ -1145,28 +1240,32 @@ impl Studio {
                         self.agent.new_chat();
                         ui.close();
                     }
+                    // (Floating over the canvas, it can step out of the way.)
+                    if self.dock.place_of(key) == Place::Float {
+                        if menu_toggle(ui, &mut self.dock.agent_auto_hide, "Auto-Hide")
+                            .on_hover_text(
+                                "Put the panel away when you click the canvas or pick another tool. The Agent button brings it back, with a dot when there's a reply.",
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                    }
                     ui.separator();
                 }
                 if id == PanelId::Objects {
-                    let on = self.dock.layers_sewing_order;
-                    if ui
-                        .add(egui::Button::new("List in Sewing Order").selected(on))
+                    if menu_toggle(ui, &mut self.dock.layers_sewing_order, "List in Sewing Order")
                         .on_hover_text(
                             "List the layers as they sew, the first at the top. Off: what's on top is at the top, as in Illustrator.",
                         )
                         .clicked()
                     {
-                        self.dock.layers_sewing_order = !on;
                         ui.close();
                     }
                     ui.separator();
                 }
                 if id == PanelId::Threads {
-                    if ui
-                        .add(egui::Button::new("Show Palette").selected(self.dock.show_palette))
-                        .clicked()
-                    {
-                        self.dock.show_palette = !self.dock.show_palette;
+                    if menu_toggle(ui, &mut self.dock.show_palette, "Show Palette").clicked() {
                         ui.close();
                     }
                     let name = self.palettes.name(self.palettes.source);
@@ -1199,6 +1298,9 @@ impl Studio {
                     (Place::Float, "Float"),
                 ] {
                     if to != here && ui.button(label).clicked() {
+                        if to == Place::Float {
+                            self.dock.float_at[key.index()] = IN_THE_CORNER;
+                        }
                         self.dock.move_panel(key, to, None);
                         self.dock_ui.flyout = None;
                         ui.close();
@@ -1331,7 +1433,8 @@ impl Studio {
             Place::Left => self.dock.left,
             _ => self.dock.right,
         };
-        on && (!self.panels_in(side).is_empty() || self.dock_ui.drag.is_some())
+        on && (!self.panels_in(side).is_empty()
+            || (self.dock_ui.drag.is_some() && self.dock_ui.offered[side.side()]))
     }
 
     pub fn dock_iconic(&self, side: Place) -> bool {
@@ -1576,35 +1679,90 @@ impl Studio {
 
     /// Panels outside the docks: floating ones, and the flyout from an icon strip.
     pub fn floating_panels(&mut self, ctx: &egui::Context) {
+        // (How many wait in the corner so far: each a step from the last.)
+        let mut cornered = 0.0;
         for id in self.panels_in(Place::Float) {
-            let at = self.dock.float_at[id.index()];
+            let canvas = if self.canvas_rect.is_positive() {
+                self.canvas_rect
+            } else {
+                ctx.content_rect()
+            };
+            let mut at = self.dock.float_at[id.index()];
+            if !at.is_finite() {
+                // In the canvas's lower left, a little in from its edges.
+                // (A second one there steps up and across, so neither
+                // hides the other's header.)
+                at = canvas.left_bottom()
+                    + Vec2::new(theme::space::M, -theme::space::M)
+                    + Vec2::new(24.0, -(HEADER_H + 4.0)) * cornered;
+                cornered += 1.0;
+            }
+            // Never down over the bar under the canvas (the player).
+            let within = Rect::from_min_max(
+                ctx.content_rect().min,
+                Pos2::new(ctx.content_rect().right(), canvas.bottom()),
+            );
+            // (By its bottom: collapsed, its header stays where it ended.)
             egui::Area::new(egui::Id::unique(("float-panel", id.index())))
                 .order(egui::Order::Middle)
+                .pivot(egui::Align2::LEFT_BOTTOM)
                 .fixed_pos(at)
-                .constrain(true)
+                .constrain_to(within)
                 .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style())
+                    let frame = egui::Frame::popup(ui.style())
                         .inner_margin(egui::Margin::ZERO)
                         .corner_radius(8)
                         .show(ui, |ui| {
                             ui.set_width(float_w(id));
                             ui.spacing_mut().item_spacing.y = 0.0;
                             // Its body scrolls under its header, short of
-                            // the window's bottom. (Not the Agent's: its
+                            // the window's top (it's placed by its bottom). (Not the Agent's: its
                             // conversation scrolls on its own.)
                             if !self.group_shown(id).contains(&PanelId::Agent) {
-                                let room = (ctx.content_rect().bottom() - at.y - 24.0)
+                                let room = (at.y - ctx.content_rect().top() - 24.0)
                                     .max(HEADER_H + 120.0);
                                 // (All of it, not last frame's size: see the
                                 // flyout's.)
                                 ui.set_max_height(room);
                                 self.dock_ui.body_max = Some(room - HEADER_H);
                             }
+                            // (The Agent's own height, never more than the
+                            // window has above its bottom: a height set in
+                            // a bigger window would put its header, and the
+                            // edge that resizes it, off the top.)
+                            self.dock_ui.window_max =
+                                Some((at.y - ctx.content_rect().top() - 8.0).max(AGENT_FLOAT_MIN));
                             self.dock_ui.in_window = true;
                             self.show_panel(ui, id, Place::Float);
                             self.dock_ui.in_window = false;
                             self.dock_ui.body_max = None;
-                        });
+                            self.dock_ui.window_max = None;
+                        })
+                        .response
+                        .rect;
+                    // The Agent's top edge takes hold to make it taller or
+                    // shorter (it's placed by its bottom, which stays put).
+                    let lead = self.dock.lead_of(id);
+                    if self.group_shown(id).contains(&PanelId::Agent)
+                        && !self.dock.collapsed[lead.index()]
+                    {
+                        let grab = grab_radius(ui.ctx(), 3.0);
+                        let edge = Rect::from_x_y_ranges(
+                            frame.x_range().shrink(10.0),
+                            egui::Rangef::new(frame.top() - grab, frame.top() + grab),
+                        );
+                        let r = ui.interact(edge, egui::Id::unique("agent-float-height"), Sense::drag());
+                        if r.hovered() || r.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        }
+                        if r.dragged() {
+                            let room = (frame.bottom() - ctx.content_rect().top() - 8.0)
+                                .max(AGENT_FLOAT_MIN);
+                            self.dock.agent_float_h = (self.dock.agent_float_h
+                                - r.drag_delta().y)
+                                .clamp(AGENT_FLOAT_MIN, room);
+                        }
+                    }
                 });
         }
         // The flyout beside an icon strip.
@@ -1653,10 +1811,12 @@ impl Studio {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         // Its header stays put; the body scrolls under it.
                         self.dock_ui.body_max = Some(max_h - HEADER_H);
+                        self.dock_ui.window_max = Some(max_h);
                         self.dock_ui.in_window = true;
                         self.show_panel(ui, id, place);
                         self.dock_ui.in_window = false;
                         self.dock_ui.body_max = None;
+                        self.dock_ui.window_max = None;
                     });
             });
         // A click elsewhere closes it (not one in its own menus).
@@ -1680,9 +1840,16 @@ impl Studio {
         } else {
             d.id
         };
+        // (A panel floating on its own follows the pointer: its own header
+        // is always under it, and says nothing about where it's going.)
+        let floating = self.dock.place_of(d.id) == Place::Float
+            && (d.whole || self.dock.members(self.dock.lead_of(d.id)).len() == 1);
         // Another panel's header (an icon in a strip counts as one): into
         // its group. Its own group's header leaves things as they are.
         for (_, lead, r) in &self.dock_ui.drawn {
+            if floating && self.dock.lead_of(*lead) == own {
+                continue;
+            }
             let header = Rect::from_min_size(r.min, Vec2::new(r.width(), r.height().min(26.0)));
             // Its top edge inserts above it instead (an icon has no edge).
             let edge = if r.height() > 30.0 { 7.0 } else { 0.0 };
@@ -1691,7 +1858,15 @@ impl Studio {
             }
         }
         for side in [Place::Left, Place::Right] {
-            if self.dock_ui.columns[side.side()].is_some_and(|r| r.contains(pos)) {
+            // (A floating panel docks from that edge of the window, not
+            // wherever it's moved over a dock: see `offered`.)
+            if floating && !self.dock_ui.offered[side.side()] {
+                continue;
+            }
+            let over = self.dock_ui.columns[side.side()].is_some_and(|r| {
+                r.contains(pos) || (floating && self.floating_rect(pos, d).is_some_and(|f| f.intersects(r)))
+            });
+            if over {
                 let before = self
                     .dock_ui
                     .drawn
@@ -1703,6 +1878,23 @@ impl Studio {
             }
         }
         DropAt::Float
+    }
+
+    /// Where a panel floating on its own is while it's dragged with the
+    /// pointer at `pos` (it follows the pointer). None for one that isn't.
+    fn floating_rect(&self, pos: Pos2, d: PanelDrag) -> Option<Rect> {
+        let own = self.dock.lead_of(d.id);
+        let alone = self.dock.place_of(d.id) == Place::Float
+            && (d.whole || self.dock.members(own).len() == 1);
+        if !alone {
+            return None;
+        }
+        let (_, _, r) = self
+            .dock_ui
+            .drawn
+            .iter()
+            .find(|(pl, p, _)| *pl == Place::Float && self.dock.lead_of(*p) == own)?;
+        Some(Rect::from_min_size(pos - d.grab, r.size()))
     }
 
     /// Start dragging a panel by its header.
@@ -1727,8 +1919,33 @@ impl Studio {
         let (pos, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         let Some(pos) = pos else {
             self.dock_ui.drag = None;
+            self.dock_ui.offered = [false; 2];
             return;
         };
+        // An empty dock opens only at the window's edge, not wherever the
+        // panel goes: a floating panel can be moved anywhere over the
+        // canvas without the dock opening under it.
+        // A floating panel's own edge counts too: over the tool strip, or
+        // at the window's right side (the pointer is mid-header, far in).
+        let window = ctx.content_rect();
+        let panel = self.floating_rect(pos, d);
+        for side in [Place::Left, Place::Right] {
+            let at_edge = match side {
+                Place::Left => {
+                    pos.x < window.left() + crate::chrome::TOOLS_W + DOCK_EDGE
+                        || panel.is_some_and(|r| r.left() < window.left() + crate::chrome::TOOLS_W)
+                }
+                _ => {
+                    pos.x > window.right() - DOCK_EDGE
+                        || panel.is_some_and(|r| r.right() > window.right())
+                }
+            };
+            let inside = self.dock_ui.columns[side.side()].is_some_and(|r| {
+                r.contains(pos) || panel.is_some_and(|f| f.intersects(r))
+            });
+            let k = side.side();
+            self.dock_ui.offered[k] = at_edge || (self.dock_ui.offered[k] && inside);
+        }
         let target = self.drop_target(pos, d);
         let pal = crate::theme::pal(ctx);
         let painter = ctx.layer_painter(egui::LayerId::new(
@@ -1743,7 +1960,9 @@ impl Studio {
             DropAt::Float => {
                 if floats_alone {
                     let lead = self.dock.lead_of(d.id);
-                    self.dock.float_at[lead.index()] = pos - d.grab;
+                    self.dock.float_at[lead.index()] = self
+                        .floating_rect(pos, d)
+                        .map_or(pos - d.grab, |r| r.left_bottom());
                 } else {
                     let r = Rect::from_min_size(pos - d.grab, Vec2::new(FLOAT_W, 26.0));
                     painter.rect_filled(r, 6.0, pal.accent.gamma_multiply(0.25));
@@ -1809,6 +2028,7 @@ impl Studio {
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         if !down {
             self.dock_ui.drag = None;
+            self.dock_ui.offered = [false; 2];
             match target {
                 DropAt::Tab(lead) => {
                     if lead != self.dock.lead_of(d.id) {
@@ -1823,7 +2043,15 @@ impl Studio {
                     if !d.whole {
                         self.dock.separate(d.id);
                     }
-                    self.dock.float_at[d.id.index()] = pos - d.grab;
+                    // (As tall as it was in the dock: its top where it's
+                    // dropped.)
+                    let h = self
+                        .dock_ui
+                        .drawn
+                        .iter()
+                        .find(|x| x.1 == d.id)
+                        .map_or(HEADER_H, |x| x.2.height());
+                    self.dock.float_at[d.id.index()] = pos - d.grab + Vec2::new(0.0, h);
                     self.dock.move_panel(d.id, Place::Float, None);
                 }
                 DropAt::Dock(side, before) => {
@@ -4869,6 +5097,116 @@ mod tests {
         assert_eq!(h.state().dock.place_of(PanelId::Document), Place::Right);
     }
 
+    /// A floating panel moves anywhere over the canvas, even where its
+    /// empty dock would be, without docking; at the window's edge the dock
+    /// opens for it to drop into.
+    #[test]
+    fn a_new_agent_panel_floats_in_the_canvass_lower_left() {
+        let mut h = harness();
+        let s = h.state_mut();
+        s.dock.place[PanelId::Agent.index()] = Place::Float;
+        s.dock.float_at[PanelId::Agent.index()] = IN_THE_CORNER;
+        s.dock.hidden[PanelId::Agent.index()] = false;
+        h.run_steps(3);
+        let whole = |h: &Harness<'_, Studio>| {
+            let id = egui::Id::unique(("float-panel", PanelId::Agent.index()));
+            h.ctx.memory(|m| m.area_rect(id)).unwrap()
+        };
+        let panel = whole(&h);
+        let canvas = h.state().canvas_rect;
+        let gap = theme::space::M;
+        // (The frame reaches a little past the panel's own rect.)
+        assert!((panel.left() - (canvas.left() + gap)).abs() < 4.0, "{panel:?} {canvas:?}");
+        assert!((panel.bottom() - (canvas.bottom() - gap)).abs() < 4.0, "{panel:?} {canvas:?}");
+        // Moved, it stays where it was put.
+        let from = h.get_by_label("Agent panel").rect().left_top() + Vec2::new(120.0, 12.0);
+        drag(&mut h, from, from + Vec2::new(200.0, -100.0));
+        assert!(h.state().dock.float_at[PanelId::Agent.index()].is_finite());
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Float);
+        let moved = whole(&h);
+        assert!((moved.left() - (panel.left() + 200.0)).abs() < 4.0, "{moved:?}");
+        // Collapsed, it shrinks down to its header: its bottom stays put.
+        h.state_mut().dock.collapsed[PanelId::Agent.index()] = true;
+        h.run_steps(3);
+        let collapsed = whole(&h);
+        assert!(collapsed.height() < 60.0, "{collapsed:?}");
+        assert!((collapsed.bottom() - moved.bottom()).abs() < 4.0, "{collapsed:?} {moved:?}");
+        // Its top edge drags it taller; its bottom stays put.
+        h.state_mut().dock.collapsed[PanelId::Agent.index()] = false;
+        h.run_steps(3);
+        let before = whole(&h);
+        let edge = Pos2::new(before.center().x, before.top() + 1.0);
+        drag(&mut h, edge, edge - Vec2::new(0.0, 100.0));
+        let taller = whole(&h);
+        assert!((taller.height() - before.height() - 100.0).abs() < 6.0, "{before:?} {taller:?}");
+        assert!((taller.bottom() - before.bottom()).abs() < 2.0, "{before:?} {taller:?}");
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Float, "not moved");
+        // Dragged down low and expanded: it stops at the canvas's bottom,
+        // not over the bar under it.
+        let from = h.get_by_label("Agent panel").rect().left_top() + Vec2::new(120.0, 12.0);
+        drag(&mut h, from, from + Vec2::new(0.0, 600.0));
+        h.state_mut().dock.collapsed[PanelId::Agent.index()] = false;
+        h.run_steps(3);
+        let low = whole(&h);
+        assert!(low.bottom() <= h.state().canvas_rect.bottom() + 1.0, "{low:?}");
+    }
+
+    #[test]
+    fn the_left_dock_button_shows_only_with_something_in_the_dock() {
+        let mut h = harness();
+        h.state_mut().dock.hidden[PanelId::Agent.index()] = false;
+        h.run_steps(2);
+        assert!(h.query_by_label("Show or Hide Layers").is_some(), "the Agent's docked");
+        h.state_mut().dock.move_panel(PanelId::Agent, Place::Float, None);
+        h.run_steps(2);
+        assert!(h.query_by_label("Show or Hide Layers").is_none(), "floating: nothing to show");
+    }
+
+    #[test]
+    fn an_empty_dock_opens_only_at_the_windows_edge() {
+        let mut h = harness();
+        // The Agent, alone in the left dock, floated: that dock is empty.
+        let header = h.get_by_label("Agent panel").rect().left_top() + Vec2::new(120.0, 12.0);
+        let canvas = h.state().canvas_rect.center();
+        drag(&mut h, header, canvas);
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Float);
+        assert!(h.state().panels_in(Place::Left).is_empty());
+        // Over where the dock was: it stays floating.
+        let grab = |h: &Harness<'_, Studio>| {
+            h.get_by_label("Agent panel").rect().left_top() + Vec2::new(120.0, 12.0)
+        };
+        let from = grab(&h);
+        let near = Pos2::new(crate::chrome::TOOLS_W + 150.0, from.y);
+        drag(&mut h, from, near);
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Float, "not docked");
+        assert!(!h.state().dock_shown(Place::Left));
+        // Over the right dock, which has panels: still floating.
+        // Over the right dock, its right edge just inside the window.
+        let from = grab(&h);
+        let w = h.get_by_label("Agent panel").rect().width();
+        let window = h.ctx.content_rect().right();
+        // (Low down, in a panel's body: on a header it would join as a tab.)
+        let header = h.get_by_label("Document panel").rect();
+        let to = Pos2::new(window - 10.0 - w + 120.0, header.bottom() + 120.0);
+        drag(&mut h, from, to);
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Float, "not docked right");
+        // Past the window's right side: that dock is offered.
+        let from = grab(&h);
+        drag(&mut h, from, to + Vec2::new(60.0, 0.0));
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Right, "docked right");
+        // Back out to float, for the left side.
+        let from = grab(&h);
+        let canvas = h.state().canvas_rect.center();
+        drag(&mut h, from, canvas);
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Float);
+        // Its left edge over the tool strip, the pointer still well inside
+        // the canvas: into the dock.
+        let from = grab(&h);
+        let over = Pos2::new(crate::chrome::TOOLS_W + 120.0 - 20.0, 300.0);
+        drag(&mut h, from, over);
+        assert_eq!(h.state().dock.place_of(PanelId::Agent), Place::Left, "docked");
+    }
+
     #[test]
     fn panels_combine_into_tabs_and_come_apart() {
         let mut h = harness();
@@ -5430,7 +5768,7 @@ mod tests {
                 crate::mcp::start(0, crate::tools::tool_specs(), String::new(), || {}).unwrap(),
             );
             s.agent.kind = AgentKind::Claude;
-            s.agent.found = [Some(Some(fake.clone())), Some(Some(fake.clone()))];
+            s.agent.found = [Some(Some(fake.clone())), Some(Some(fake.clone())), Some(Some(fake.clone()))];
             s.agent.prompt = "half a thought".into();
             s.set_selection(&[]);
             // A note pinned on the canvas, not yet sent.

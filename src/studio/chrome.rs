@@ -18,6 +18,8 @@ const ISSUES_MIN_H: f32 = 96.0;
 pub const TITLEBAR_H: f32 = 48.0;
 /// Room at the toolbar's ends, inside it.
 pub const TITLEBAR_PAD: i8 = 10;
+/// The tool strip along the left: its width (the panel in `app.rs`).
+pub const TOOLS_W: f32 = 44.0;
 
 impl Studio {
     pub fn titlebar(&mut self, ui: &mut egui::Ui) {
@@ -51,7 +53,12 @@ impl Studio {
                 self.menu_bar(ui);
                 ui.add_space(4.0);
             }
-            if icon_button(ui, Icon::LeftPanel, "Show or Hide Layers", false, 28.0).clicked() {
+            // Only while there's a panel in the left dock to show: the
+            // Agent floating, it's empty (the tool strip's Agent button
+            // shows and hides the floating chat).
+            if !self.panels_in(crate::dock::Place::Left).is_empty()
+                && icon_button(ui, Icon::LeftPanel, "Show or Hide Layers", false, 28.0).clicked()
+            {
                 self.run_action(Action::ToggleLeftDock);
             }
             // (No document name here: the tabs show it and its edited dot,
@@ -66,45 +73,18 @@ impl Studio {
                 if self.sends_direct() {
                     self.send_button(ui);
                 }
-                let share = icon_button(ui, Icon::Share, "Export", false, 28.0);
-                egui::Popup::menu(&share).show(|ui| {
-                    ui.set_min_width(260.0);
-                    caption(ui, "Export for your machine");
-                    // The document's machine, and the file it reads, first.
-                    if let Some((name, ext)) = self
-                        .machine()
-                        .and_then(|p| Some((p.name.clone(), p.format?)))
-                    {
-                        if ui
-                            .add_enabled(
-                                !self.design.blocks.is_empty(),
-                                egui::Button::new(format!("{name} ({})…", ext.to_uppercase())),
-                            )
-                            .clicked()
-                        {
-                            self.run_action(Action::Export(ext));
-                        }
-                        ui.separator();
-                    }
-                    for (ext, label) in zigzag::formats::MACHINE_FORMATS {
-                        if ui
-                            .add_enabled(!self.design.blocks.is_empty(), egui::Button::new(label))
-                            .clicked()
-                        {
-                            self.run_action(Action::Export(ext));
-                        }
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(
-                            !self.design.blocks.is_empty(),
-                            egui::Button::new("Production Worksheet (HTML)…"),
-                        )
-                        .clicked()
-                    {
-                        self.run_action(Action::Export("html"));
-                    }
-                });
+                let share = icon_button(
+                    ui,
+                    Icon::Share,
+                    "Share and Export",
+                    self.share.open.is_some(),
+                    28.0,
+                );
+                // (The panel hangs from it: see `share.rs`.)
+                self.share.anchor = Some(share.rect);
+                if share.clicked() {
+                    self.toggle_share_panel();
+                }
                 let view = icon_button(ui, Icon::ViewOptions, "View Options", false, 28.0);
                 egui::Popup::from_toggle_button_response(&view)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -112,7 +92,12 @@ impl Studio {
                         ui.set_min_width(200.0);
                         ui.checkbox(&mut self.view_tools.grid, "Grid");
                         ui.checkbox(&mut self.view_tools.points, "Needle points");
-                        ui.checkbox(&mut self.show_jumps, "Jump stitches");
+                        if ui
+                            .checkbox(&mut self.prefs.show_jumps, "Jump stitches")
+                            .changed()
+                        {
+                            self.prefs.save();
+                        }
                         ui.horizontal(|ui| {
                             ui.color_edit_button_srgb(&mut self.doc.settings.cloth);
                             ui.label("Fabric color");
@@ -132,6 +117,55 @@ impl Studio {
             rect.bottom() - 0.5,
             Stroke::new(1.0, p.separator),
         );
+    }
+
+    /// The Share and Export panel's Export tab: a file for every machine.
+    /// True once one was chosen (the panel goes, for the save dialog).
+    pub(crate) fn export_list(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut chose = None;
+        let on = !self.design.blocks.is_empty();
+        let row = crate::share::format_row;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            // The document's machine, and the file it reads, first.
+            if let Some((name, ext)) = self
+                .machine()
+                .and_then(|p| Some((p.name.clone(), p.format?)))
+            {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    caption(ui, "Your machine");
+                });
+                if row(ui, &ext.to_uppercase(), &name, false, on).clicked() {
+                    chose = Some(ext);
+                }
+                crate::share::divider(ui);
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                caption(ui, "Machine files");
+            });
+            for (ext, label) in zigzag::formats::MACHINE_FORMATS {
+                // "PES (Brother, Baby Lock: …)": the brands, without the brackets.
+                let brands = label
+                    .split_once(" (")
+                    .map_or("", |(_, b)| b.trim_end_matches(')'));
+                if row(ui, &ext.to_uppercase(), brands, true, on).clicked() {
+                    chose = Some(ext);
+                }
+            }
+            crate::share::divider(ui);
+            if row(ui, "HTML", "Production worksheet", false, on).clicked() {
+                chose = Some("html");
+            }
+        });
+        match chose {
+            Some(ext) => {
+                self.run_action(Action::Export(ext));
+                true
+            }
+            None => false,
+        }
     }
 
     /// The toolbar's Send: the Skitch window (connecting to the Skitch).
@@ -317,6 +351,9 @@ impl Studio {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
                 let on = self.agent_showing();
+                if on {
+                    self.agent.unread = false;
+                }
                 let r = icon_button(ui, Icon::Sparkle, "Agent", on, 30.0).on_hover_text(format!(
                     "{} (Cmd+K){}",
                     self.agent.kind.name(),
@@ -326,6 +363,35 @@ impl Studio {
                         ""
                     }
                 ));
+                // Put away: while it works, the sparkle fills with blue from
+                // the bottom up, over and over; a reply not yet read, a dot
+                // in place of its small star.
+                if !on {
+                    let p = pal_ui(ui);
+                    // (At work on this document, or on one in another tab.)
+                    if self.agent_tab().is_some() {
+                        // (The icon's box, as `icon_button` draws it.)
+                        let icon = r.rect.shrink(30.0 * 0.22);
+                        const PERIOD: f64 = 1.6;
+                        let t = (ui.input(|i| i.time) % PERIOD / PERIOD) as f32;
+                        // Rises over most of it, then holds full a moment.
+                        let level = (t / 0.8).min(1.0);
+                        let level = level * level * (3.0 - 2.0 * level);
+                        let mut fill = icon.expand(1.0);
+                        fill.min.y = fill.max.y - fill.height() * level;
+                        let painter = ui.painter().with_clip_rect(fill.intersect(ui.clip_rect()));
+                        crate::icons::paint(&painter, icon, crate::icons::Icon::Sparkle, p.accent);
+                        // (Ten steps a second: the window redraws that
+                        // often anyway while it works, for its output (see
+                        // `agent_tick`), so this costs no frames of its own.)
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    } else if self.agent.unread {
+                        // (On a disc of the strip's colour, over the star.)
+                        let at = r.rect.center() + Vec2::new(5.0, -5.0);
+                        ui.painter().circle_filled(at, 5.0, p.toolbar);
+                        ui.painter().circle_filled(at, 3.5, p.accent);
+                    }
+                }
                 if r.clicked() {
                     self.toggle_agent();
                 }

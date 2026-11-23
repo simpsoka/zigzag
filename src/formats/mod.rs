@@ -1,14 +1,17 @@
 //! Output formats. PES/PEC/DST share a flat command stream (like pyembroidery's);
 //! the Brother Skitch's PEN format is encoded straight from the [`Design`].
 
+pub mod charts;
 pub mod dst;
 pub mod jef_data;
 pub mod more;
 pub mod pec_data;
 pub mod pen;
 pub mod pes;
+pub mod plan;
 pub mod preview;
 pub mod read;
+pub mod repair;
 pub mod worksheet;
 
 use crate::design::Design;

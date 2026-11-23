@@ -138,6 +138,22 @@ The zip bundles `ZigZag.exe` (the studio), `zigzag-cli.exe`, `zigzag-mcp.exe`,
 The binaries statically link the MSVC runtime, so users don't need the
 Visual C++ redistributable.
 
+To check the Windows UI before a release, build on the Mac and open the
+result in a Windows 11 ARM VM (Parallels, or UTM for free):
+
+```sh
+packaging/windows/build-from-mac.sh                 # arm64, runs natively in the VM
+packaging/windows/build-from-mac.sh --x64           # the release's target, emulated on ARM
+packaging/windows/build-from-mac.sh --to ~/Shared   # also copy to the VM's shared folder
+```
+
+It cross-compiles with `cargo-xwin` (`brew install llvm lld`,
+`cargo install --locked cargo-xwin`) into `dist/ZigZag-dev-<arch>-windows/`.
+The first run downloads Microsoft's CRT and Windows SDK (about 1 GB) and
+asks you to accept their license. These builds lack the icon and version
+resources, which `build.rs` compiles in only on Windows. Check them at 100%,
+125% and 150% display scaling, in light and dark mode.
+
 ### Rebuild without re-tagging
 
 Use the workflow's `workflow_dispatch` entry from the Actions tab: enter the

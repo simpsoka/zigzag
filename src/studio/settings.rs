@@ -83,12 +83,23 @@ pub struct Prefs {
     pub auto_update: bool,
     /// The font text was last set in: what new text starts in.
     pub last_font: Option<String>,
+    /// The thread chart colors are named from (Brother or Janome).
+    pub thread_chart: crate::threads::Brand,
+    /// How the last design was shared (license, editable, who can see it,
+    /// how long a link lasts): what the next share starts with.
+    pub share_defaults: Option<serde_json::Value>,
     /// The Stitch and Document panels show every setting (Advanced), or
     /// the few that change how a design looks, leaving the rest to the
     /// fabric (Basic). Advanced unless it's turned off in Settings ›
     /// General: most people keep what they're given, and Basic is for
     /// someone who asks for less.
     pub advanced: bool,
+    /// Draw the jump stitches between parts of a design (View › Jump
+    /// Stitches): for every document, and kept from one launch to the next.
+    pub show_jumps: bool,
+    /// Snap to other objects and the hoop while dragging (View › Smart
+    /// Guides, ⌘U): kept the same way.
+    pub smart_guides: bool,
     path: Option<PathBuf>,
 }
 
@@ -106,7 +117,11 @@ impl Default for Prefs {
             agent_history: true,
             auto_update: true,
             last_font: None,
+            thread_chart: Default::default(),
+            share_defaults: None,
             advanced: true,
+            show_jumps: true,
+            smart_guides: true,
             path: None,
         }
     }
@@ -131,6 +146,12 @@ impl Prefs {
         };
         if let Some(on) = v["advanced"].as_bool() {
             p.advanced = on;
+        }
+        if let Some(on) = v["show_jumps"].as_bool() {
+            p.show_jumps = on;
+        }
+        if let Some(on) = v["smart_guides"].as_bool() {
+            p.smart_guides = on;
         }
         if let Some(a) = v["appearance"]
             .as_str()
@@ -175,6 +196,12 @@ impl Prefs {
         if let Some(font) = v["last_font"].as_str() {
             p.last_font = Some(font.to_string());
         }
+        if v["thread_chart"].as_str() == Some("janome") {
+            p.thread_chart = crate::threads::Brand::Janome;
+        }
+        if v["share_defaults"].is_object() {
+            p.share_defaults = Some(v["share_defaults"].clone());
+        }
         if let Some(port) = v["agent_port"]
             .as_u64()
             .and_then(|n| u16::try_from(n).ok())
@@ -186,6 +213,7 @@ impl Prefs {
     }
 
     pub fn save(&self) {
+        crate::sync::touched();
         let Some(path) = &self.path else { return };
         let v = serde_json::json!({
             "appearance": self.appearance.id(),
@@ -197,9 +225,16 @@ impl Prefs {
             "agent_log": self.agent_log,
             "agent_prompts": self.agent_prompts,
             "agent_history": self.agent_history,
+            "thread_chart": match self.thread_chart {
+                crate::threads::Brand::Brother => "brother",
+                crate::threads::Brand::Janome => "janome",
+            },
+            "share_defaults": self.share_defaults,
             "auto_update": self.auto_update,
             "last_font": self.last_font,
             "advanced": self.advanced,
+            "show_jumps": self.show_jumps,
+            "smart_guides": self.smart_guides,
         });
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -231,22 +266,29 @@ impl Prefs {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Section {
     #[default]
     Machines,
     General,
     Agent,
+    Account,
 }
 
 impl Section {
-    const ALL: [Section; 3] = [Section::Machines, Section::General, Section::Agent];
+    const ALL: [Section; 4] = [
+        Section::Machines,
+        Section::General,
+        Section::Agent,
+        Section::Account,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Section::Machines => "Machines",
             Section::General => "General",
             Section::Agent => "Agent",
+            Section::Account => "Account",
         }
     }
 }
@@ -269,9 +311,10 @@ pub struct SettingsUi {
 /// How wide its contents are, and how tall under the heading.
 const WIDTH: f32 = 720.0;
 const BODY_H: f32 = 480.0;
-/// The settings beside the list: as tall as it, less Done at the foot
-/// (whose bottom edge is level with the list's) and the gap above it.
-const PANE_H: f32 = BODY_H - dialog::BUTTON_H - space::M;
+/// The settings beside the list: as tall as it, less the bar at the foot
+/// (a rule and Done, whose bottom edge is level with the list's). They
+/// scroll when there's more.
+const PANE_H: f32 = BODY_H - dialog::BUTTON_H - 2.0 * space::M - 1.0;
 /// The list of sections (and the padding inside its well), and the gap
 /// between it and the settings.
 const SIDE_W: f32 = 168.0;
@@ -305,7 +348,7 @@ fn section_row(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
 }
 
 /// A named group of settings, with a rule above it unless it's the first.
-fn group(ui: &mut egui::Ui, title: &str, first: bool) {
+pub(crate) fn group(ui: &mut egui::Ui, title: &str, first: bool) {
     if !first {
         section_break(ui);
     }
@@ -319,7 +362,11 @@ fn group(ui: &mut egui::Ui, title: &str, first: bool) {
 
 /// One setting: its label, right-aligned in the label column, and what
 /// `add` puts beside it. Gives `add` the label's id to be `labelled_by`.
-fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui, egui::Id) -> R) -> R {
+pub(crate) fn row<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add: impl FnOnce(&mut egui::Ui, egui::Id) -> R,
+) -> R {
     let p = pal_ui(ui);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = space::M;
@@ -344,7 +391,7 @@ fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui, egui::
 }
 
 /// A line of explanation under a row, in the controls' column.
-fn note(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn note(ui: &mut egui::Ui, text: &str) {
     ui.add_space(space::XS - ui.spacing().item_spacing.y);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = space::M;
@@ -389,8 +436,19 @@ impl Studio {
         }
     }
 
+    /// The thread chart colors are named from: kept, and it follows you
+    /// to other computers when signed in (see `sync`).
+    pub(crate) fn set_thread_chart(&mut self, b: crate::threads::Brand) {
+        self.view_tools.brand = b;
+        if self.prefs.thread_chart != b {
+            self.prefs.thread_chart = b;
+            self.prefs.save();
+        }
+    }
+
     /// Put how the app looks and draws to what the settings say.
     pub(crate) fn apply_prefs(&mut self) {
+        self.view_tools.brand = self.prefs.thread_chart;
         self.view_tools.gpu_stitches = self.prefs.gpu;
         // (An appearance forced from outside, for screenshots, stays.)
         let forced = std::env::var_os("ZIGZAG_THEME").is_some()
@@ -452,18 +510,33 @@ impl Studio {
                                 }
                             });
                         });
+                    // The chosen section, scrolling when it's taller than
+                    // its room; under it, a rule and Done, the bar's foot
+                    // level with the list's.
                     ui.vertical(|ui| {
                         ui.set_width(PANE_W);
-                        ui.spacing_mut().item_spacing.y = space::S;
-                        let top = ui.cursor().top();
-                        match self.settings_ui.section {
-                            Section::Machines => self.settings_machines(ui),
-                            Section::General => self.settings_general(ui),
-                            Section::Agent => self.settings_agent(ui),
-                        }
-                        // Done, its foot level with the foot of the list.
-                        let foot = top + BODY_H - dialog::BUTTON_H;
-                        ui.add_space((foot - ui.cursor().top()).max(0.0));
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        egui::ScrollArea::vertical()
+                            .id_salt(("settings-pane", self.settings_ui.section))
+                            .max_height(PANE_H)
+                            .min_scrolled_height(PANE_H)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(PANE_W);
+                                    ui.spacing_mut().item_spacing.y = space::S;
+                                    match self.settings_ui.section {
+                                        Section::Machines => self.settings_machines(ui),
+                                        Section::General => self.settings_general(ui),
+                                        Section::Agent => self.settings_agent(ui),
+                                        Section::Account => self.settings_account(ui),
+                                    }
+                                    ui.add_space(space::S);
+                                });
+                            });
+                        ui.add_space(space::M);
+                        hline(ui);
+                        ui.add_space(space::M);
                         ui.allocate_ui_with_layout(
                             Vec2::new(PANE_W, dialog::BUTTON_H),
                             egui::Layout::right_to_left(egui::Align::Center),
@@ -1104,6 +1177,10 @@ mod tests {
         p.agent_log = false;
         p.agent_prompts = false;
         p.auto_update = false;
+        assert!(p.show_jumps, "jump stitches drawn unless they're turned off");
+        p.show_jumps = false;
+        assert!(p.smart_guides, "smart guides on unless they're turned off");
+        p.smart_guides = false;
         p.set_fold("before-you-sew", false);
         p.set_fold("machine-details", true);
         assert!(!p.fold_open("before-you-sew", true) && p.fold_open("machine-details", false));

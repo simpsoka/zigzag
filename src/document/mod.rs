@@ -681,10 +681,13 @@ impl Document {
     pub fn add_svg(&mut self, fragment: &str, place: Placement) -> Result<Vec<usize>> {
         self.sync()?;
         let frag = svg::parse_tree(fragment.as_bytes()).context("parsing the added SVG")?;
-        let bbox = frag.root().abs_stroke_bounding_box();
-        if bbox.width() <= 0.0 && bbox.height() <= 0.0 {
+        let Some(bbox) = frag
+            .root()
+            .abs_stroke_bounding_box()
+            .filter(|b| b.width() > 0.0 || b.height() > 0.0)
+        else {
             bail!("the added SVG has nothing visible in it");
-        }
+        };
         // Normalize: usvg resolves CSS, <use>, units and transforms into plain elements.
         let normalized = frag.to_string(&usvg::WriteOptions {
             preserve_text: true,

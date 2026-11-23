@@ -541,7 +541,7 @@ mod tests {
     fn m_draws_rectangles_and_l_ellipses() {
         let mut h = studio();
         // Exact sizes: no smart guides pulling the corners.
-        h.state_mut().view_tools.smart_guides = false;
+        h.state_mut().prefs.smart_guides = false;
         h.key_press(Key::M);
         h.run_steps(1);
         assert_eq!(h.state().tool, Tool::Shape);

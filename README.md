@@ -2,7 +2,10 @@
 
 # ZigZag
 
-**[Visit zigzag.diy](https://zigzag.diy/)**
+**[Visit zigzag.diy](https://zigzag.diy/)** · Download for
+[Mac](https://github.com/simpsoka/zigzag/releases/latest/download/ZigZag.dmg),
+[Windows](https://github.com/simpsoka/zigzag/releases/latest) or
+[Linux](https://github.com/simpsoka/zigzag/releases/latest)
 
 ZigZag is a visual embroidery editor built in Rust for performance, with
 built-in **MCP (Model Context Protocol)** support so AI agents can create and
@@ -47,9 +50,8 @@ To update a Homebrew installation:
 brew upgrade --cask --greedy simpsoka/zigzag/zigzag
 ```
 
-Starting with version 0.1.3, ZigZag also offers an in-app updater: it tells
-you when there's a newer release and installs it when you say (ZigZag ›
-Check for Updates…).
+ZigZag also updates itself: it tells you when there's a newer release and
+installs it when you say (ZigZag › Check for Updates…).
 
 ## Download for Windows
 
@@ -76,6 +78,18 @@ inside the extracted folder. It also includes the `zigzag` CLI and
 · [Changelog](CHANGELOG.md)
 · [Publishing a release](RELEASE.md)
 
+## Build
+
+```sh
+cargo build --release                        # CLI + MCP bridge, no system deps
+cargo build --release --features gui,ble     # + the studio editor and Skitch upload
+```
+
+Linux needs the usual X11/Wayland and OpenGL dev libraries for `gui`. libdbus
+is vendored for `ble`.
+
+## Development
+
 ```
 zigzag/
   src/svg.rs              SVG import (usvg): fill and stroke parts, transforms, text
@@ -90,24 +104,30 @@ zigzag/
   src/boolean.rs          polygon booleans and offsets (i_overlay)
   src/design.rs           planner: overlap removal, cap order, routing, trims
   src/route.rs            travel out of sight: a way through fills and under what covers
-  src/checks.rs           digitizing checks (sizes, widths, lettering, hoop)
+  src/checks.rs           digitizing checks (sizes, widths, lettering, hoop, travel in sight)
   src/machine/profile.rs  machine profiles: hoops and file format, built in (profiles.json) or your own
   src/formats/            PES (+PEC), DST, EXP, JEF, VP3, Skitch PEN writers;
-                          PES/PEC/DST/EXP/JEF readers; preview; worksheet
+                          PES/PEC/DST/EXP/JEF readers; preview; worksheet;
+                          ZigZag's stitch-plan file (plan.rs)
   src/machine/            Skitch Bluetooth protocol (+ btleplug client, `ble` feature)
   src/studio/             editor (egui on OpenGL via glow) + MCP server (`gui` feature)
   src/mcp_bridge.rs       stdio ↔ HTTP bridge for MCP clients that launch a command
 ```
 
-## Build
+Run the studio's tests with `cargo test --features gui` (plain `cargo test`
+skips them).
 
-```sh
-cargo build --release                        # CLI + MCP bridge, no system deps
-cargo build --release --features gui,ble     # + the studio editor and Skitch upload
-```
+- **Letter census:** `tools/census/census.sh NAME` sets every letter and digit of about 50 popular fonts of every kind of type (`tools/census/fonts.txt`) as a satin and counts how many come out clean on every measure (no filled parts, stitches off the letter, extra cuts, travel in sight, bare cloth, off-square stitches, seams or satin piled three deep), with trims and letters sewn in one piece. It takes about half a minute; `quick` sweeps every 8th installed family and `full` all of them. Each process is stopped past 2 GB. `ZIGZAG_FONT_SIZE=11` sets letters about 8 mm tall. `tools/census/summary.py` compares runs in `target/census/`. To try a change, `tools/census/try.sh [VAR=VALUE …]` runs the popular fonts at 8 and 15 mm as sewn and with the settings given, in one go, and shows each against the last try (results for code that hasn't changed are kept). `tools/census/letter.sh FAMILY CHAR [8|15] [VAR=VALUE …]` plans one letter and says where each trim is and why (`ZIGZAG_TRIMS=1` does that for any `zigzag convert`); `tools/census/trims.py` sorts a census's trims that way, for a census run with `ZIGZAG_TRIMS=1`. `tools/census/sheet.py OUT.png [8|15] FAMILY=CHARS …` draws letters' stitches in a few settings side by side over their outlines, to judge by eye; `tools/census/judged.txt` is a set judged that way and `tools/census/judge.py` checks the census's faults against it (the census counts stitches crowded into one place, the narrow end of a fan, and needle points outside the letter, but judges fans poorly). They build with the `trial` profile: as fast as release, but an edit rebuilds in seconds.
 
-Linux needs the usual X11/Wayland and OpenGL dev libraries for `gui`. libdbus
-is vendored for `ble`.
+- **App icons:** the embroidered icons live in `packaging/macos/AppIcon.png`
+  (light) and `packaging/macos/AppIcon-dark.png` (dark). The Mac build
+  regenerates both `.icns` files; `bash packaging/macos/make-icons.sh` does it
+  separately. Finder and the unopened app use the light icon; while the studio
+  runs, its Dock icon follows the app's theme.
+- **Screenshots and videos:** start the studio with `ZIGZAG_CAPTURE=<folder>`
+  and ⌃⌥⌘S saves the window as a full-resolution PNG; ⌃⌥⌘R starts and stops
+  recording it. `packaging/media/encode.sh <folder>/take-001 demo` turns a
+  recording into `demo.mp4` and `demo.gif` (needs ffmpeg).
 
 ## Stitch types
 
@@ -173,13 +193,6 @@ permission the first time you send to the Skitch.
 
 ## Studio
 
-The approved embroidered icons live in `packaging/macos/AppIcon.png` (light)
-and `packaging/macos/AppIcon-dark.png` (dark). The Mac build regenerates both
-multi-resolution `.icns` files; run `bash packaging/macos/make-icons.sh` to
-regenerate them separately. Finder and the unopened app use the light icon.
-While the studio is running, its Dock icon follows the app's light/dark theme,
-including the `ZIGZAG_THEME=light|dark` override.
-
 ![ZigZag](examples/studio.png)
 
 ```sh
@@ -201,23 +214,24 @@ Laid out like Illustrator, styled like a Mac app:
 - **Path tools:** Object › Pathfinder (Unite, Minus Front, Intersect, Exclude; also buttons in the Transform panel when two or more objects are selected) and Object › Path (Offset Path…, Add Outline, Outline Stroke, Simplify…, Round Corners…, Clean Up…). Simplify… is VectorCraft's slider, from fewest points to closest to the original, previewed live, with Auto-Simplify picking the level for the selection's size. Clean Up… removes stray points, objects too small to sew (under 1 mm by default) and extra points (points on top of each other, points in the middle of straight lines), showing how many of each it found first. Results come back as smooth curves with their real corners (least-squares curve fitting), not as many-sided polygons.
 - **Logos from images (Image Trace):** open, drop or place a PNG, JPEG, WebP, GIF, BMP or TIFF and the Trace Image window traces it into flat-color shapes, previewed on your hat's color. Choose how many colors (or Auto), the width, detail and the smallest speck to keep; remove the white background; snap every color to your Brother, Janome or own palette's threads; and sew thin lines as single lines. Flat logos trace exactly (edges placed to a fraction of a pixel, corners restored, circles and straight lines exact); photos are posterized. The command line traces too: `zigzag convert logo.png -o logo.pes`.
 - **Contextual task bar:** under the selection, the next things you'd do: its stitch type, its thread, Edit Points, Round Corners, Simplify, Unite (two or more), Duplicate. Drag the grip at its left end to move it off the art: it keeps that distance as it follows the selection, or stays put with Pin Bar Position in its ••• menu (Reset Bar Position puts it back). View › Contextual Task Bar (or its ••• menu) hides it.
-- **Ask an agent:** the Agent panel (full height in the left dock; the sparkle at the bottom of the tool strip opens and closes it, and ⌘K or Window › Ask Agent… opens it with the prompt ready) runs Claude Code or Codex in the background, connected to this studio's MCP server, so you watch it build the design. It can only use the design tools (no shell, no file edits). The transcript shows what it said and each step, with a spinner on the one running (the one place it's shown; collapse the panel and its header shows the step and the time instead). On the canvas, the objects it's working on get a moving outline, a shimmer and a label saying what it's doing (Drawing, Placing, Restyling…), for any agent connected over MCP, not just the panel's. The panel is named for the agent (Claude Code or Codex; switch in its ≡ menu); + in its header starts a new chat, Stop ends a run. Uses the `claude` or `codex` command you've already signed in to. Like any panel it can float, join another as a tab or dock right; sharing a dock it sits at the bottom, under a divider you drag to give it more room.
+- **Ask an agent:** the Agent panel floats over the canvas's lower left (the sparkle at the bottom of the tool strip opens and closes it, and ⌘K or Window › Ask Agent… opens it with the prompt ready). It runs Claude Code, Codex or Antigravity in the background, connected to this studio's MCP server, so you watch it build the design. It can only use the design tools (no shell, no file edits). The transcript shows what it said and each step; on the canvas, the objects it's working on get a moving outline, a shimmer and a label saying what it's doing (Drawing, Placing, Restyling…), for any agent connected over MCP, not just the panel's. Before it finishes it reviews the design as an embroiderer would (underlay, row spacing, fill directions, outlines with nothing inside, a patch's border, lettering size, cost to sew) and fixes what it can; a trade-off that's yours to make comes back as a card of choices you answer with a click. Pin notes on the canvas (the speech-bubble button, or N) to say where you mean; attach images; ask for a few versions and pick one side by side. What you type while it works waits in a queue (send one now from its row, or take it back); Return sends, Shift-Return makes a new line, and `/` lists commands such as `/model`. Each design's chats are kept on this computer (the clock in its header). The panel is named for the agent (switch in its header); + starts a new chat, Stop ends a run, and its ≡ menu's Auto-Hide (on unless you turn it off) puts it away when you click the canvas or pick a tool, the sparkle bringing it back with a dot for a reply. Uses the `claude`, `codex` or `agy` command; if it isn't installed or signed in, the panel's Setup page (also in the agent menu in its header) installs it with its maker's installer and signs in through your browser, with no terminal. Like any panel it can dock or join another as a tab.
 - **Thread colors and palettes:** the picker shows the nearest Brother/Janome thread, a palette to click (Brother, Janome or your own), and a small custom color field. Make palettes from scratch, from the design, or from a thread kit you own (the palette's ≡ menu › New Palette from Thread Kit: Brother's 12, 40 and 22 color sets, or 40 + 22 for all 61; then Match All keeps a design to the threads in your box), add the selection's thread with +, right-click to remove; they're remembered between launches.
 - **Threads panel:** the design's threads in sewing order (each color block numbered, with its stitches, and "stop" where the same thread comes twice running) or By Color (each thread once, with how many objects use it). Click a row to select what it sews; click a swatch to change that block's thread, or in By Color that thread everywhere. Group Colors and the count of color changes and trims are under the list. The panel's ≡ menu has Match All to the chosen palette, and Show Palette puts a palette to click under the list (off by default, since the thread picker has the same palettes).
 - **Simplify Design** (Object › Simplify Design…, or Simplify… in the Threads panel): make a design quicker to sew. Merge the threads most alike down to a number (each pair becomes the one that sews more, so they stay real threads), take out details too small to sew well, sew across short gaps instead of trimming, sew each thread together, and (if you choose) unite layers that touch in one thread into one shape, so nothing is sewn under or between them: only the ones sewn the same way (a satin on a fill stays), or all of them. It previews on the canvas as you drag, with threads, thread changes, trims, stitches and sewing time before and after beside the controls; OK is one undo step.
-- **Panels, the Illustrator way:** the Agent has the left dock to itself; Layers, Stitch, Transform, Lettering, Threads and Document are on the right. The design's issues are in the status bar (bottom right): a warning sign with a count, or a check when all's well; click it (or Window › Issues) for the list, each linked to its object. Drag a panel by its header to reorder it, move it to the other dock, or drop it on the canvas to float it (each panel's ≡ menu also has Dock Left / Dock Right / Float). Drop a panel on another panel's header and they share it as tabs; drag a tab out (or use Separate in the ≡ menu) to part them, drag the header to move the group. » at the top of a dock collapses it to a strip of icons for a bigger canvas: click an icon and the panel flies out beside the strip (drag an icon to move that panel). Click a header to collapse a panel; Window › Reset Panels puts everything back. The layout is remembered.
+- **Panels, the Illustrator way:** Layers, Stitch, Transform, Lettering, Threads and Document are on the right, and the Agent floats over the canvas. The design's issues are in the status bar (bottom right): a warning sign with a count, or a check when all's well; click it (or Window › Issues) for the list, each linked to its object. Drag a panel by its header to reorder it, move it to the other dock, or drop it on the canvas to float it (each panel's ≡ menu also has Dock Left / Dock Right / Float). Drop a panel on another panel's header and they share it as tabs; drag a tab out (or use Separate in the ≡ menu) to part them, drag the header to move the group. » at the top of a dock collapses it to a strip of icons for a bigger canvas: click an icon and the panel flies out beside the strip (drag an icon to move that panel). Click a header to collapse a panel; Window › Reset Panels puts everything back. The layout is remembered.
 - **Layers list:** what's on top is at the top, as in Illustrator: the last layer sewn is the first row and the background is the last. Drag a row to another place in the stack (a line shows where it will go; the rows selected with it go too, and a group's row takes all its layers), or use the arrows under the list: up is sewn later, down is sewn earlier. The panel's ≡ menu has List in Sewing Order, for the list the other way up (what's sewn first at the top, as the Threads panel and embroidery software list it; dragging and the arrows follow). A document's only group starts open.
 - **Rename an object:** double-click its name in the Layers list, as in Illustrator; Enter keeps the name, Escape doesn't. A single click only selects.
 - **Tabs, one per document** (as in VectorCraft and Illustrator): Open, drop or New opens a file in a tab of its own over the canvas (the empty document you start with makes way for the first one); a file that's already open just comes forward. Each tab keeps its own undo history, selection, zoom and stitches. Click a tab to switch, ⌃Tab / ⌃⇧Tab (or Window › Next / Previous Document) to step through them, drag one to reorder, middle-click or its × (or File › Close, ⌘W) to close it; + opens a new document and » lists every tab when they don't all fit. A dot in place of the × marks unsaved changes, and closing such a tab asks whether to save it first. Right-click a tab for Close Other Tabs and Copy Path. Quitting with unsaved changes asks too (Save, or Save All for several; Don't Save; Cancel), as VectorCraft does, though not saving loses nothing: every tab comes back next time, each with its unsaved changes, and the files stay as they were until you save.
 - **Lock and hide:** every row of the Layers list has an eye and a lock (Illustrator's Layers columns; Option-click for every other object, and Object › Lock ⌘2, Unlock All, Hide ⌘3, Show All). A hidden object isn't shown or sewn; a locked one can't be selected or moved, so a background stays put while you work on what's over it. Drag the Selection tool over empty canvas for a selection box; two-finger scroll, Space-drag or the Hand tool moves the canvas.
+- **Share a design** (File › Share…): a page for it at zigzag.diy with its picture, a stitch player and its machine files, ready to download in any format. Choose who can see it (anyone, a link that expires, or only you), its license (CC BY 4.0 unless you change it) and whether others get the design itself to edit or only its picture and machine files. No account is needed; a share made without one can be changed only from the computer that made it.
+- **Account** (Settings › Account): sign in to zigzag.diy with your email and a code, no password. Your shares then belong to the account, and your machines, thread palettes, thread chart and last font follow you to your other computers.
 - **Updates itself:** ZigZag looks at its latest release on GitHub when it opens, and the toolbar shows an Update button when there's a newer one. On a Mac, Install and Relaunch downloads it, checks it against the release's checksum and Apple's code signature (it has to be signed by the same developer as the copy that's running), swaps it in and reopens with your documents as they were. ZigZag › Check for Updates… looks on demand; Settings › General turns the automatic look off. Windows and Linux are told and taken to the download.
-- **Travel stays out of sight:** the thread gets from one part of an object to the next under stitches still to come or under what's sewn on top; a fill's sections are sewn in the order that allows it. Where there's no such way the thread is cut, or (Document panel › Travel › Sew over fill) sewn over the fill already there, which saves cuts and shows. The checks say when travel crosses stitches already sewn.
+- **Travel stays out of sight:** the thread gets from one part of an object to the next under stitches still to come or under what's sewn on top; a fill's sections are sewn in the order that allows it. Where there's no such way the thread is cut, or (Document panel › Travel › Sew over fill) sewn over the fill already there, which saves cuts and shows. The checks say when the planner's own travel crosses stitches already sewn in sight (not the thread you chose to show with Sew over fill or Connect).
 - **Menu bar** (File, Edit, Object, Type, View, Window, Help) with the usual ⌘ shortcuts. Help › Report an Issue… opens a new issue on GitHub in your browser, started with which ZigZag you have and what it's running on. It's the real macOS menu bar on a Mac, drawn in the window elsewhere.
 - **Crash logs:** if something inside ZigZag fails badly enough to stop it, a short log of what failed and where is kept in the settings folder (`crashes/`, the newest ten; Help › Show Crash Logs opens it). The next time ZigZag opens it offers to report it: a GitHub issue started with the gist of the log, and the file shown so it can be attached. Nothing is sent unless you post it, and people's names are taken out of the paths in it. Help also has ZigZag on GitHub, and About ZigZag links there too.
 - **Cursors drawn for each tool:** the Pen's nib (with what a click will do), crosshairs for the Shape, Rotate, Measure and Fill Angle tools, Direct Selection's hollow arrow, and a curved arrow at rotate corners and while the Rotate tool turns.
 - **Right-click menus** on the canvas and the Layers list, styled like the tool flyouts: the stitch types with their icons, then the usual commands with their shortcuts.
 - **Stays quick on big designs:** stitches are planned once per change, reusing every object that didn't change (overlap removal too: moving one object redoes only the objects it overlaps); a design that takes more than 12 ms to plan plans in the background (the status bar says "Updating stitches…" and the last plan stays on screen meanwhile; when you drop a moved object its stitches move with it until the new plan lands). Dragging points or objects, and typing, preview without re-planning until you let go. The stitches live on the GPU: each color block's segments are uploaded once and drawn by a shader (thread shading and needle points included), so panning, zooming, dragging and the stitch player cost nothing per stitch on the CPU, whether the design has a thousand stitches or half a million. The Layers list lays out only the rows in view. An object whose stitches hit an internal error is left out with a warning in Issues rather than taking the plan down. For development: `TL_PROFILE=1` prints each frame's sections to stderr, `TL_NO_GPU=1` draws the stitches with the painter instead, and `cargo test --release --features gui --bin zigzag-studio perf_bench -- --ignored --nocapture --test-threads=1` times typing and dragging on a traced logo (`examples/bench-grid.svg` is a 213,000-stitch design for the studio itself).
-- **Letter census** (for development): `tools/census/census.sh NAME` sets every letter and digit of about 50 popular fonts of every kind of type (`tools/census/fonts.txt`) as a satin and counts how many come out clean on every measure (no filled parts, stitches off the letter, extra cuts, travel in sight, bare cloth, off-square stitches, seams or satin piled three deep), with trims and letters sewn in one piece. It takes about half a minute; `quick` sweeps every 8th installed family and `full` all of them. Each process is stopped past 2 GB. `ZIGZAG_FONT_SIZE=11` sets letters about 8 mm tall. `tools/census/summary.py` compares runs in `target/census/`. To try a change, `tools/census/try.sh [VAR=VALUE …]` runs the popular fonts at 8 and 15 mm as sewn and with the settings given, in one go, and shows each against the last try (results for code that hasn't changed are kept). `tools/census/letter.sh FAMILY CHAR [8|15] [VAR=VALUE …]` plans one letter and says where each trim is and why (`ZIGZAG_TRIMS=1` does that for any `zigzag convert`); `tools/census/trims.py` sorts a census's trims that way, for a census run with `ZIGZAG_TRIMS=1`. `tools/census/sheet.py OUT.png [8|15] FAMILY=CHARS …` draws letters' stitches in a few settings side by side over their outlines, to judge by eye; `tools/census/judged.txt` is a set judged that way and `tools/census/judge.py` checks the census's faults against it (the census counts stitches crowded into one place, the narrow end of a fan, and needle points outside the letter, but judges fans poorly). They build with the `trial` profile: as fast as release, but an edit rebuilds in seconds.
 - Follows the system's **light or dark** appearance (`ZIGZAG_THEME=light|dark` overrides) and uses the San Francisco system font on a Mac.
 - **Interface size:** Settings › General draws everything in the window larger or smaller (90% to 150%): panels, text, buttons and the handles on the canvas. Your design keeps the size it has on screen, the window never gets smaller than the layout needs, and a size the display has no room for steps down to the largest that fits.
 
@@ -237,7 +251,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Test swatches** (Object › Test Swatches…): copies of the selection in a grid, one setting (spacing, length, pull compensation, satin width, fill angle) stepped from a value to another, each lettered with its value, to stitch out and compare on the real fabric.
 - **View › Density Map** tints where stitches pile up (yellow from 2.5 per mm², red at 4), and **View › Sewing Order** numbers the objects on the canvas.
 - **Machine** in the Document panel: choose the machine a design is for (Brother's 4×4, 5×7 and PR machines, the Skitch, Janome's 550E, Husqvarna Viking's Jade 35, Melco's Summit, ZSK's Sprint 8, any commercial machine that reads DST, or one of your own) and its hoops lead the Hoop menu, Export offers the file it reads first, and new documents start set up for it. What the machine asks of the stitches (a shortest stitch, its own locks) shows under the row. The gear beside it, and Machine Settings… in the menu, open Settings. A machine is a name for ordinary settings, saved into the design, so a file opens the same anywhere.
-- **Settings** (ZigZag › Settings…, ⌘, ; at the foot of Edit on Windows and Linux): what's set once for this computer. **Machines:** ZigZag's and yours; + makes one from the document's hoop, Duplicate copies one (ZigZag's own can't be changed, but a copy can); each has its name, hoops (and the one new documents start in), the file it reads, a shortest stitch for machines that drop short ones, and its lock stitches (back and forth, a triangle or none, with their length and number). With a shortest stitch, nothing in the plan or the file is shorter: fill rows closer together than that are sewn every second row and then the rows between (the same needle points, longer turns), other short stitches are merged into their neighbours, and locks are never shorter than it. **General:** units, light or dark, and whether stitches are drawn on the GPU. **Agent:** which agent the Agent panel runs, and the server other agents connect to (on or off, and its port; from the next launch).
+- **Settings** (ZigZag › Settings…, ⌘, ; at the foot of Edit on Windows and Linux): what's set once for this computer. **Machines:** ZigZag's and yours; + makes one from the document's hoop, Duplicate copies one (ZigZag's own can't be changed, but a copy can); each has its name, hoops (and the one new documents start in), the file it reads, a shortest stitch for machines that drop short ones, and its lock stitches (back and forth, a triangle or none, with their length and number). With a shortest stitch, nothing in the plan or the file is shorter: fill rows closer together than that are sewn every second row and then the rows between (the same needle points, longer turns), other short stitches are merged into their neighbours, and locks are never shorter than it. **General:** units, light or dark, and whether stitches are drawn on the GPU. **Agent:** which agent the Agent panel runs, whether chats are kept, and the server other agents connect to (on or off, and its port; from the next launch). **Account:** signing in to zigzag.diy (see Account above).
 - **Advanced settings:** the Stitch and Document panels show every setting. Turn off Show advanced settings in Settings › General and they show the few most designs need, leaving the rest to the fabric; a setting that's been changed still shows, marked with a dot, and each panel says how many more there are.
 - **Narrow satin** in the Document panel: satins narrower than this (1 mm unless you say) get the too-narrow warning. Set it to what sews cleanly on your fabric.
 - **Fabric preset, hoop, Remove overlaps and Cap order** in the Document panel. The hoop menu has the standard sizes from 1×2.5 in (20 × 60 mm) to 9.5×14 in (240 × 360 mm), the Skitch's two and Janome's A and B; Custom takes any width and height, for magnetic and other frames. Preview on your hat's color.
@@ -275,13 +289,14 @@ document no one is watching (`zigzag-studio --mcp-stdio`), kept only when the
 agent saves or exports it.
 
 Tools:
-- `get_design`, `add_svg` (place/scale artwork in mm), `set_object`, `delete_object`, `move_object`
-- `transform_objects` (size, scale, rotate, mirror, move), `duplicate_objects`
+- `get_design`, `add_svg` (place/scale artwork in mm), `set_object`, `delete_object`, `move_object`, `rename_object`
+- `transform_objects` (size, scale, rotate, mirror, move), `duplicate_objects`, `align_objects`, `combine_shapes` (Pathfinder)
 - `add_text`, `edit_text`, `list_fonts`
 - `set_document` (machine, shortest stitch, lock stitches, how narrow a satin may be before it's warned about, fabric, hoop as a standard or any `WIDTHxHEIGHT` in mm, overlaps, cap order, preview color), `list_machines`, `group_colors`
 - `render_preview` (returns a PNG of the stitches), `check_design`, `get_svg`, `select`
+- `review_design` (the design as an embroiderer would look it over before sewing: underlay, spacing, fill directions, empty outlines, the border, lettering size, what it costs to sew and which settings would save trims), `get_cuts` (where the thread is cut, and why), `offer_choices` (a card of choices for the person, each made with one click)
 - `export` with `objects: true` also writes `FILE.objects.json`: which object each stitch, jump and trim in the machine file is for, so a checker can name the shape behind a fault
-- `open_file` (SVG, machine file or image, in a tab of its own), `list_documents`, `switch_document`, `new_document`, `undo`, `save`, `export` (machine formats or `html` worksheet; without a format, the one the path ends in, or else the one the document's machine reads), `send_to_skitch`, `machine_status`
+- `open_file` (SVG, machine file or image, in a tab of its own), `list_documents`, `switch_document`, `new_document`, `undo`, `redo`, `save`, `export` (machine formats or `html` worksheet; without a format, the one the path ends in, or else the one the document's machine reads), `send_to_skitch`, `machine_status`
 - Any tool that changes the design takes `terse: true` for a short answer (ok, the names of objects added, and the design problems that are new) instead of the whole object; on `batch` it covers every step.
 - `trace_image` (PNG, JPEG, WebP, GIF, BMP or TIFF logo → shapes, colors snapped to a thread chart), `add_outline` (a satin or running-stitch outline on a filled shape, as an object of its own), `round_corners`, `simplify` (VectorCraft's 0–100 levels, or Auto), `clean_up`, `simplify_design` (fewer threads, small details and trims for the whole design; `dry_run` to see what it comes to)
 - `break_into_columns` (a satin shape as the two-rail columns it's sewn as), `create_outlines` (text into shapes), `get_path` and `edit_path` (an object's points: move, add or delete a point, add or delete a subpath, which is how a column's rails and rungs are adjusted), `measure_stitching` (what shows in satin stitching, counted: stitches outside the shape, bare cloth, crowded needle points, seams, piled satin, travel in sight, trims; given an earlier result as `before` it says what moved and whether it's better, so a change can be kept or undone)
@@ -458,23 +473,16 @@ Checked against Wilcom Hatch's core feature set:
 ## Status
 
 Verified:
-- 136 library tests, 153 editor/MCP tests (UI interactions via egui_kittest, a full
-  agent workflow, a real HTTP JSON-RPC session, atomic batches, the Skitch flow
-  against a simulated machine), with and without Bluetooth built in, plus the
-  222 tests of the vendored Image Trace.
+- Over 300 library tests and over 400 editor/MCP tests (UI interactions via
+  egui_kittest, a full agent workflow, a real HTTP JSON-RPC session, atomic
+  batches, the Skitch flow against a simulated machine), with and without
+  Bluetooth built in, plus the vendored Image Trace's own tests.
 - Every writer (PES, DST, EXP, JEF, VP3) reads back through pyembroidery with
   identical stitch positions; our readers read pyembroidery-written files.
 - PEN output checked against hand-computed sequences.
 - Studio run on Mesa OpenGL and driven by an agent over MCP.
 
 **Tested on a real Brother Skitch (PP1).**
-
-## Screenshots and videos
-
-Start the studio with `ZIGZAG_CAPTURE=<folder>` and ⌃⌥⌘S saves the window as
-a full-resolution PNG; ⌃⌥⌘R starts and stops recording it.
-`packaging/media/encode.sh <folder>/take-001 demo` turns a recording into
-`demo.mp4` and `demo.gif` (needs ffmpeg).
 
 ## Credits
 

@@ -49,13 +49,17 @@ pub enum AgentKind {
     Claude,
     #[default]
     Codex,
+    /// Google's Antigravity CLI (`agy`).
+    Antigravity,
 }
 
 impl AgentKind {
-    /// Both, in menu order.
-    pub const ALL: [AgentKind; 2] = [AgentKind::Codex, AgentKind::Claude];
+    /// Every one, in menu order.
+    pub const ALL: [AgentKind; 3] = [AgentKind::Codex, AgentKind::Claude, AgentKind::Antigravity];
+    /// How many there are (the size of the arrays kept for each).
+    pub const COUNT: usize = 3;
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 
@@ -70,8 +74,11 @@ impl AgentKind {
         match (os, self) {
             (Os::Mac, AgentKind::Codex) => (
                 &[
-                    ("With Homebrew", "brew install --cask codex"),
-                    ("Or with npm", "npm install -g @openai/codex"),
+                    (
+                        "Recommended",
+                        "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+                    ),
+                    ("Or with Homebrew", "brew install --cask codex"),
                 ],
                 "Then run `codex` once in Terminal and choose Sign in with ChatGPT.",
             ),
@@ -85,8 +92,24 @@ impl AgentKind {
                 ],
                 "Then run `claude` once in Terminal to sign in.",
             ),
-            (Os::Windows | Os::Linux, AgentKind::Codex) => (
-                &[("With npm", "npm install -g @openai/codex")],
+            (Os::Windows, AgentKind::Codex) => (
+                &[
+                    (
+                        "Recommended (PowerShell)",
+                        "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
+                    ),
+                    ("Or with npm", "npm install -g @openai/codex"),
+                ],
+                "Then run `codex` once in a terminal and choose Sign in with ChatGPT.",
+            ),
+            (Os::Linux, AgentKind::Codex) => (
+                &[
+                    (
+                        "Recommended",
+                        "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+                    ),
+                    ("Or with npm", "npm install -g @openai/codex"),
+                ],
                 "Then run `codex` once in a terminal and choose Sign in with ChatGPT.",
             ),
             (Os::Windows, AgentKind::Claude) => (
@@ -109,6 +132,27 @@ impl AgentKind {
                 ],
                 "Then run `claude` once in a terminal to sign in.",
             ),
+            (Os::Mac, AgentKind::Antigravity) => (
+                &[(
+                    "Recommended",
+                    "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+                )],
+                "Then run `agy` once in Terminal to sign in with your Google account.",
+            ),
+            (Os::Linux, AgentKind::Antigravity) => (
+                &[(
+                    "Recommended",
+                    "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+                )],
+                "Then run `agy` once in a terminal to sign in with your Google account.",
+            ),
+            (Os::Windows, AgentKind::Antigravity) => (
+                &[(
+                    "Recommended (PowerShell)",
+                    "irm https://antigravity.google/cli/install.ps1 | iex",
+                )],
+                "Then run `agy` once in a terminal to sign in with your Google account.",
+            ),
         }
     }
 
@@ -116,9 +160,10 @@ impl AgentKind {
     fn not_installed_message(self, os: Os) -> String {
         let (ways, sign_in) = self.install_steps_on(os);
         format!(
-            "{} isn't installed (no `{}` command found). Install it in {} with `{}`{}. {sign_in} Then try again.",
+            "{} isn't installed (no `{}` command found). Click Install {} below, or install it in {} with `{}`{}. {sign_in} Then try again.",
             self.name(),
             self.program(),
+            self.name(),
             os.terminal(),
             ways[0].1,
             ways.get(1)
@@ -131,12 +176,38 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "Claude Code",
             AgentKind::Codex => "Codex",
+            AgentKind::Antigravity => "Antigravity",
+        }
+    }
+    /// Its maker's mark, for the panel's setup.
+    pub fn brand(self) -> crate::brands::Brand {
+        match self {
+            AgentKind::Claude => crate::brands::Brand::Anthropic,
+            AgentKind::Codex => crate::brands::Brand::OpenAi,
+            AgentKind::Antigravity => crate::brands::Brand::Google,
+        }
+    }
+    /// Who makes it, for "…'s installer".
+    fn maker(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Anthropic",
+            AgentKind::Codex => "OpenAI",
+            AgentKind::Antigravity => "Google",
+        }
+    }
+    /// The account it signs in with.
+    fn account(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Claude",
+            AgentKind::Codex => "ChatGPT",
+            AgentKind::Antigravity => "Google",
         }
     }
     fn program(self) -> &'static str {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "agy",
         }
     }
     /// The agent a key ([`AgentKind::key`]) names.
@@ -148,6 +219,18 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "antigravity",
+        }
+    }
+
+    /// Its sign-in page can show a code to paste back into the program
+    /// (where the panel can pass it on: Antigravity signs in from a window
+    /// of its own on Windows).
+    pub fn pastes_code(self) -> bool {
+        match self {
+            AgentKind::Claude => true,
+            AgentKind::Antigravity => !cfg!(windows),
+            AgentKind::Codex => false,
         }
     }
 }
@@ -213,6 +296,11 @@ struct Run {
     kind: AgentKind,
     /// It was started to carry on an earlier session.
     resumed: bool,
+    /// What Antigravity has said so far, in pieces (see [`AgyStream`]).
+    agy: AgyStream,
+    /// When its final result came in, and whether that was a success: an
+    /// Antigravity that doesn't exit after it is stopped (see `poll`).
+    result_at: Option<(Instant, bool)>,
 }
 
 /// An agent's words for "there's no such session to carry on".
@@ -234,6 +322,89 @@ fn session_gone(message: &str) -> bool {
     .any(|w| m.contains(w));
     about && missing
 }
+
+/// Ideas for a new design, for an empty chat to start from.
+const NEW_IDEAS: &[&str] = &[
+    "A round camp badge with a pine tree",
+    "A cat curled up asleep, for a pocket",
+    "A wildflower bouquet tied with a ribbon",
+    "A mountain sunset patch with a stitched border",
+    "My initials in a monogram with a laurel wreath",
+    "A bee on a honeycomb",
+    "A retro surf patch: “Catch a Wave”",
+    "A little whale for a baby's onesie",
+    "A coffee cup with steam swirls",
+    "A crescent moon with stars",
+    "A cactus in a terracotta pot",
+    "A mushroom cluster with tiny leaves",
+    "A lemon slice with leaves",
+    "A paper airplane with a dashed trail",
+    "A strawberry with a smiling face",
+    "A lighthouse on rocks, for a hat",
+    "A dog's name in a bone-shaped badge",
+    "A rainbow over two clouds",
+    "A fox sitting in tall grass",
+    "A bicycle with a basket of flowers",
+];
+
+/// Ideas for a change to the design that's open.
+const CHANGE_IDEAS: &[&str] = &[
+    "Make the lettering satin",
+    "Simplify this for a 4x4 hoop",
+    "Cut down the thread changes",
+    "Add a satin border around it",
+    "Make it sew faster",
+    "Try a warmer color palette",
+    "Fewer trims, please",
+    "Make it work on a stretchy T-shirt",
+    "Make it half the size",
+    "Check it for problems before I sew",
+];
+
+/// Three ideas from `seed`, none twice: for a design that's open, two new
+/// designs and a change to it; for an empty one, three new designs.
+fn ideas(seed: u64, has_design: bool) -> Vec<&'static str> {
+    // (splitmix64: a few good numbers from one.)
+    let mut x = seed;
+    let mut next = move || {
+        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let mut pick = |from: &[&'static str], n: usize, out: &mut Vec<&'static str>| {
+        let mut left: Vec<&'static str> = from.to_vec();
+        for _ in 0..n.min(left.len()) {
+            let k = (next() % left.len() as u64) as usize;
+            out.push(left.swap_remove(k));
+        }
+    };
+    let mut out = Vec::with_capacity(3);
+    if has_design {
+        pick(NEW_IDEAS, 2, &mut out);
+        pick(CHANGE_IDEAS, 1, &mut out);
+    } else {
+        pick(NEW_IDEAS, 3, &mut out);
+    }
+    out
+}
+
+/// A seed that's different each time it's asked for (the standard
+/// library's hasher is keyed at random).
+fn fresh_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    h.finish()
+}
+
+/// How long Antigravity has to exit once it has given its result.
+const AGY_LINGER: Duration = Duration::from_secs(3);
 
 /// How long to wait for the last of its output once it has ended (something
 /// it started may be holding the pipe open).
@@ -265,23 +436,45 @@ pub struct AgentState {
     pub(crate) config: Option<PathBuf>,
     /// Where each agent's program is (by [`AgentKind::index`]): `None`
     /// until looked up, then `Some(None)` if it isn't installed.
-    pub found: [Option<Option<PathBuf>>; 2],
+    pub found: [Option<Option<PathBuf>>; AgentKind::COUNT],
+    /// Installing it or signing in to it from the panel (see `agent_setup`).
+    pub setup: crate::agent_setup::Setup,
+    /// The Setup page chosen from the agent menu (it also shows by itself
+    /// while the chosen agent isn't installed).
+    pub on_setup: bool,
+    /// The first look for the programs has settled which agent the panel
+    /// opens on (see `open_on_an_installed_agent`).
+    settled: bool,
+    /// Why the studio's MCP server isn't running, when it isn't: what a
+    /// prompt sent without it says.
+    pub mcp_off: Option<String>,
     /// Images being made ready to attach, each for the prompt of the
     /// document (a recovery number) it was dropped or pasted in.
     pub(crate) attaching: Vec<(u32, Receiver<Result<PathBuf, String>>)>,
     /// The document its calls go to (a recovery number), once it has
     /// opened or switched to one itself while working.
     pub follow: Option<u32>,
+    /// Which ideas an empty chat shows (see [`ideas`]): chosen when it's
+    /// first shown, kept until the chat has something in it.
+    pub ideas_seed: Option<u64>,
     /// Stop was pressed (or the chat cleared) since the last frame: what
     /// was waiting to go to the agent next doesn't.
     pub stopped: bool,
+    /// Messages written while it worked, sent together when its turn ends
+    /// (or put back in the prompt box, if it's stopped).
+    pub queued: Vec<String>,
+    /// It was working last frame (this chat's), to tell when a turn ends.
+    was_running: bool,
+    /// A turn ended while the panel was put away: the tool strip's Agent
+    /// button shows a dot until it's opened.
+    pub unread: bool,
     /// A lookup running off the UI thread: (login PATH, what was found).
-    lookup: Option<Receiver<(Option<String>, [Option<PathBuf>; 2])>>,
+    lookup: Option<Receiver<(Option<String>, [Option<PathBuf>; AgentKind::COUNT])>>,
     /// The model chosen for each agent (by [`AgentKind::index`]); `None`
     /// is the agent's own default.
-    pub model: [Option<String>; 2],
+    pub model: [Option<String>; AgentKind::COUNT],
     /// How hard each agent thinks; `None` is its own default.
-    pub effort: [Option<String>; 2],
+    pub effort: [Option<String>; AgentKind::COUNT],
     /// Codex's models, as `codex debug models` lists them (once looked up).
     /// What Codex says about itself (its models, the person's tool
     /// servers), looked up off the UI thread once it's found.
@@ -354,6 +547,8 @@ pub struct Chat {
     earlier: Option<crate::history::Meta>,
     show_earlier: bool,
     attach: Vec<PathBuf>,
+    queued: Vec<String>,
+    was_running: bool,
 }
 
 impl Chat {
@@ -397,6 +592,8 @@ const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// The efforts any Codex model takes (what's offered while its models,
 /// and theirs, aren't known).
 const CODEX_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+/// Antigravity's efforts (`agy --effort`).
+const AGY_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// Claude Code's model aliases: each the latest of its family.
 const CLAUDE_MODELS: [(&str, &str, &str); 4] = [
@@ -774,6 +971,15 @@ A filled detail needs to be at least about 1.5 mm across and a satin column 1 to
 so shade with separate shapes in a few related colors instead. Build a drawing in layers as an illustrator would: \
 base shapes, then shading and highlights laid on top, then lines; trace curves with real bezier curves, not a few \
 straight points. If a subject needs more detail than its size can hold, make it bigger rather than leave the detail out. \
+Sew it as an embroiderer would: keep underlay and the fabric's usual spacing on everything meant to cover (don't turn \
+underlay off or open up the rows to save stitches: the cloth shows through and puckers); give each fill its own direction, \
+along its length where it has one and at least 30° from the pieces it touches and the ground it sits on, never everything at \
+the default 0°; keep a background or patch ground to one plain fill, which may be lighter (up to twice the usual spacing) but \
+keeps its underlay, with nothing sewn across it that isn't part of the picture; sew a patch's satin border last, 3 to 5 mm \
+wide; keep lettering at least 5 mm tall (6.5 mm on a cap); and leave Sew over fill off unless the person asks for it: a trim \
+costs less than a line of thread across finished stitching. Trim settings already on when you start (Sew over fill, \
+Connect, Blend) are the person's: never turn them off to clear notes or tidy the stitching, since each saves trims and \
+taking it away can double them; if their lines look like a problem, offer it as a choice with what it costs in trims. \
 Pass terse: true on tools that change the design (the short answer names what was added and any new problems; get_design has the rest when you need it). \
 After making changes, call render_preview to look at the stitches, and with artwork true to see your drawing itself; \
 zoom in with region or object to check the details, refine what looks crude. \
@@ -794,13 +1000,13 @@ Don't save or export unless asked. Finish with one or two sentences on what you 
 
 /// For an agent that can generate images (Codex): draw pictures by
 /// generating one and tracing it, which often beats hand-written SVG.
-const IMAGE_BRIEF: &str = "For a pictorial subject (an animal, a person or character, a scene, a detailed object), generate an image and trace it rather than writing its SVG yourself: traced shapes are far more natural and detailed than hand-written ones. That goes for a picture already in the design that should be more detailed or more natural too: generate a new image that matches it (its pose, proportions and colors, from a close look at it), trace it at the old one's size and place, and delete the old one once the new one is in. Make the image for sewing, not for the screen. Every color is a thread change and every separate piece of a color is a jump the machine trims, so first read the design's threads (get_design) and ask for the picture in those exact colors, giving their hex values; add a new color only where the subject can't do without it, and then a shade near one already in the design where you can (a tan beside a cream, not a new brown). Shading and highlights are wanted: they're what makes a picture look drawn rather than cut out. Ask for them as solid shapes in darker and lighter shades of its base colors (a design thread a shade off where there is one), such as a shadow down a flank, a lighter muzzle or the far legs in a darker tone, each a clear shape of its own rather than a gradient, mottling or many small flecks. Ask for a flat illustration in solid colors, at most 6 to 8 in all, no gradients, textures, cast shadows, outlines in a color of their own or fine hatching; each color in clear shapes, not scattered specks; bold shapes with clean edges; the subject alone on a plain white background. Then call trace_image with the image's absolute path, palette \"design\" (so its colors become the design's threads), threads for the machine's thread chart (for any new color), lines true if it has line details, and width_mm, x_mm and y_mm for its size and place. Its answer gives new_colors and the trims before and after: recolor a piece in a color that isn't needed to the design thread it's nearest (set_object color). To bring trims down, delete only stray bits and specks too small to sew; never take out shading, highlights or features to save trims: a few more trims for a picture that reads well is the right trade. Change the document's connect_mm or over_sewn only as review_design's what_ifs say: one that saves trims without showing (shows false) you set, and say so; one whose thread shows is the person's to choose, so offer it with offer_choices, saying what it saves and what shows. Then look at it close up with render_preview's artwork and region, and fix what the trace got wrong (stray bits, colors, stitch types). Write SVG yourself for logos, badges, lettering and simple geometric shapes, where exact shapes matter.";
+const IMAGE_BRIEF: &str = "For a pictorial subject (an animal, a person or character, a scene, a detailed object), generate an image and trace it rather than writing its SVG yourself: traced shapes are far more natural and detailed than hand-written ones. That goes for a picture already in the design that should be more detailed or more natural too: generate a new image that matches it (its pose, proportions and colors, from a close look at it), trace it at the old one's size and place, and delete the old one once the new one is in. Make the image for sewing, not for the screen. Every color is a thread change and every separate piece of a color is a jump the machine trims, so first read the design's threads (get_design) and ask for the picture in those exact colors, giving their hex values; add a new color only where the subject can't do without it, and then a shade near one already in the design where you can (a tan beside a cream, not a new brown). Shading and highlights are wanted: they're what makes a picture look drawn rather than cut out. Ask for them as solid shapes in darker and lighter shades of its base colors (a design thread a shade off where there is one), such as a shadow down a flank, a lighter muzzle or the far legs in a darker tone, each a clear shape of its own rather than a gradient, mottling or many small flecks. Ask for a flat illustration in solid colors, at most 6 to 8 in all, no gradients, textures, cast shadows, outlines in a color of their own or fine hatching; each color in clear shapes, not scattered specks; bold shapes with clean edges; the subject alone on a plain white background. Then call trace_image with the image's absolute path, palette \"design\" (so its colors become the design's threads), threads for the machine's thread chart (for any new color), lines true if it has line details, and width_mm, x_mm and y_mm for its size and place. Its answer gives new_colors and the trims before and after: recolor a piece in a color that isn't needed to the design thread it's nearest (set_object color). To bring trims down, delete only stray bits and specks too small to sew; never take out shading, highlights or features to save trims: a few more trims for a picture that reads well is the right trade. Change the document's connect_mm or blend_mm only as review_design's what_ifs say (never over_sewn on your own): one that saves trims without showing (shows false) you set, and say so; one whose thread shows is the person's to choose, so offer it with offer_choices, saying what it saves and what shows. Then look at it close up with render_preview's artwork and region, and fix what the trace got wrong (stray bits, colors, stitch types). Write SVG yourself for logos, badges, lettering and simple geometric shapes, where exact shapes matter.";
 
 impl AgentKind {
     /// The brief for this agent: what it can do on top of the tools.
     fn brief(self) -> String {
         match self {
-            AgentKind::Claude => BRIEF.to_string(),
+            AgentKind::Claude | AgentKind::Antigravity => BRIEF.to_string(),
             AgentKind::Codex => format!("{BRIEF} {IMAGE_BRIEF}"),
         }
     }
@@ -832,12 +1038,50 @@ fn login_path() -> Option<String> {
 #[cfg(test)]
 pub(crate) static AGENT_ENV: Mutex<()> = Mutex::new(());
 
-/// Where `kind`'s program is: $ZIGZAG_<NAME> (for tests), the login PATH,
+/// [`locate`], for the setup module's test that installs for real.
+#[cfg(test)]
+pub(crate) fn locate_for_test(kind: AgentKind, login: Option<&str>) -> Option<PathBuf> {
+    locate(kind, login)
+}
+
+/// The usual places the agents' installers put them on `os`, after the
+/// PATH: under `home`, and on Windows under %APPDATA% and %LOCALAPPDATA%.
+fn install_dirs(os: Os, home: &str, appdata: Option<&str>, local: Option<&str>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        ".local/bin",
+        ".claude/local",
+        ".npm-global/bin",
+        ".bun/bin",
+        ".cargo/bin",
+    ]
+    .iter()
+    .map(|d| PathBuf::from(home).join(d))
+    .collect();
+    if os == Os::Windows {
+        if let Some(appdata) = appdata {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = local {
+            // Where Codex's and Antigravity's own installers put them.
+            dirs.push(PathBuf::from(local).join(r"Programs\OpenAI\Codex\bin"));
+            dirs.push(PathBuf::from(local).join(r"agy\bin"));
+        }
+    } else {
+        dirs.push("/opt/homebrew/bin".into());
+        dirs.push("/usr/local/bin".into());
+    }
+    dirs
+}
+
+/// Where `kind`'s program is: $ZIGZAG_<NAME> (for tests, if it's there), the login PATH,
 /// this process's PATH, then the usual install places.
 fn locate(kind: AgentKind, login: Option<&str>) -> Option<PathBuf> {
     let env = format!("ZIGZAG_{}", kind.key().to_uppercase());
+    // (Not there yet counts as not installed: a test copy watching for an
+    // install to land there.)
     if let Some(p) = std::env::var_os(env) {
-        return Some(PathBuf::from(p));
+        let p = PathBuf::from(p);
+        return p.exists().then_some(p);
     }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -849,23 +1093,12 @@ fn locate(kind: AgentKind, login: Option<&str>) -> Option<PathBuf> {
     {
         dirs.extend(std::env::split_paths(&p));
     }
-    for d in [
-        ".local/bin",
-        ".claude/local",
-        ".npm-global/bin",
-        ".bun/bin",
-        ".cargo/bin",
-    ] {
-        dirs.push(PathBuf::from(&home).join(d));
-    }
-    if cfg!(windows) {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            dirs.push(PathBuf::from(appdata).join("npm"));
-        }
-    } else {
-        dirs.push("/opt/homebrew/bin".into());
-        dirs.push("/usr/local/bin".into());
-    }
+    dirs.extend(install_dirs(
+        Os::CURRENT,
+        &home,
+        std::env::var("APPDATA").ok().as_deref(),
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+    ));
     // On Windows a program has an extension: a bare `claude` there is the
     // npm shim for sh, which Windows can't run (os error 193). Prefer the
     // native .exe anywhere on the PATH, then npm's .cmd launcher.
@@ -886,24 +1119,28 @@ fn locate(kind: AgentKind, login: Option<&str>) -> Option<PathBuf> {
 impl AgentState {
     /// The agent last used, remembered between launches.
     pub fn load() -> AgentState {
-        let config = crate::dock::config_file("agent.json");
+        Self::load_from(crate::dock::config_file("agent.json"))
+    }
+
+    /// As `load`, from `config` (agent.json, or another file for tests).
+    fn load_from(config: Option<PathBuf>) -> AgentState {
         let v = config
             .as_ref()
             .and_then(|f| std::fs::read_to_string(f).ok())
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
             .unwrap_or(Value::Null);
-        let kind = match v["agent"].as_str() {
-            Some("claude") => AgentKind::Claude,
-            _ => AgentKind::Codex,
-        };
+        let saved = v["agent"].as_str().and_then(AgentKind::from_key);
+        let kind = saved.unwrap_or_default();
         let per = |key: &str| {
-            AgentKind::ALL.iter().fold([None, None], |mut out, k| {
+            AgentKind::ALL.iter().fold(Default::default(), |mut out: [Option<String>; AgentKind::COUNT], k| {
                 out[k.index()] = v[key][k.key()].as_str().map(str::to_string);
                 out
             })
         };
         AgentState {
             kind,
+            // The first time (no agent chosen yet): Setup, with the guide.
+            on_setup: saved.is_none(),
             config,
             model: per("model"),
             effort: per("effort"),
@@ -917,7 +1154,7 @@ impl AgentState {
         if let Some(dir) = f.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let per = |v: &[Option<String>; 2]| {
+        let per = |v: &[Option<String>; AgentKind::COUNT]| {
             let mut m = serde_json::Map::new();
             for k in AgentKind::ALL {
                 if let Some(x) = &v[k.index()] {
@@ -991,6 +1228,9 @@ impl AgentState {
                     .map(|i| i.models.clone())
                     .unwrap_or_default()
             }
+            // (`agy models` lists them only once signed in, in a form not
+            // yet seen: its default, or one named with /model.)
+            AgentKind::Antigravity => Vec::new(),
         }
     }
 
@@ -1098,6 +1338,7 @@ impl AgentState {
             out = match self.kind {
                 AgentKind::Claude => CLAUDE_EFFORTS.map(str::to_string).to_vec(),
                 AgentKind::Codex => CODEX_EFFORTS.map(str::to_string).to_vec(),
+                AgentKind::Antigravity => AGY_EFFORTS.map(str::to_string).to_vec(),
             };
         }
         out
@@ -1130,6 +1371,22 @@ impl AgentState {
         swap(&mut self.earlier, &mut c.earlier);
         swap(&mut self.show_earlier, &mut c.show_earlier);
         swap(&mut self.attach, &mut c.attach);
+        swap(&mut self.queued, &mut c.queued);
+        swap(&mut self.was_running, &mut c.was_running);
+    }
+
+    /// Put what was queued back in the prompt box, before anything being
+    /// written there now: it isn't sent.
+    pub fn unqueue(&mut self) {
+        if self.queued.is_empty() {
+            return;
+        }
+        let mut text = std::mem::take(&mut self.queued).join("\n\n");
+        if !self.prompt.trim().is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&self.prompt);
+        }
+        self.prompt = text;
     }
 
     /// History was cleared: see [`Chat::forget_kept`].
@@ -1169,10 +1426,13 @@ impl AgentState {
         self.stopped = stopped;
     }
 
-    /// As if a prompt were running (a process that waits; `stop` ends it).
-    #[cfg(test)]
+    /// As if a prompt were running (a process that waits; `stop` ends it):
+    /// for tests, and capture mode's pictures of the panel at work.
     pub fn start_fake_run(&mut self) {
-        let child = Command::new("sleep").arg("30").spawn().expect("sleep");
+        // (Where there's no `sleep` to run, Windows say, nothing starts.)
+        let Ok(child) = Command::new("sleep").arg("30").spawn() else {
+            return;
+        };
         let (_tx, rx) = mpsc::channel();
         self.run = Some(Run {
             child: Arc::new(Mutex::new(child)),
@@ -1182,6 +1442,8 @@ impl AgentState {
             eof: false,
             kind: self.kind,
             resumed: false,
+            agy: AgyStream::default(),
+            result_at: None,
         });
     }
 
@@ -1194,6 +1456,7 @@ impl AgentState {
     }
 
     pub fn stop(&mut self) {
+        self.unqueue();
         if self.deferred.take().is_some() {
             self.log.push(Entry::Error("Stopped.".into()));
         }
@@ -1207,6 +1470,19 @@ impl AgentState {
         self.stopped = true;
     }
 
+    /// End the turn running now to send something else at once (a queued
+    /// message's Send Now): like [`Self::stop`], but what's still queued
+    /// stays queued, and the notes waiting for it stay too.
+    pub fn interrupt(&mut self) {
+        if let Some(r) = self.run.take() {
+            if let Ok(mut c) = r.child.lock() {
+                end_run(&mut c);
+            }
+            self.settle(false);
+            self.log.push(Entry::Info("Stopped to send your message now.".into()));
+        }
+    }
+
     /// The run is over: a step still marked as running isn't (it would
     /// spin for good). `ok`: how the run ended.
     fn settle(&mut self, ok: bool) {
@@ -1217,13 +1493,17 @@ impl AgentState {
         }
     }
 
-    /// Switch between Claude Code and Codex (a new conversation; remembered).
+    /// Use `kind` in the panel (a new conversation if it's another agent;
+    /// remembered, so the panel opens on it next time).
     pub fn set_kind(&mut self, kind: AgentKind) {
+        self.on_setup = false;
         if kind != self.kind {
             self.new_chat();
             self.kind = kind;
-            self.save();
         }
+        // (Saved even when it's the one already set: choosing the default
+        // agent is a choice, and the panel opens on it next time, not Setup.)
+        self.save();
     }
 
     pub fn new_chat(&mut self) {
@@ -1269,6 +1549,7 @@ impl AgentState {
                 *slot = Some(f);
             }
             self.lookup = None;
+            self.open_on_an_installed_agent();
         }
         if let Some(f) = &self.found[kind.index()] {
             return Some(f.is_some());
@@ -1279,8 +1560,10 @@ impl AgentState {
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let login = known.unwrap_or_else(login_path);
-                let found =
-                    [AgentKind::Claude, AgentKind::Codex].map(|k| locate(k, login.as_deref()));
+                let mut found: [Option<PathBuf>; AgentKind::COUNT] = Default::default();
+                for k in AgentKind::ALL {
+                    found[k.index()] = locate(k, login.as_deref());
+                }
                 let _ = tx.send((login, found));
                 ctx.request_repaint();
             });
@@ -1292,8 +1575,41 @@ impl AgentState {
     /// Look again (after installing one), reading the login PATH afresh.
     pub fn check_again(&mut self) {
         self.path = None;
-        self.found = [None, None];
+        self.found = Default::default();
         self.lookup = None;
+    }
+
+    /// Once, when ZigZag first knows which agents are here: the panel opens
+    /// on the agent last used (saved in agent.json), or, when that one isn't
+    /// installed, the first that is (and remembers it). Setup shows only
+    /// when none is. (Only then: an agent picked later shows its own setup.)
+    pub(crate) fn open_on_an_installed_agent(&mut self) {
+        if std::mem::replace(&mut self.settled, true) || self.on_setup || self.setup.busy() {
+            return;
+        }
+        if !matches!(self.found[self.kind.index()], Some(None)) {
+            return;
+        }
+        if let Some(k) = AgentKind::ALL
+            .into_iter()
+            .find(|k| matches!(self.found[k.index()], Some(Some(_))))
+        {
+            // (Not `set_kind`: a chat restored from last time stays. Its
+            // session was the other agent's, so a send starts afresh.)
+            self.kind = k;
+            self.save();
+        }
+    }
+
+    /// Whether the panel shows the Setup page ("Agent: Setup"): chosen
+    /// from the menu, or the chosen agent isn't here (or is being
+    /// installed, or its install failed).
+    pub fn setup_page(&self) -> bool {
+        use crate::agent_setup::Step;
+        self.on_setup
+            || matches!(self.found[self.kind.index()], Some(None))
+            || matches!(&self.setup.step, Step::Installing(j) if j.kind == self.kind)
+            || matches!(&self.setup.step, Step::Failed { kind, install: true, .. } if *kind == self.kind)
     }
 
     /// The command line for one prompt.
@@ -1387,23 +1703,56 @@ impl AgentState {
                     .arg("mcp_servers.zigzag.default_tools_approval_mode=\"approve\"");
                 cmd.arg("-");
             }
+            AgentKind::Antigravity => {
+                // Its tools and brief come from files in its folder (below):
+                // it has no flags for them.
+                cmd.args(["--output-format", "stream-json", "--sandbox"]);
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_default();
+                cmd.args(["--settings", &agy_settings(&home, &self.sending_images).to_string()]);
+                if let Some(s) = &self.session {
+                    cmd.args(["--conversation", s]);
+                }
+                if let Some(m) = self.model() {
+                    cmd.args(["--model", m]);
+                }
+                if let Some(e) = self.effort() {
+                    cmd.args(["--effort", e]);
+                }
+                // (The prompt follows it, in `launch`: it's taken from the
+                // command line, not stdin.)
+                cmd.arg("-p");
+            }
         }
         if let Some(p) = self.shell_path() {
             cmd.env("PATH", p);
         }
         // A quiet folder of its own, away from your files.
-        if let Some(dir) = self
+        let dir = self.work_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if self.kind == AgentKind::Antigravity {
+            write_agy_workspace(&dir, mcp_url, &self.kind.brief());
+        }
+        cmd.current_dir(dir);
+        cmd
+    }
+
+    /// The folder the agent runs in: one of ZigZag's own, beside its
+    /// settings. Antigravity has one inside it, for the files that set
+    /// it up (Codex would read its AGENTS.md too).
+    fn work_dir(&self) -> PathBuf {
+        let base = self
             .config
             .as_ref()
             .and_then(|c| c.parent())
-            .map(|d| d.join("agent"))
-        {
-            let _ = std::fs::create_dir_all(&dir);
-            cmd.current_dir(dir);
-        } else {
-            cmd.current_dir(std::env::temp_dir());
+            .map(|d| d.join("agent"));
+        match (self.kind, base) {
+            (AgentKind::Antigravity, Some(b)) => b.join("antigravity"),
+            (AgentKind::Antigravity, None) => std::env::temp_dir().join("zigzag-agent-antigravity"),
+            (_, Some(b)) => b,
+            (_, None) => std::env::temp_dir(),
         }
-        cmd
     }
 
     /// Send the prompt. `mcp`: the studio's MCP endpoint (if it's running).
@@ -1458,9 +1807,10 @@ impl AgentState {
             );
         }
         let Some(addr) = mcp else {
-            self.log.push(Entry::Error(
-                "The agent works through the studio's MCP server, which is off (started with --no-mcp).".into(),
-            ));
+            self.log.push(Entry::Error(format!(
+                "The agent works through the studio's MCP server, which {}.",
+                self.mcp_off.as_deref().unwrap_or("isn't running")
+            )));
             return;
         };
         // A chat begun with the other agent (another document's, say): this
@@ -1533,6 +1883,35 @@ impl AgentState {
         // (`panel`: these calls are this panel's agent's.)
         let url = format!("http://{addr}/mcp?panel=1");
         let mut cmd = self.command(program, &url, bridge, addr.port());
+        // The prompt goes in on stdin (no shell quoting to worry about),
+        // except to Antigravity, which takes it on its command line.
+        let first = self.session.is_none();
+        let prompt = if self.kind == AgentKind::Codex && first {
+            format!("{}\n\n{text}", self.kind.brief())
+        } else {
+            text
+        };
+        // (Claude is given images in a message of its streaming input.)
+        let payload = match self.kind {
+            AgentKind::Claude if !self.sending_images.is_empty() => {
+                claude_message(&prompt, &self.sending_images)
+            }
+            AgentKind::Antigravity => {
+                let arg = agy_prompt(&prompt, &self.sending_images);
+                // (Windows takes a command line of about 32,000 characters.)
+                if cfg!(windows) && arg.len() > 30_000 {
+                    self.sending_images.clear();
+                    self.log.push(Entry::Error(
+                        "That prompt is too long to give Antigravity on Windows. Shorten it, or use another agent.".into(),
+                    ));
+                    return;
+                }
+                cmd.arg(arg);
+                String::new()
+            }
+            _ => prompt,
+        };
+        self.sending_images.clear();
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1552,20 +1931,6 @@ impl AgentState {
                 return;
             }
         };
-        // The prompt goes in on stdin (no shell quoting to worry about).
-        let first = self.session.is_none();
-        let prompt = if self.kind == AgentKind::Codex && first {
-            format!("{}\n\n{text}", self.kind.brief())
-        } else {
-            text
-        };
-        // (Claude is given images in a message of its streaming input.)
-        let payload = if self.kind == AgentKind::Claude && !self.sending_images.is_empty() {
-            claude_message(&prompt, &self.sending_images)
-        } else {
-            prompt
-        };
-        self.sending_images.clear();
         // (Off this thread: with pictures it's megabytes, and the program
         // reads it when it's ready to.)
         if let Some(mut stdin) = child.stdin.take() {
@@ -1618,6 +1983,8 @@ impl AgentState {
             eof,
             kind: self.kind,
             resumed: self.session.is_some(),
+            agy: AgyStream::new(),
+            result_at: None,
         });
     }
 
@@ -1647,12 +2014,26 @@ impl AgentState {
             }
         }
         let (kind, resumed) = (run.kind, run.resumed);
+        // Antigravity sometimes never exits after its result: a few seconds
+        // on, it's stopped, and the turn ends as the result said.
+        if let Some((at, ok)) = run.result_at
+            && run.exit.is_none()
+            && at.elapsed() > AGY_LINGER
+        {
+            if let Ok(mut c) = run.child.lock() {
+                end_run(&mut c);
+            }
+            run.exit = Some((Some(if ok { 0 } else { 1 }), Instant::now()));
+            run.eof = true;
+        }
         // It has ended once its last lines are in too: the process can be
         // gone before what it printed has been read.
         let ended = run
             .exit
             .filter(|(_, at)| run.eof || at.elapsed() > LAST_WORDS)
             .map(|(code, _)| code);
+        let mut agy = std::mem::take(&mut run.agy);
+        let mut result = None;
         for l in lines {
             let Ok(v) = serde_json::from_str::<Value>(&l) else {
                 continue;
@@ -1660,9 +2041,22 @@ impl AgentState {
             let entries = match kind {
                 AgentKind::Claude => claude_event(&v, &mut self.session),
                 AgentKind::Codex => codex_event(&v, &mut self.session),
+                AgentKind::Antigravity => {
+                    if v["event"] == "result" {
+                        result = Some(agy_succeeded(&v));
+                    }
+                    agy_event(&v, &mut self.session, &mut agy)
+                }
             };
             for (id, e) in entries {
                 self.push(id, e);
+            }
+        }
+        if let Some(run) = &mut self.run {
+            run.agy = agy;
+            // (The panel looks again every tenth of a second while it works.)
+            if let Some(ok) = result {
+                run.result_at.get_or_insert((Instant::now(), ok));
             }
         }
         if let Some(code) = ended {
@@ -1740,7 +2134,7 @@ impl AgentState {
     }
 }
 
-fn short(v: &Value) -> String {
+pub(crate) fn short(v: &Value) -> String {
     let s = match v {
         Value::Object(m) => m
             .iter()
@@ -1757,7 +2151,7 @@ fn short(v: &Value) -> String {
     s
 }
 
-fn tool_name(n: &str) -> String {
+pub(crate) fn tool_name(n: &str) -> String {
     n.trim_start_matches("mcp__zigzag__").to_string()
 }
 
@@ -1966,6 +2360,265 @@ fn codex_event(v: &Value, session: &mut Option<String>) -> Vec<(Option<String>, 
     out
 }
 
+/// Antigravity's run settings (`--settings`, never saved): only ZigZag's
+/// tools. Its shell, file writes and the web are refused outright; reading
+/// a file is let through only for the images going with the prompt and
+/// for the descriptions it keeps of ZigZag's tools (under `home`). Anything
+/// else it would ask about, and run like this there's nobody to ask, so
+/// it's refused too. `agentMode` "" is its default mode: `auto` (its usual
+/// for `-p`) would approve things by itself.
+fn agy_settings(home: &str, images: &[PathBuf]) -> Value {
+    let mut allow = vec![
+        "mcp(zigzag/*)".to_string(),
+        format!(
+            "read_file({})",
+            PathBuf::from(home)
+                .join(".gemini/antigravity-cli/mcp/zigzag")
+                .display()
+        ),
+    ];
+    for p in images {
+        allow.push(format!("read_file({})", p.display()));
+    }
+    serde_json::json!({
+        "agentMode": "",
+        "permissions": {
+            "allow": allow,
+            "deny": [
+                "command(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "download_url(*)",
+            ],
+        },
+    })
+}
+
+/// Set up Antigravity's folder for a run: its MCP servers (just ZigZag's,
+/// at `mcp_url`: the port can change from one launch to the next) in
+/// `.agents/mcp_config.json`, and ZigZag's brief as the folder's
+/// `AGENTS.md`, which it reads as standing instructions. It has no flags
+/// for either. ZigZag's tools are loaded up front ("eager"), so it calls
+/// them by name rather than looking each one up first.
+fn write_agy_workspace(dir: &std::path::Path, mcp_url: &str, brief: &str) {
+    let tools: serde_json::Map<String, Value> = crate::tools::tool_specs()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["name"].as_str())
+        .map(|n| (n.to_string(), serde_json::json!({ "eager": true })))
+        .collect();
+    let config = serde_json::json!({
+        "mcpServers": { "zigzag": { "serverUrl": mcp_url, "tools": tools } }
+    });
+    let agents = dir.join(".agents");
+    let _ = std::fs::create_dir_all(&agents);
+    let _ = std::fs::write(
+        agents.join("mcp_config.json"),
+        serde_json::to_string_pretty(&config).unwrap_or_default(),
+    );
+    let _ = std::fs::write(dir.join("AGENTS.md"), format!("{brief}\n"));
+}
+
+/// What Antigravity has said so far in a run: its words come in pieces.
+#[derive(Default)]
+struct AgyStream {
+    /// The words of each step still being said (by step).
+    text: std::collections::BTreeMap<i64, String>,
+    /// The tool steps already shown (a step can be reported more than once).
+    started: std::collections::HashSet<i64>,
+    /// Something was said this turn (else the result's response is).
+    said: bool,
+    /// Its tool calls' ids are this run's own: its steps are counted per
+    /// chat, and an earlier turn's are in the transcript too.
+    run: u64,
+}
+
+impl AgyStream {
+    fn new() -> AgyStream {
+        AgyStream {
+            run: fresh_seed(),
+            ..Default::default()
+        }
+    }
+
+    /// The words of `step` (all of them, for `None`), said.
+    fn flush(&mut self, step: Option<i64>, out: &mut Vec<(Option<String>, Entry)>) {
+        let steps: Vec<i64> = match step {
+            Some(k) => vec![k],
+            None => self.text.keys().copied().collect(),
+        };
+        for k in steps {
+            if let Some(t) = self.text.remove(&k) {
+                let t = t.trim();
+                if !t.is_empty() {
+                    out.push((None, Entry::Said(t.to_string())));
+                    self.said = true;
+                }
+            }
+        }
+    }
+}
+
+/// A tool's name as Antigravity gives it, as ZigZag's (`mcp_zigzag_add_svg`
+/// is `add_svg`).
+fn agy_tool_name(n: &str) -> String {
+    tool_name(n.trim_start_matches("mcp_zigzag_"))
+}
+
+/// Whether Antigravity's result line says the turn worked.
+fn agy_succeeded(v: &Value) -> bool {
+    let r = if v["result"].is_object() { &v["result"] } else { v };
+    r["status"].as_str() == Some("SUCCESS")
+}
+
+/// Antigravity's stream-json events (`init`, `step_update`, `result`, each
+/// with its details under its own name).
+fn agy_event(
+    v: &Value,
+    session: &mut Option<String>,
+    st: &mut AgyStream,
+) -> Vec<(Option<String>, Entry)> {
+    let mut out = Vec::new();
+    let Some(event) = v["event"].as_str() else {
+        return out;
+    };
+    let u = if v[event].is_object() { &v[event] } else { v };
+    if let Some(c) = u["conversation_id"].as_str().filter(|c| !c.is_empty()) {
+        *session = Some(c.to_string());
+    }
+    match event {
+        "step_update" => {
+            let step = u["step_index"].as_i64().unwrap_or(-1);
+            let done = u["state"] == "DONE";
+            match u["step_type"].as_str() {
+                Some("agent_response") => {
+                    if let Some(t) = u["text_delta"].as_str() {
+                        st.text.entry(step).or_default().push_str(t);
+                    }
+                    if done {
+                        st.flush(Some(step), &mut out);
+                    }
+                }
+                Some("tool") => {
+                    // What was said before it comes first.
+                    st.flush(None, &mut out);
+                    let info = &u["tool_info"];
+                    let raw = info["name"]
+                        .as_str()
+                        .or(u["tool_name"].as_str())
+                        .unwrap_or("tool");
+                    let params = &info["parameters"];
+                    // A tool reached through its MCP caller: the one called.
+                    let inner = ["tool_name", "toolName", "tool"]
+                        .iter()
+                        .find_map(|k| params[*k].as_str());
+                    let (name, args) = match inner {
+                        Some(t) if raw == "call_mcp_tool" => (
+                            agy_tool_name(t),
+                            ["arguments", "args", "input"]
+                                .iter()
+                                .map(|k| &params[*k])
+                                .find(|a| !a.is_null())
+                                .unwrap_or(&Value::Null),
+                        ),
+                        _ => (agy_tool_name(raw), params),
+                    };
+                    let id = Some(format!("agy-{}-{step}", st.run));
+                    let args = if args.is_null() { String::new() } else { short(args) };
+                    if !done {
+                        if st.started.insert(step) {
+                            out.push((id, Entry::Tool(name, args, None)));
+                        }
+                    } else {
+                        let error = &info["error"];
+                        let ok = error.is_null()
+                            || error.as_object().is_some_and(|e| e.is_empty());
+                        out.push((id, Entry::Tool(name.clone(), args, Some(ok))));
+                        if !ok {
+                            let m = error["message"]
+                                .as_str()
+                                .or(error.as_str())
+                                .map(str::trim)
+                                .unwrap_or("");
+                            out.push((
+                                None,
+                                Entry::Error(if m.is_empty() {
+                                    format!("{name} failed.")
+                                } else {
+                                    format!("{name}: {m}")
+                                }),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        "result" => {
+            st.flush(None, &mut out);
+            if !st.said
+                && let Some(r) = u["response"].as_str().map(str::trim).filter(|r| !r.is_empty())
+            {
+                out.push((None, Entry::Said(r.to_string())));
+            }
+            st.said = false;
+            if agy_succeeded(v) {
+                let turns = u["num_turns"].as_u64().unwrap_or(0);
+                let secs = u["duration_seconds"].as_f64().unwrap_or(0.0);
+                out.push((None, Entry::Done(format!("{turns} turns · {secs:.0} s"))));
+            } else {
+                let msg = u["error"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(agy_failure)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Stopped: {}",
+                            u["status"].as_str().unwrap_or("error").to_ascii_lowercase()
+                        )
+                    });
+                out.push((None, Entry::Error(msg)));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The prompt as Antigravity is given it, on its command line: the images
+/// going with it named (it's let read just those files, and has no other
+/// way to be handed them), and never starting with a dash, which could be
+/// taken for an option.
+fn agy_prompt(text: &str, images: &[PathBuf]) -> String {
+    let mut out = String::new();
+    if text.starts_with('-') {
+        out.push(' ');
+    }
+    out.push_str(text);
+    if !images.is_empty() {
+        out.push_str(if images.len() == 1 {
+            "\n\nAn image is attached to this message. Read it from this file before answering:"
+        } else {
+            "\n\nImages are attached to this message. Read them from these files before answering:"
+        });
+        for p in images {
+            out.push_str(&format!("\n{}", p.display()));
+        }
+    }
+    out
+}
+
+/// What to say when an Antigravity turn failed with `message`.
+fn agy_failure(message: &str) -> String {
+    if message.contains("authentication") {
+        return "Antigravity isn't signed in. Sign in to it with your Google account, then send again.".into();
+    }
+    message.to_string()
+}
+
 /// What an agent is doing on the canvas: the objects its last calls
 /// touched, and what the last call was doing. Fed by every MCP call (the
 /// in-app agent's, or one connected from outside), drawn over the design.
@@ -2170,6 +2823,12 @@ impl Studio {
             let kind = self.agent.kind;
             let _ = self.agent.installed(kind, ctx);
         }
+        // Installing or signing in from the panel: done yet?
+        if self.agent.setup.busy()
+            && self.agent.setup.poll(ctx) == crate::agent_setup::Outcome::Installed
+        {
+            self.agent.check_again();
+        }
         if std::mem::take(&mut self.agent.stopped) && self.review.queued == Some(self.session.rec) {
             self.review.queued = None;
         }
@@ -2194,6 +2853,7 @@ impl Studio {
                 // (And a note that was waiting for it goes, to it.)
                 self.visit(i, |s| {
                     s.end_turn();
+                    s.send_queued(ctx);
                     s.send_queued_notes(ctx);
                 });
             } else {
@@ -2201,12 +2861,74 @@ impl Studio {
             }
         }
         if !self.agent.running() {
+            let ended = std::mem::take(&mut self.agent.was_running);
+            if ended && !self.agent_showing() {
+                self.agent.unread = true;
+            }
+            // A turn that failed may have failed for want of signing in: ask again.
+            if ended && matches!(self.agent.log.last(), Some(Entry::Error(m)) if m != "Stopped.") {
+                let kind = self.agent.kind;
+                self.agent.setup.recheck(kind);
+            }
             self.end_turn();
+            self.send_queued(ctx);
             self.send_queued_notes(ctx);
         }
+        self.agent.was_running = self.agent.running();
         if self.agent.running() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
+
+    /// Its turn is over: what was written meanwhile goes now, as one
+    /// message (with the notes pinned for it, as a send would take them),
+    /// and anything being written in the box stays there.
+    fn send_queued(&mut self, ctx: &egui::Context) {
+        if self.agent.queued.is_empty() || self.agent.running() {
+            return;
+        }
+        let draft = std::mem::take(&mut self.agent.prompt);
+        self.agent.prompt = std::mem::take(&mut self.agent.queued).join("\n\n");
+        self.agent_send(ctx);
+        if self.agent.running() {
+            self.agent.prompt = draft;
+        } else {
+            // (It couldn't go: it's in the box to send again.)
+            if !draft.trim().is_empty() {
+                self.agent.prompt.push_str("\n\n");
+                self.agent.prompt.push_str(&draft);
+            }
+        }
+    }
+
+    /// A queued message's Send Now: the turn running ends, and that
+    /// message goes at once, in the same chat; the rest stay queued, for
+    /// when its turn is done.
+    fn send_queued_now(&mut self, k: usize, ctx: &egui::Context) {
+        if k >= self.agent.queued.len() {
+            return;
+        }
+        let text = self.agent.queued.remove(k);
+        // (Waiting to start, not started: it just goes first.)
+        if self.agent.deferred.is_some() {
+            self.agent.queued.insert(0, text);
+            return;
+        }
+        let rest = std::mem::take(&mut self.agent.queued);
+        if self.agent.running() {
+            self.agent.interrupt();
+            self.end_turn();
+        }
+        let draft = std::mem::replace(&mut self.agent.prompt, text);
+        self.agent_send(ctx);
+        if self.agent.running() {
+            self.agent.prompt = draft;
+        } else if !draft.trim().is_empty() {
+            // (It couldn't go: it's in the box to send again.)
+            self.agent.prompt.push_str("\n\n");
+            self.agent.prompt.push_str(&draft);
+        }
+        self.agent.queued.extend(rest);
     }
 
     /// Run an MCP call and note which objects it touched, for the canvas.
@@ -2417,15 +3139,18 @@ impl Studio {
     }
 
     /// The transcript's height: what's left of the panel's share of its
-    /// dock (it sits at the bottom), or a good size floating.
+    /// dock (it sits at the bottom), or of a floating panel's fixed height
+    /// (queued messages and all, it stays the same size).
     fn agent_transcript_h(&self) -> f32 {
-        match self.dock_ui.pinned_h {
-            Some(h) if !self.dock_ui.in_window => {
-                let pad = crate::theme::pad().sum().y;
-                (h - crate::dock::HEADER_H - pad - self.agent.chrome_h).max(120.0)
-            }
-            _ => 380.0,
-        }
+        let h = match self.dock_ui.pinned_h {
+            Some(h) if !self.dock_ui.in_window => h,
+            _ => self
+                .dock
+                .agent_float_h
+                .min(self.dock_ui.window_max.unwrap_or(f32::INFINITY)),
+        };
+        let pad = crate::theme::pad().sum().y;
+        (h - crate::dock::HEADER_H - pad - self.agent.chrome_h).max(120.0)
     }
 
     /// Open the Agent panel (wherever it lives) with the prompt focused.
@@ -2555,29 +3280,67 @@ impl Studio {
         let mut open_earlier: Option<String> = None;
         let mut apply_choices: Option<usize> = None;
         let busy = self.agent.running();
+        let has_design = !self.doc.shapes.is_empty();
         let a = &mut self.agent;
+        // (A new chat gets new ideas.)
+        if !a.log.is_empty() {
+            a.ideas_seed = None;
+        }
+        // (Setup fits the panel as it is: less room above it.)
+        let top_pad = if a.setup_page() && !a.running() { space::S } else { space::M };
         // The conversation: plain, on the panel itself.
         let transcript_h = egui::Frame::new()
             // (Room round the conversation, and between its lines.)
-            .inner_margin(egui::Margin::symmetric(space::XS as i8, space::M as i8))
+            .inner_margin(egui::Margin {
+                left: space::XS as i8,
+                right: space::XS as i8,
+                top: top_pad as i8,
+                bottom: space::M as i8,
+            })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let inner_h = h - 2.0 * space::M;
-                if a.log.is_empty() && !a.running() {
+                let inner_h = h - top_pad - space::M;
+                // (Setup shows its card even over a chat: picking the agent
+                // again brings the chat back.)
+                if (a.log.is_empty() || a.setup_page()) && !a.running() {
                     let (r, _) = ui.allocate_exact_size(
                         Vec2::new(ui.available_width(), inner_h),
                         Sense::hover(),
                     );
-                    // Its program isn't on this computer: how to install it instead.
+                    // Its program isn't on this computer: how to install it
+                    // instead. Installed but not signed in: how to sign in.
                     let kind = a.kind;
-                    if a.installed(kind, &ui.ctx().clone()) == Some(false) {
+                    let ctx = ui.ctx().clone();
+                    let _ = a.installed(kind, &ctx);
+                    let card = if a.setup_page() {
+                        Some(true)
+                    } else if setting_up(a, false) || signed_out(a, &ctx) {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    if let Some(install) = card {
                         let mut child = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(r)
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
-                        child.add_space((inner_h * 0.5 - 170.0).max(8.0));
-                        install_steps(&mut child, a);
+                        // (From the top, like the conversation.)
+                        // (Scrolls when the terminal steps are open: they don't fit.)
+                        egui::ScrollArea::vertical()
+                            .id_salt("agent-setup-card")
+                            // (A press is a click on what it holds, not a drag.)
+                            .scroll_source(egui::containers::scroll_area::ScrollSource { scroll_bar: true, mouse_wheel: true, ..egui::containers::scroll_area::ScrollSource::NONE })
+                            .max_height(child.available_height())
+                            .auto_shrink([false, true])
+                            .show(&mut child, |ui| {
+                                ui.set_width(ui.available_width() - space::S);
+                                if install {
+                                    install_steps(ui, a);
+                                } else {
+                                    sign_in_steps(ui, a);
+                                }
+                            });
                         return;
                     }
                     // Nothing yet: what it can do, and a few ideas to start from.
@@ -2611,11 +3374,8 @@ impl Studio {
                     // A little air between the ideas, and room inside each.
                     child.spacing_mut().item_spacing.y = space::S;
                     child.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
-                    for idea in [
-                        "A round camp badge with a pine tree",
-                        "Make the lettering satin",
-                        "Simplify this for a 4x4 hoop",
-                    ] {
+                    let seed = *a.ideas_seed.get_or_insert_with(fresh_seed);
+                    for idea in ideas(seed, has_design) {
                         if child
                             .add(egui::Button::new(egui::RichText::new(idea).size(PANEL_PT)).corner_radius(10))
                             .clicked()
@@ -2783,14 +3543,24 @@ impl Studio {
         let has_notes = self.review.pending(self.session.rec) > 0;
         let annotating = self.review.annotating;
         let mut annotate = false;
-        // Just a divider between the conversation and the prompt.
-        let (line, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-        ui.painter().hline(
-            line.x_range(),
-            line.center().y,
-            Stroke::new(1.0, p.separator),
-        );
+        // What's waiting for its turn to end, just above the prompt.
+        if !self.agent.queued.is_empty() {
+            if let Some(k) = queued_box(ui, &mut self.agent.queued, &p) {
+                self.send_queued_now(k, ui.ctx());
+            }
+            ui.add_space(space::S);
+        }
+        // Just a divider between the conversation and the prompt (none on
+        // Setup, which has no prompt).
+        if !(self.agent.setup_page() && !self.agent.running()) {
+            let (line, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().hline(
+                line.x_range(),
+                line.center().y,
+                Stroke::new(1.0, p.separator),
+            );
+        }
         // The comments pinned on the canvas, as an attachment to the prompt.
         let notes_act = self.notes_list(ui);
         // The prompt: one line (it grows with Shift-Enter), Send beside it.
@@ -2828,8 +3598,14 @@ impl Studio {
         }
         let mut field_rect = None;
         let a = &mut self.agent;
+        let busy_now = a.running();
+        // Setup has no agent to write to: no prompt.
+        let setup_view = a.setup_page() && !busy_now;
         // (Above it, its own space; below, the panel's padding is enough.)
-        let input = egui::Frame::new()
+        let input = if setup_view {
+            Rect::NOTHING
+        } else {
+            egui::Frame::new()
             .inner_margin(egui::Margin {
                 left: 0,
                 right: 0,
@@ -2838,6 +3614,31 @@ impl Studio {
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                // A chat that stopped for want of the program, or of signing
+                // in: how to put that right, above where they'd write next.
+                if !a.log.is_empty() && !busy_now {
+                    let ctx = ui.ctx().clone();
+                    // (Not installed, or installing: the Setup page has the
+                    // panel then, and there's no prompt to stand above.)
+                    if setting_up(a, false) || signed_out(a, &ctx) {
+                        egui::Frame::new()
+                            .fill(p.control)
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::same(space::M as i8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                // (Room left for the conversation above it.)
+                                egui::ScrollArea::vertical()
+                                    .id_salt("agent-setup-banner")
+                            // (A press is a click on what it holds, not a drag.)
+                            .scroll_source(egui::containers::scroll_area::ScrollSource { scroll_bar: true, mouse_wheel: true, ..egui::containers::scroll_area::ScrollSource::NONE })
+                                    .max_height(320.0)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| sign_in_steps(ui, a));
+                            });
+                        ui.add_space(space::S);
+                    }
+                }
                 // The images going with it, each with a × to take it off.
                 if !a.attach.is_empty() {
                     let mut gone = None;
@@ -2890,6 +3691,8 @@ impl Studio {
                             .min_size(Vec2::new(field_w, button_h))
                             .align(egui::Align2::LEFT_CENTER)
                             .font(egui::FontId::proportional(crate::review::FIELD_PT))
+                            // (One hint, working or not: a longer one wrapped
+                            // to two lines, and the box jumped when typed in.)
                             .hint_text(
                                 egui::RichText::new("Describe a design, or a change…")
                                     .color(crate::review::hint_color(p)),
@@ -2940,9 +3743,17 @@ impl Studio {
                 });
             })
             .response
-            .rect;
+            .rect
+        };
         // Everything but the transcript, to size it next frame.
-        a.chrome_h = (ui.cursor().top() - top - transcript_h).max(0.0);
+        let chrome_h = (ui.cursor().top() - top - transcript_h).max(0.0);
+        // (The transcript is sized from this: when the input area grows or
+        // shrinks, draw the frame again at once rather than show one with
+        // the old size, which jolts as you type.)
+        if (chrome_h - a.chrome_h).abs() > 0.5 {
+            ui.ctx().request_discard("the Agent panel's input height");
+        }
+        a.chrome_h = chrome_h;
         // (Out of the top of the input area, as wide as it.)
         if field_rect.is_some()
             && !rows.is_empty()
@@ -3020,12 +3831,26 @@ impl Studio {
             )));
             return;
         }
-        if (self.agent.prompt.trim().is_empty() && !has_notes && self.agent.attach.is_empty())
-            || self.agent.running()
-        {
+        // Written while it works: it goes when the turn is done.
+        if self.agent.running() {
+            let text = self.agent.prompt.trim().to_string();
+            if !text.is_empty() {
+                self.agent.queued.push(text);
+                self.agent.prompt.clear();
+            }
+            return;
+        }
+        if self.agent.prompt.trim().is_empty() && !has_notes && self.agent.attach.is_empty() {
             return;
         }
         let addr = self.mcp.as_ref().map(|m| m.addr);
+        self.agent.mcp_off = addr.is_none().then(|| match (&self.mcp_ui.start_error, self.mcp_ui.port) {
+            (Some(e), Some(port)) => format!(
+                "couldn't start on port {port} ({e}): another copy of ZigZag may be using it. Quit that one, or pick another port in Settings and reopen ZigZag"
+            ),
+            (Some(e), None) => format!("couldn't start ({e})"),
+            (None, _) => "is off (in Settings, or started with --no-mcp)".to_string(),
+        });
         let (shown, mut extra) = if notes {
             self.notes_for_prompt()
         } else {
@@ -3072,6 +3897,124 @@ impl Studio {
             self.agent.work.note("get_design", &sel);
         }
     }
+}
+
+/// The most queued messages listed at once (the rest are counted).
+const QUEUED_SHOWN: usize = 3;
+
+/// The messages waiting for the agent's turn to end: a darker box along
+/// the top of the prompt, as wide as it, one line each (a × to take it
+/// back on the one under the pointer), divided by hairlines; the first
+/// few, then how many more. Beside the ×, a send arrow (Send Now): the
+/// row it's clicked on, if it is.
+fn queued_box(ui: &mut egui::Ui, queued: &mut Vec<String>, p: &crate::theme::Pal) -> Option<usize> {
+    const ROW_H: f32 = 30.0;
+    const MORE_H: f32 = 26.0;
+    const X: f32 = 16.0;
+    let shown = queued.len().min(QUEUED_SHOWN);
+    let more = queued.len() - shown;
+    let h = shown as f32 * ROW_H + if more > 0 { MORE_H } else { 0.0 } + 2.0 * space::XS;
+    // As wide as the prompt row: from under its text to the Send button.
+    let (outer, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let r = Rect::from_min_max(egui::pos2(outer.left() + space::S, outer.top()), outer.max);
+    let painter = ui.painter().clone();
+    // The dividers' and the outline's colour: darker than the box itself.
+    let groove = {
+        let k = if p.dark { 0.55 } else { 0.85 };
+        let c = p.desk;
+        Color32::from_rgb(
+            (c.r() as f32 * k) as u8,
+            (c.g() as f32 * k) as u8,
+            (c.b() as f32 * k) as u8,
+        )
+    };
+    painter.rect(r, 8.0, p.desk, Stroke::new(1.0, groove), egui::StrokeKind::Inside);
+    // The text's column, and the ×'s.
+    let left = r.left() + space::M;
+    let right = r.right() - space::S;
+    let line = |y: f32| {
+        painter.hline(r.x_range().shrink(1.0), y, Stroke::new(1.0, groove));
+    };
+    let mut gone = None;
+    let mut now = None;
+    let mut y = r.top() + space::XS;
+    for (k, text) in queued.iter().enumerate().take(shown) {
+        let row = Rect::from_min_max(egui::pos2(left, y), egui::pos2(right, y + ROW_H));
+        // A hairline between each and the one above it.
+        if k > 0 {
+            line(row.top());
+        }
+        let x = Rect::from_center_size(
+            egui::pos2(right - X / 2.0, row.center().y),
+            Vec2::splat(X),
+        );
+        // Send Now, with room between it and the ×.
+        let send = x.translate(Vec2::new(-(X + space::M), 0.0));
+        let label = Rect::from_min_max(row.min, egui::pos2(send.left() - space::S, row.max.y));
+        // (In a child of its own: placed by the parent, it would move the
+        // parent's cursor back up to it.)
+        let mut cell = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(label)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        cell.add(
+            egui::Label::new(
+                egui::RichText::new(text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .size(PANEL_PT)
+                    .color(p.text),
+            )
+            .truncate(),
+        )
+        .on_hover_text(text.as_str());
+        // Its × only while the pointer's on it (the whole row, edge to edge).
+        let over = ui.rect_contains_pointer(Rect::from_x_y_ranges(r.x_range(), row.y_range()));
+        let xr = ui.interact(x, ui.make_persistent_id(("queued-x", k)), Sense::click());
+        xr.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, "Remove Queued Message")
+        });
+        if over {
+            painter.circle_filled(
+                x.center(),
+                X / 2.0,
+                if xr.hovered() { p.text } else { p.secondary },
+            );
+            icons::paint(&painter, x.shrink(4.5), Icon::Close, p.desk);
+        }
+        if over && xr.on_hover_text("Don't send this").clicked() {
+            gone = Some(k);
+        }
+        let sr = ui.interact(send, ui.make_persistent_id(("queued-send", k)), Sense::click());
+        sr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Send Queued Message Now"));
+        if over {
+            painter.circle_filled(
+                send.center(),
+                X / 2.0,
+                if sr.hovered() { p.text } else { p.secondary },
+            );
+            icons::paint(&painter, send.shrink(3.5), Icon::ArrowUp, p.desk);
+        }
+        if over && sr.on_hover_text("Send now: stops what it's doing").clicked() {
+            now = Some(k);
+        }
+        y += ROW_H;
+    }
+    if more > 0 {
+        line(y);
+        painter.text(
+            egui::pos2(left, y + MORE_H / 2.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{more} more"),
+            egui::FontId::proportional(PANEL_PT - 1.0),
+            p.tertiary,
+        );
+    }
+    ui.advance_cursor_after_rect(outer);
+    if let Some(k) = gone {
+        queued.remove(k);
+        return None;
+    }
+    now
 }
 
 /// The look of a piece being worked on: a soft wash, a light sweeping
@@ -3477,52 +4420,492 @@ fn opened(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 /// The agent's command-line tool isn't installed: the commands to install
 /// it (with Copy buttons), how to sign in, Check Again, and the other agent
 /// if that one is installed.
-fn install_steps(ui: &mut egui::Ui, a: &mut AgentState) {
-    let p = pal_ui(ui);
-    let kind = a.kind;
-    let (ways, sign_in) = kind.install_steps();
-    ui.spacing_mut().item_spacing.y = space::S;
-    ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-        icons::paint(ui.painter(), r, Icon::Info, p.secondary);
-        ui.label(
-            egui::RichText::new(format!("{} isn't installed on this computer", kind.name()))
-                .size(PANEL_PT)
-                .strong()
-                .color(p.text),
-        );
-    });
-    quiet(
-        ui,
-        format!(
-            "ZigZag works with the {} command-line tool (`{}`). Install it in a terminal:",
-            kind.name(),
-            kind.program()
-        ),
-    );
-    for (how, command) in ways {
-        crate::mcp_chip::copy_block(ui, how, command);
+/// Whether the panel is installing (`install`) or signing in to the agent
+/// it runs, or that just failed.
+fn setting_up(a: &AgentState, install: bool) -> bool {
+    use crate::agent_setup::Step;
+    match &a.setup.step {
+        Step::Installing(j) => install && j.kind == a.kind,
+        Step::SigningIn(j) => !install && j.kind == a.kind,
+        Step::Failed { kind, install: i, .. } => *i == install && *kind == a.kind,
+        Step::Idle => false,
     }
-    quiet(ui, sign_in);
-    ui.add_space(space::XS);
+}
+
+/// The agent is installed and plainly not signed in (asked once, off the
+/// UI thread).
+fn signed_out(a: &mut AgentState, ctx: &egui::Context) -> bool {
+    let kind = a.kind;
+    match a.found[kind.index()].clone() {
+        Some(Some(program)) => {
+            let path = a.path.clone().flatten();
+            a.setup.needs_sign_in(kind, &program, path, ctx)
+        }
+        _ => false,
+    }
+}
+
+/// The getting-started guide on the website.
+const GUIDE_URL: &str = "https://zigzag.diy/guides/ai-assistant/";
+
+/// A spinner and a line beside it.
+fn working_line(ui: &mut egui::Ui, text: &str) {
+    let p = pal_ui(ui);
     ui.horizontal(|ui| {
-        if ui
-            .button("Check Again")
-            .on_hover_text("Look for it again, after installing it")
+        ui.spacing_mut().item_spacing.x = space::S;
+        let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+        spinner(ui.painter(), r.center(), 5.5, p.accent, ui.input(|i| i.time));
+        ui.label(egui::RichText::new(text).size(PANEL_PT).color(p.text));
+    });
+}
+
+/// A setup card's title.
+fn setup_title(ui: &mut egui::Ui, text: &str) {
+    let p = pal_ui(ui);
+    ui.label(egui::RichText::new(text).size(PANEL_PT + 1.0).strong().color(p.text));
+}
+
+/// Body text under a setup card's title: the panel's size, one step dimmer.
+fn setup_text(ui: &mut egui::Ui, text: impl Into<String>) {
+    let p = pal_ui(ui);
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).size(PANEL_PT).color(p.secondary)).wrap());
+}
+
+/// Open a web page in the browser. (This build's eframe has no opener of
+/// its own: egui's `open_url` would go nowhere. In tests it's only noted,
+/// in `OPENED`, so a test can see it and no browser opens.)
+pub(crate) fn open_web(ctx: &egui::Context, url: &str) {
+    #[cfg(test)]
+    {
+        ctx.open_url(egui::OpenUrl::new_tab(url));
+        OPENED.lock().unwrap().push(url.to_string());
+    }
+    #[cfg(not(test))]
+    {
+        let _ = ctx;
+        crate::sew::open_url(url);
+    }
+}
+
+/// The pages tests have asked to open.
+#[cfg(test)]
+pub(crate) static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A link that opens in the browser.
+fn web_link(ui: &mut egui::Ui, text: &str, url: &str) {
+    let p = pal_ui(ui);
+    let r = ui.add(
+        egui::Label::new(egui::RichText::new(text).size(PANEL_PT).color(p.accent))
+            // (Selectable text would take the click.)
+            .selectable(false)
+            .sense(Sense::click()),
+    );
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, text));
+    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(url);
+    if r.clicked() {
+        open_web(ui.ctx(), url);
+    }
+}
+
+/// The beginner's guide, as a row of its own: which assistant to pick,
+/// what it costs and how to start. The whole row opens it.
+fn guide_row(ui: &mut egui::Ui) {
+    let p = pal_ui(ui);
+    let inner = egui::Frame::new()
+        .stroke(Stroke::new(1.0, p.accent))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(space::M as i8, space::S as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = space::S + 2.0;
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                icons::paint(ui.painter(), r, Icon::Book, p.accent);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    // (Not selectable: a click anywhere is the row's.)
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("New to AI assistants?")
+                                .size(PANEL_PT)
+                                .strong()
+                                .color(p.text),
+                        )
+                        .selectable(false),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Read the guide to get started")
+                                .size(PANEL_PT)
+                                .color(p.text),
+                        )
+                        .wrap()
+                        .selectable(false),
+                    );
+                });
+            });
+        });
+    let r = ui.interact(inner.response.rect, ui.make_persistent_id("guide-row"), Sense::click());
+    if r.hovered() {
+        ui.painter().rect_filled(inner.response.rect, 8.0, p.hover);
+    }
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, "Read the guide"));
+    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(GUIDE_URL);
+    if r.clicked() {
+        open_web(ui.ctx(), GUIDE_URL);
+    }
+}
+
+/// No agent to run yet: each one ZigZag works with, to install (or use, if
+/// it's here already), with how to do it in a terminal folded away.
+fn install_steps(ui: &mut egui::Ui, a: &mut AgentState) {
+    use crate::agent_setup::Step;
+    let p = pal_ui(ui);
+    let ctx = ui.ctx().clone();
+    ui.spacing_mut().item_spacing.y = space::S;
+    setup_title(ui, "Set up an AI assistant");
+    setup_text(
+        ui,
+        "It works on your design while you watch.",
+    );
+    guide_row(ui);
+    // The services, one row each, in a box like a list.
+    let mut choose = None;
+    egui::Frame::new()
+        .fill(p.control)
+        .stroke(Stroke::new(1.0, p.control_border))
+        .corner_radius(8.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (n, kind) in AgentKind::ALL.into_iter().enumerate() {
+                if n > 0 {
+                    let y = ui.cursor().top();
+                    let x = ui.max_rect().x_range();
+                    ui.painter().hline(x, y, Stroke::new(1.0, p.control_border));
+                }
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(space::M as i8, (space::S + 2.0) as i8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if let Some(k) = service_row(ui, a, kind, &ctx) {
+                            choose = Some(k);
+                        }
+                    });
+            }
+        });
+    if let Some(k) = choose {
+        a.set_kind(k);
+    }
+    // What went wrong with the last install, under the list.
+    if let Step::Failed { install: true, why, .. } = &a.setup.step {
+        crate::theme::callout(ui, p.warning, Icon::Warning, why);
+    } else if a.setup.installed_now && a.installed(a.kind, &ctx) == Some(false) {
+        crate::theme::callout(
+            ui,
+            p.warning,
+            Icon::Warning,
+            &format!(
+                "The installer finished, but ZigZag can't find `{}` yet. Quit ZigZag and open it again.",
+                a.kind.program()
+            ),
+        );
+    }
+    // Doing it by hand: each one's commands.
+    egui::CollapsingHeader::new(
+        egui::RichText::new("Install from a terminal instead")
+            .size(PANEL_PT)
+            .color(p.tertiary),
+    )
+    .id_salt("install-by-hand")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = space::S;
+        for kind in AgentKind::ALL {
+            ui.add_space(space::XS);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = space::S;
+                crate::brands::show(ui, kind.brand(), 14.0, p.text);
+                ui.label(egui::RichText::new(kind.name()).size(PANEL_PT).strong().color(p.text));
+            });
+            let (ways, sign_in) = kind.install_steps();
+            for (how, command) in ways {
+                crate::mcp_chip::copy_block(ui, how, command);
+            }
+            quiet(ui, sign_in);
+        }
+        ui.add_space(space::XS);
+        if card_button(ui, "Check Again")
+            .on_hover_text("Look for them again, after installing one")
             .clicked()
         {
             a.check_again();
         }
-        let other = AgentKind::ALL
-            .into_iter()
-            .find(|&k| k != kind)
-            .unwrap_or_default();
-        if a.found[other.index()].as_ref().is_some_and(|f| f.is_some())
-            && ui.button(format!("Use {} Instead", other.name())).clicked()
-        {
-            a.set_kind(other);
-        }
     });
+}
+
+/// One service in the setup list: its mark, its name and who makes it, and
+/// what can be done with it here. Returns the agent to switch to.
+fn service_row(ui: &mut egui::Ui, a: &mut AgentState, kind: AgentKind, ctx: &egui::Context) -> Option<AgentKind> {
+    use crate::agent_setup::Step;
+    let p = pal_ui(ui);
+    let installing = matches!(&a.setup.step, Step::Installing(j) if j.kind == kind);
+    let here = a.found[kind.index()].as_ref().is_some_and(|f| f.is_some());
+    let mut choose = None;
+    // The button first, from the right, so the words get only what's left
+    // (and end in … rather than running under it).
+    // (A row's height: the name and the line under it.)
+    let row_h = 34.0;
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), row_h),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+        ui.set_height(row_h);
+        ui.spacing_mut().item_spacing.x = space::S + 2.0;
+        if installing {
+            installing_button(ui, "Install");
+        } else if here {
+            if card_button(ui, "Use").on_hover_text(format!("Use {} in this panel", kind.name())).clicked() {
+                choose = Some(kind);
+            }
+        } else if crate::dialog::primary(ui, "Install", !a.setup.busy())
+            .on_hover_text(format!("Install {} with {}'s own installer", kind.name(), kind.maker()))
+            .clicked()
+        {
+            a.setup.installed_now = false;
+            a.setup.install(kind, ctx);
+            // (The one being installed is the one the panel will run.)
+            choose = Some(kind);
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = space::S + 2.0;
+            crate::brands::show(ui, kind.brand(), 22.0, p.text);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.add(
+                    egui::Label::new(egui::RichText::new(kind.name()).size(PANEL_PT).strong().color(p.text))
+                        .truncate(),
+                );
+                let sub = match &a.setup.step {
+                    Step::Installing(j) if j.kind == kind => j
+                        .last_line()
+                        .unwrap_or("Downloading. This takes a minute or two.")
+                        .to_string(),
+                    _ if here => "Installed".to_string(),
+                    _ => format!("{} · {} account", kind.maker(), kind.account()),
+                };
+                ui.add(egui::Label::new(egui::RichText::new(sub).size(PANEL_PT - 1.0).color(p.tertiary)).truncate());
+            });
+        });
+        },
+    );
+    choose
+}
+
+/// The agent is installed but not signed in: a button that signs in (in
+/// the browser), and what to do while that's open.
+fn sign_in_steps(ui: &mut egui::Ui, a: &mut AgentState) {
+    use crate::agent_setup::Step;
+    let p = pal_ui(ui);
+    let kind = a.kind;
+    let ctx = ui.ctx().clone();
+    ui.spacing_mut().item_spacing.y = space::S;
+    let waiting = matches!(&a.setup.step, Step::SigningIn(job) if job.kind == kind);
+    // While it waits: where things stand, in a bar across the top.
+    if let Step::SigningIn(job) = &a.setup.step
+        && job.kind == kind
+    {
+        let in_window = kind == AgentKind::Antigravity && cfg!(windows);
+        status_bar(
+            ui,
+            if job.code_sent {
+                "Checking the code…"
+            } else if in_window {
+                "Waiting for you in the sign-in window…"
+            } else {
+                "Waiting for you in your browser…"
+            },
+        );
+        ui.add_space(space::S);
+    }
+    // Its mark and what this is, the mark centred on the title.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = space::S;
+        crate::brands::show(ui, kind.brand(), 20.0, p.text);
+        setup_title(ui, &format!("Sign in to {}", kind.name()));
+    });
+    if waiting && let Step::SigningIn(job) = &a.setup.step {
+        let url = job.url.clone();
+        let code_sent = job.code_sent;
+        let in_window = kind == AgentKind::Antigravity && cfg!(windows);
+        setup_text(
+            ui,
+            match kind {
+                // (It waits a minute, then gives up.)
+                AgentKind::Antigravity if in_window => "Sign in with your Google account in that window, within a minute.".to_string(),
+                AgentKind::Antigravity => "Sign in with your Google account, then paste the code here within a minute.".to_string(),
+                _ => "Sign in, then come back here.".to_string(),
+            },
+        );
+        // The page can show a code to paste back.
+        if kind.pastes_code() && !code_sent {
+            ui.add_space(space::XS);
+            let hint = if kind == AgentKind::Antigravity {
+                "Paste the code"
+            } else {
+                "Paste a code, if the page shows one"
+            };
+            if code_field(ui, &mut a.setup.code, hint) {
+                let code = std::mem::take(&mut a.setup.code);
+                a.setup.send_code(&code);
+            }
+        }
+        ui.add_space(space::S);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = space::M + space::XS;
+            if let Some(url) = url
+                && text_link(ui, "Open sign-in page", p.accent)
+                    .on_hover_text("If your browser didn't open, or you closed it")
+                    .clicked()
+            {
+                open_web(&ctx, &url);
+            }
+            if text_link(ui, "Cancel", p.secondary).clicked() {
+                a.setup.cancel();
+            }
+        });
+        return;
+    }
+    setup_text(
+        ui,
+        format!(
+            "{} is installed. Sign in with your {} account in your browser.",
+            kind.name(),
+            kind.account()
+        ),
+    );
+    if let Step::Failed { kind: failed, install: false, why } = &a.setup.step
+        && *failed == kind
+    {
+        crate::theme::callout(ui, p.warning, Icon::Warning, why);
+    }
+    ui.add_space(space::XS);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = space::M;
+        if crate::dialog::primary(ui, "Sign In", !a.setup.busy()).clicked()
+            && let Some(Some(program)) = a.found[kind.index()].clone()
+        {
+            let path = a.path.clone().flatten();
+            a.setup.sign_in(kind, &program, path, &ctx);
+        }
+        web_link(ui, "Help", GUIDE_URL);
+    });
+}
+
+/// A setup card's status, in a tinted bar across the top: a spinner and
+/// what it's waiting for.
+fn status_bar(ui: &mut egui::Ui, text: &str) {
+    let p = pal_ui(ui);
+    let tint = Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), 26);
+    egui::Frame::new()
+        .fill(tint)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(space::M as i8, space::S as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            working_line(ui, text);
+        });
+}
+
+/// A button at work: the size of the one it stands in for (`was`), quiet,
+/// with a spinner in its middle. (Nothing to click: it runs to the end.)
+fn installing_button(ui: &mut egui::Ui, was: &str) {
+    let p = pal_ui(ui);
+    let font = egui::FontId::proportional(13.0);
+    let w = (ui.painter().layout_no_wrap(was.to_string(), font, p.text).size().x + 32.0).max(72.0);
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(w, crate::dialog::BUTTON_H), Sense::hover());
+    ui.painter().rect_filled(rect, 6.0, p.control);
+    outline(ui, rect);
+    spinner(ui.painter(), rect.center(), 6.0, p.accent, ui.input(|i| i.time));
+    ui.ctx().request_repaint_after(Duration::from_millis(33));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ProgressIndicator, true, "Installing"));
+}
+
+/// A lesser action as underlined text, in `color`.
+fn text_link(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
+    let r = ui.add(
+        egui::Label::new(egui::RichText::new(label).size(PANEL_PT).color(color).underline())
+            .selectable(false)
+            .sense(Sense::click()),
+    );
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The card's main action: blue, and a dimmed blue (still plainly the one
+/// to press) until it can be.
+fn blue_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    if enabled {
+        return crate::dialog::primary(ui, label, true);
+    }
+    let p = pal_ui(ui);
+    let font = egui::FontId::proportional(13.0);
+    let g = ui.painter().layout_no_wrap(label.to_string(), font, Color32::WHITE);
+    let (rect, r) = ui.allocate_exact_size(
+        Vec2::new((g.size().x + 32.0).max(72.0), crate::dialog::BUTTON_H),
+        Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, 6.0, p.accent.gamma_multiply(0.4));
+    ui.painter().galley(
+        rect.center() - g.size() / 2.0,
+        g,
+        Color32::WHITE.gamma_multiply(0.7),
+    );
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, false, label));
+    r
+}
+
+/// A dialog's quiet button, outlined: on the panel (not a dialog's own
+/// background) its fill alone barely shows in the light theme.
+fn card_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let r = crate::dialog::secondary(ui, label);
+    outline(ui, r.rect);
+    r
+}
+
+/// The hairline the panel's fields have, round a button.
+fn outline(ui: &egui::Ui, rect: Rect) {
+    let p = pal_ui(ui);
+    ui.painter().rect_stroke(
+        rect,
+        6.0,
+        Stroke::new(1.0, p.control_border),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Where a sign-in code is pasted: as tall as the buttons, the full width,
+/// with Send beside it. True when it's sent (Send, or Enter).
+fn code_field(ui: &mut egui::Ui, code: &mut String, hint: &str) -> bool {
+    let p = pal_ui(ui);
+    let ready = !code.trim().is_empty();
+    let mut send = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = space::S;
+        let send_w = 72.0;
+        let r = ui.add(
+            egui::TextEdit::singleline(code)
+                .hint_text(egui::RichText::new(hint).color(p.tertiary))
+                .font(egui::FontId::proportional(13.0))
+                .align(egui::Align2::LEFT_CENTER)
+                .margin(egui::Margin::symmetric(space::S as i8, 0))
+                .min_size(Vec2::new(ui.available_width() - send_w - space::S, crate::dialog::BUTTON_H))
+                .desired_width(ui.available_width() - send_w - space::S),
+        );
+        send = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        send |= blue_button(ui, "Send", ready).clicked();
+    });
+    send && ready
 }
 
 #[cfg(test)]
@@ -3795,7 +5178,7 @@ mod tests {
 
         // Sent (no agent here to run): the chat shows it under the prompt.
         a.kind = AgentKind::Codex;
-        a.found = [Some(None), Some(None)];
+        a.found = [Some(None), Some(None), Some(None)];
         a.prompt = "make this into a patch".into();
         a.send(
             Some("127.0.0.1:1".parse().unwrap()),
@@ -4019,6 +5402,96 @@ mod tests {
         h.get_by_label("Stop").click();
         h.run_steps(2);
         assert!(!h.state().agent.running(), "a Stop later on stops");
+    }
+
+    #[test]
+    fn the_prompt_box_keeps_its_height_when_typed_in_while_it_works() {
+        use crate::dock::PanelId;
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio();
+        h.state_mut().agent.config = None; // don't save the choice
+        h.state_mut().dock.reveal(PanelId::Agent);
+        h.state_mut().agent.start_fake_run();
+        h.state_mut().agent.focus = true;
+        h.run_steps(4);
+        let empty = h.get_by_label("Prompt").rect().height();
+        let chrome = h.state().agent.chrome_h;
+        h.get_by_label("Prompt").type_text("and");
+        h.run_steps(2);
+        assert_eq!(h.get_by_label("Prompt").rect().height(), empty);
+        assert_eq!(h.state().agent.chrome_h, chrome);
+        h.state_mut().agent.stop();
+    }
+
+    #[test]
+    fn return_sends_the_prompt_and_shift_return_makes_a_new_line() {
+        use crate::dock::PanelId;
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio();
+        h.state_mut().agent.config = None; // don't save the choice
+        h.state_mut().agent.kind = AgentKind::Claude;
+        h.state_mut().dock.reveal(PanelId::Agent);
+        h.state_mut().agent.focus = true;
+        h.run_steps(4);
+        h.get_by_label("Prompt").type_text("a star");
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, Key::Enter);
+        h.run_steps(2);
+        h.get_by_label("Prompt").type_text("in gold");
+        h.run_steps(2);
+        assert_eq!(h.state().agent.prompt, "a star\nin gold");
+        h.key_press(Key::Enter);
+        h.run_steps(3);
+        // Sent: with no MCP server here, sending says so (and keeps the
+        // prompt to send again); Return made no new line.
+        assert!(
+            matches!(h.state().agent.log.last(), Some(Entry::Error(e)) if e.contains("MCP server")),
+            "Return sent it: {:?}",
+            h.state().agent.log.last()
+        );
+        assert_eq!(h.state().agent.prompt, "a star\nin gold");
+    }
+
+    #[test]
+    fn return_sends_with_an_earlier_chat_in_the_panel() {
+        use crate::dock::PanelId;
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio();
+        h.state_mut().agent.config = None; // don't save the choice
+        h.state_mut().agent.kind = AgentKind::Codex;
+        h.state_mut().dock.reveal(PanelId::Agent);
+        // An earlier conversation, ending with a card of choices.
+        h.state_mut().agent.log = vec![
+            Entry::You("make a patch".into()),
+            Entry::Tool("add_svg".into(), "patch".into(), Some(true)),
+            Entry::Said("Here's the patch.".into()),
+            Entry::Done("1 min".into()),
+            Entry::Choices {
+                title: "Fewer trims".into(),
+                question: "Sew across short gaps?".into(),
+                choices: vec![Choice {
+                    label: "Connect 3 mm".into(),
+                    detail: "Fewer stops.".into(),
+                    steps: json!([]),
+                    picked: false,
+                }],
+                applied: None,
+            },
+        ];
+        h.run_steps(4);
+        h.get_by_label("Prompt").click();
+        h.run_steps(2);
+        h.get_by_label("Prompt").type_text("a star");
+        h.run_steps(2);
+        let before = h.state().agent.log.len();
+        h.key_press(Key::Enter);
+        h.run_steps(3);
+        assert!(
+            h.state().agent.log.len() > before,
+            "Return did nothing: {:?} / {:?}",
+            h.state().agent.prompt,
+            h.state().agent.log.last()
+        );
     }
 
     #[test]
@@ -4384,6 +5857,214 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_while_the_panel_is_put_away_is_marked_unread() {
+        let mut h = studio();
+        h.run_steps(1);
+        assert!(!h.state().agent_showing(), "tests start with it put away");
+        h.state_mut().agent.start_fake_run();
+        h.run_steps(2);
+        assert!(h.state().agent.running());
+        assert!(!h.state().agent.unread, "not while it works");
+        h.state_mut().agent.stop();
+        h.run_steps(2);
+        assert!(h.state().agent.unread, "its turn ended out of sight");
+        // Opened: read.
+        h.state_mut().ask_agent();
+        h.run_steps(2);
+        assert!(h.state().agent_showing());
+        assert!(!h.state().agent.unread);
+        // A turn that ends in view isn't unread.
+        h.state_mut().agent.start_fake_run();
+        h.run_steps(2);
+        h.state_mut().agent.stop();
+        h.run_steps(2);
+        assert!(!h.state().agent.unread);
+    }
+
+    /// What's written while the agent works waits, and goes as one message
+    /// when its turn ends; what's being written then stays in the box.
+    #[test]
+    fn messages_written_while_it_works_go_when_its_turn_ends() {
+        let _env = AGENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tl-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("claude");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nread -r p\nsleep 0.4\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\n\
+             echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":10}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe { std::env::set_var("ZIGZAG_CLAUDE", &fake) };
+        let mut h = studio();
+        h.state_mut().agent.kind = AgentKind::Claude;
+        h.state_mut().agent.config = None;
+        h.state_mut().mcp = Some(
+            crate::mcp::start(0, crate::tools::tool_specs(), String::new(), || {}).unwrap(),
+        );
+        let ctx = h.ctx.clone();
+        let send = |h: &mut egui_kittest::Harness<'static, Studio>, text: &str| {
+            h.state_mut().agent.prompt = text.into();
+            h.state_mut().agent_send(&ctx);
+        };
+        send(&mut h, "make a badge");
+        assert!(h.state().agent.running());
+        send(&mut h, "in blue");
+        send(&mut h, "and bigger");
+        assert_eq!(h.state().agent.queued, ["in blue", "and bigger"]);
+        assert!(h.state().agent.prompt.is_empty());
+        h.state_mut().agent.prompt = "half wri".into();
+        let said = |h: &egui_kittest::Harness<'static, Studio>| -> Vec<String> {
+            h.state()
+                .agent
+                .log
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::You(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for _ in 0..300 {
+            h.run_steps(1);
+            if said(&h).len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(said(&h), ["make a badge", "in blue\n\nand bigger"]);
+        assert!(h.state().agent.queued.is_empty());
+        assert_eq!(h.state().agent.prompt, "half wri", "the draft stays");
+        h.state_mut().agent.stop();
+        unsafe { std::env::remove_var("ZIGZAG_CLAUDE") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A queued message's Send Now stops the turn and sends that one at
+    /// once, in the same chat; the rest wait for its turn to end.
+    #[test]
+    fn send_now_on_a_queued_message_stops_the_turn_and_sends_it() {
+        use egui_kittest::kittest::Queryable;
+        let _env = AGENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tl-send-now-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("claude");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nread -r p\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\nsleep 1\n\
+             echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":10}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe { std::env::set_var("ZIGZAG_CLAUDE", &fake) };
+        let mut h = studio();
+        h.state_mut().agent.kind = AgentKind::Claude;
+        h.state_mut().agent.config = None;
+        h.state_mut().dock.reveal(crate::dock::PanelId::Agent);
+        h.state_mut().mcp = Some(
+            crate::mcp::start(0, crate::tools::tool_specs(), String::new(), || {}).unwrap(),
+        );
+        let ctx = h.ctx.clone();
+        for text in ["make a badge", "in blue", "and bigger"] {
+            h.state_mut().agent.prompt = text.into();
+            h.state_mut().agent_send(&ctx);
+        }
+        assert_eq!(h.state().agent.queued, ["in blue", "and bigger"]);
+        h.state_mut().agent.prompt = "half wri".into();
+        h.run_steps(3);
+        // The first row's arrow, under the pointer.
+        let at = h.get_all_by_label("Send Queued Message Now").next().unwrap().rect().center();
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(2);
+        let said = |h: &egui_kittest::Harness<'static, Studio>| -> Vec<String> {
+            h.state()
+                .agent
+                .log
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::You(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(said(&h), ["make a badge", "in blue"]);
+        assert!(h.state().agent.running());
+        assert_eq!(h.state().agent.queued, ["and bigger"]);
+        assert_eq!(h.state().agent.prompt, "half wri", "the draft stays");
+        assert!(
+            h.state().agent.log.iter().any(|e| matches!(e, Entry::Info(t) if t.starts_with("Stopped to send"))),
+            "{:?}",
+            h.state().agent.log
+        );
+        // The rest goes when that turn is done.
+        for _ in 0..400 {
+            h.run_steps(1);
+            if said(&h).len() == 3 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(said(&h), ["make a badge", "in blue", "and bigger"]);
+        h.state_mut().agent.stop();
+        unsafe { std::env::remove_var("ZIGZAG_CLAUDE") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whether one of the ideas an empty chat starts from is on screen.
+    fn an_idea_shows(h: &egui_kittest::Harness<'static, Studio>) -> bool {
+        use egui_kittest::kittest::Queryable;
+        NEW_IDEAS
+            .iter()
+            .chain(CHANGE_IDEAS)
+            .any(|i| h.query_by_label(i).is_some())
+    }
+
+    /// Three ideas, none twice; with a design open, one of them a change
+    /// to it; and not the same three every time.
+    #[test]
+    fn an_empty_chat_shows_three_ideas_picked_at_random() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..200u64 {
+            let open = ideas(seed, true);
+            assert_eq!(open.len(), 3);
+            assert_eq!(open.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+            assert_eq!(open.iter().filter(|i| CHANGE_IDEAS.contains(i)).count(), 1);
+            let empty = ideas(seed, false);
+            assert!(empty.iter().all(|i| NEW_IDEAS.contains(i)), "{empty:?}");
+            seen.extend(open);
+        }
+        assert!(seen.len() > 20, "most of them come up: {}", seen.len());
+        assert_ne!(ideas(1, true), ideas(2, true));
+        assert_ne!(fresh_seed(), fresh_seed());
+    }
+
+    /// Stopped, what was waiting comes back to the prompt box, before what
+    /// was being written.
+    #[test]
+    fn a_stop_puts_what_was_queued_back_in_the_box() {
+        let mut a = AgentState::default();
+        a.start_fake_run();
+        a.queued = vec!["first".into(), "second".into()];
+        a.prompt = "draft".into();
+        a.stop();
+        assert!(a.queued.is_empty());
+        assert_eq!(a.prompt, "first\n\nsecond\n\ndraft");
+    }
+
+    #[test]
     fn runs_an_agent_program_and_streams_its_output() {
         let _env = AGENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
         // A stand-in for `claude`: echoes stream-json and checks its stdin.
@@ -4450,11 +6131,12 @@ mod tests {
                 |ui, s: &mut Studio| s.frame(ui),
                 Studio::with_file(Some(path), None),
             );
-        // As if both agents were installed (the panel's usual start); tests
+        // As if every agent were installed (the panel's usual start); tests
         // about missing ones say so.
         h.state_mut().agent.found = [
             Some(Some(PathBuf::from("/usr/local/bin/claude"))),
             Some(Some(PathBuf::from("/usr/local/bin/codex"))),
+            Some(Some(PathBuf::from("/usr/local/bin/agy"))),
         ];
         h.run_steps(4);
         h
@@ -4484,8 +6166,7 @@ mod tests {
         assert!(prompt.bottom() > 900.0 - 140.0, "{prompt:?}");
         assert!(h.query_by_label("Agent panel divider").is_none());
         assert!(
-            h.query_by_label("A round camp badge with a pine tree")
-                .is_some()
+            an_idea_shows(&h)
         );
         // Sharing the dock, it sits at the bottom, under the other panel.
         h.state_mut()
@@ -4567,66 +6248,164 @@ mod tests {
         let mut h = studio();
         h.state_mut().agent.config = None;
         h.state_mut().agent.kind = AgentKind::Codex;
-        h.state_mut().agent.found = [Some(None), Some(None)]; // neither installed
+        h.state_mut().agent.found = [Some(None), Some(None), Some(None)]; // none installed
         h.state_mut().dock.reveal(PanelId::Agent);
         h.run_steps(5);
-        h.get_by_label("Codex isn't installed on this computer");
-        // This platform's install commands, each with its Copy button.
-        for (_, command) in AgentKind::Codex.install_steps().0 {
-            h.get_by_label(command);
-        }
-        if Os::CURRENT == Os::Mac {
-            h.get_by_label("brew install --cask codex");
-        } else {
-            assert!(
-                h.query_by_label_contains("this Mac").is_none(),
-                "no Mac here"
-            );
-            assert!(
-                h.query_by_label_contains("brew install").is_none(),
-                "no Homebrew"
-            );
+        h.get_by_label("Set up an AI assistant");
+        assert!(!an_idea_shows(&h), "setup instead of ideas");
+        assert_eq!(h.state().panel_name(PanelId::Agent), "Setup", "its own page, no agent's");
+        assert!(h.query_by_label("Prompt").is_none(), "no agent to write to");
+        // Each service, to install, and the guide.
+        assert_eq!(h.query_all_by_label("Install").count(), 3);
+        h.get_by_label("OpenAI · ChatGPT account");
+        h.get_by_label("Anthropic · Claude account");
+        h.get_by_label("Google · Google account");
+        h.get_by_label("Read the guide");
+        // This platform's commands, folded away until asked for.
+        let first = AgentKind::Codex.install_steps().0[0].1;
+        assert!(h.query_by_label(first).is_none(), "folded");
+        h.get_by_label_contains("Install from a terminal instead").click();
+        h.run_steps(5);
+        // Every one's commands, not only the chosen agent's.
+        for kind in AgentKind::ALL {
+            for (_, command) in kind.install_steps().0 {
+                assert!(h.query_all_by_label(command).count() >= 1, "{command}");
+            }
         }
         h.get_by_label_contains("Sign in with ChatGPT");
-        assert!(
-            h.query_by_label("A round camp badge with a pine tree")
-                .is_none(),
-            "setup instead of ideas"
-        );
-        assert!(
-            h.query_by_label("Use Claude Code Instead").is_none(),
-            "not offered: it isn't installed either"
-        );
-        // Claude Code installed: offered, and a click switches.
+        h.get_by_label("Check Again");
+        if Os::CURRENT != Os::Mac {
+            assert!(h.query_by_label_contains("brew install").is_none(), "no Homebrew");
+        }
+        // Claude Code installed: it says so, and Use switches to it.
         h.state_mut().agent.found[AgentKind::Claude.index()] =
             Some(Some(PathBuf::from("/usr/local/bin/claude")));
         h.run_steps(3);
-        h.get_by_label("Use Claude Code Instead").click();
+        h.get_by_label("Installed");
+        h.get_by_label("Use").click();
         h.run_steps(3);
         assert_eq!(h.state().agent.kind, AgentKind::Claude);
-        assert!(
-            h.query_by_label("A round camp badge with a pine tree")
-                .is_some(),
-            "installed: the usual start"
-        );
-        // Its own steps when it's missing.
-        h.state_mut().agent.found = [Some(None), Some(None)];
+        assert!(an_idea_shows(&h), "installed: the usual start");
+        assert_eq!(h.state().panel_name(PanelId::Agent), "Claude Code");
+        // Setup from the menu, with an agent ready: the page all the same.
+        h.state_mut().agent.on_setup = true;
         h.run_steps(3);
-        h.get_by_label("Claude Code isn't installed on this computer");
-        for (_, command) in AgentKind::Claude.install_steps().0 {
-            h.get_by_label(command);
+        h.get_by_label("Set up an AI assistant");
+        assert_eq!(h.state().panel_name(PanelId::Agent), "Setup");
+        h.state_mut().agent.set_kind(AgentKind::Claude);
+        h.run_steps(3);
+        assert!(an_idea_shows(&h), "picking an agent leaves Setup");
+        h.get_by_label("Prompt");
+        // A chat under way: Setup covers it, and picking the agent brings it back.
+        h.state_mut().agent.log.push(Entry::You("make it blue".into()));
+        h.state_mut().agent.on_setup = true;
+        h.run_steps(3);
+        h.get_by_label("Set up an AI assistant");
+        assert!(h.query_by_label("make it blue").is_none());
+        h.state_mut().agent.set_kind(AgentKind::Claude);
+        h.run_steps(3);
+        h.get_by_label("make it blue");
+    }
+
+    #[test]
+    fn the_guide_and_help_open_with_a_real_click() {
+        use crate::dock::PanelId;
+        use egui_kittest::kittest::Queryable;
+        // A pointer press and release over each, as a mouse does (not an
+        // accessibility click, which goes straight to the widget).
+        let opened = |h: &mut egui_kittest::Harness<'_, crate::app::Studio>, label: &str| -> bool {
+            let at = h.get_by_label(label).rect().center();
+            h.hover_at(at);
+            h.step();
+            h.drag_at(at);
+            h.step();
+            h.drop_at(at);
+            OPENED.lock().unwrap().clear();
+            h.run_steps(3);
+            OPENED.lock().unwrap().iter().any(|u| u == GUIDE_URL)
+        };
+        let mut h = studio();
+        h.state_mut().agent.config = None;
+        h.state_mut().agent.found = [Some(None), Some(None), Some(None)];
+        h.state_mut().agent.on_setup = true;
+        h.state_mut().dock.reveal(PanelId::Agent);
+        h.run_steps(5);
+        assert!(opened(&mut h, "Read the guide"), "the guide row");
+        // Installed, signed out: the sign-in card's Help.
+        h.state_mut().agent.found[AgentKind::Claude.index()] =
+            Some(Some(PathBuf::from("/usr/local/bin/claude")));
+        h.state_mut().agent.setup.signed_in[AgentKind::Claude.index()] = Some(false);
+        h.state_mut().agent.set_kind(AgentKind::Claude);
+        h.run_steps(5);
+        assert!(opened(&mut h, "Help"), "Help");
+    }
+
+    /// What a look for the programs found: only `here` installed.
+    fn found_only(here: &[AgentKind]) -> [Option<Option<PathBuf>>; AgentKind::COUNT] {
+        let mut f: [Option<Option<PathBuf>>; AgentKind::COUNT] = [Some(None), Some(None), Some(None)];
+        for k in here {
+            f[k.index()] = Some(Some(PathBuf::from(format!("/c/{}", k.program()))));
         }
-        if Os::CURRENT != Os::Mac {
-            assert!(
-                h.query_by_label_contains("this Mac").is_none(),
-                "no Mac here"
-            );
-            assert!(
-                h.query_by_label_contains("brew install").is_none(),
-                "no Homebrew"
-            );
-        }
-        h.get_by_label("Check Again");
+        f
+    }
+
+    #[test]
+    fn setup_shows_the_first_time_and_after_that_the_agent_chosen() {
+        let file = std::env::temp_dir().join(format!("zigzag-first-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        // First time: Setup, even with an agent here already.
+        let mut a = AgentState::load_from(Some(file.clone()));
+        a.found = found_only(&[AgentKind::Codex]);
+        a.open_on_an_installed_agent();
+        assert!(a.setup_page(), "first time");
+        // Choosing the default agent (Use on Codex) counts: next time, Codex.
+        a.set_kind(AgentKind::Codex);
+        assert!(!a.setup_page());
+        let a = AgentState::load_from(Some(file.clone()));
+        assert_eq!(a.kind, AgentKind::Codex);
+        assert!(!a.on_setup, "not the first time any more");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn the_panel_opens_on_the_agent_last_used_or_one_thats_here() {
+        let file = std::env::temp_dir().join(format!("zigzag-agent-{}.json", std::process::id()));
+        let fresh = |kind: AgentKind, found: [Option<Option<PathBuf>>; AgentKind::COUNT]| AgentState {
+            kind,
+            found,
+            config: Some(file.clone()),
+            ..Default::default()
+        };
+        // The one last used is here: it stays.
+        let mut a = fresh(AgentKind::Claude, found_only(&[AgentKind::Codex, AgentKind::Claude]));
+        a.open_on_an_installed_agent();
+        assert_eq!(a.kind, AgentKind::Claude);
+        // It isn't (or nothing was saved, so it's Codex): the first that is,
+        // remembered, and a chat restored from last time is kept.
+        let mut a = fresh(AgentKind::Codex, found_only(&[AgentKind::Antigravity]));
+        a.log.push(Entry::You("make it blue".into()));
+        a.open_on_an_installed_agent();
+        assert_eq!(a.kind, AgentKind::Antigravity);
+        assert!(!a.setup_page());
+        assert_eq!(a.log.len(), 1, "the chat stays");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved.contains(r#""agent":"antigravity""#), "{saved}");
+        // Only the first time: an agent picked later shows its own setup.
+        a.kind = AgentKind::Codex;
+        a.open_on_an_installed_agent();
+        assert_eq!(a.kind, AgentKind::Codex);
+        assert!(a.setup_page());
+        // None here: Setup.
+        let mut a = fresh(AgentKind::Codex, found_only(&[]));
+        a.open_on_an_installed_agent();
+        assert_eq!(a.kind, AgentKind::Codex);
+        assert!(a.setup_page());
+        // Setup chosen from the menu stays.
+        let mut a = fresh(AgentKind::Codex, found_only(&[AgentKind::Claude]));
+        a.on_setup = true;
+        a.open_on_an_installed_agent();
+        assert!(a.setup_page());
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
@@ -4642,10 +6421,13 @@ mod tests {
             }
             s + " " + sign_in
         };
-        // A Mac: Homebrew, and its Terminal app.
+        // A Mac: the makers' installers or Homebrew, and its Terminal app.
         assert_eq!(
             commands(Os::Mac, AgentKind::Codex),
-            ["brew install --cask codex", "npm install -g @openai/codex"]
+            [
+                "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+                "brew install --cask codex"
+            ]
         );
         assert_eq!(
             commands(Os::Mac, AgentKind::Claude),
@@ -4655,10 +6437,15 @@ mod tests {
             ]
         );
         assert!(all_text(Os::Mac, AgentKind::Codex).contains("in Terminal"));
-        // Windows: npm, PowerShell and WinGet.
+        // The message says the panel can do it.
+        assert!(all_text(Os::Mac, AgentKind::Codex).contains("Click Install Codex"));
+        // Windows: PowerShell, then npm or WinGet.
         assert_eq!(
             commands(Os::Windows, AgentKind::Codex),
-            ["npm install -g @openai/codex"]
+            [
+                "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
+                "npm install -g @openai/codex"
+            ]
         );
         assert_eq!(
             commands(Os::Windows, AgentKind::Claude),
@@ -4667,10 +6454,13 @@ mod tests {
                 "winget install Anthropic.ClaudeCode"
             ]
         );
-        // Linux: npm, and the shell installer.
+        // Linux: the shell installers, or npm.
         assert_eq!(
             commands(Os::Linux, AgentKind::Codex),
-            ["npm install -g @openai/codex"]
+            [
+                "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+                "npm install -g @openai/codex"
+            ]
         );
         assert_eq!(
             commands(Os::Linux, AgentKind::Claude),
@@ -4679,7 +6469,21 @@ mod tests {
                 "npm install -g @anthropic-ai/claude-code"
             ]
         );
-        // Neither speaks of a Mac, Homebrew or the Terminal app.
+        // Antigravity: Google's installer, PowerShell's on Windows.
+        assert_eq!(
+            commands(Os::Mac, AgentKind::Antigravity),
+            ["curl -fsSL https://antigravity.google/cli/install.sh | bash"]
+        );
+        assert_eq!(
+            commands(Os::Linux, AgentKind::Antigravity),
+            ["curl -fsSL https://antigravity.google/cli/install.sh | bash"]
+        );
+        assert_eq!(
+            commands(Os::Windows, AgentKind::Antigravity),
+            ["irm https://antigravity.google/cli/install.ps1 | iex"]
+        );
+        assert!(all_text(Os::Mac, AgentKind::Antigravity).contains("no `agy` command found"));
+        // None speaks of a Mac, Homebrew or the Terminal app.
         for os in [Os::Windows, Os::Linux] {
             for kind in AgentKind::ALL {
                 let text = all_text(os, kind);
@@ -4692,14 +6496,80 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_offers_to_install_and_sign_in() {
+        use crate::agent_setup::Step;
+        use crate::dock::PanelId;
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio();
+        h.state_mut().agent.config = None;
+        h.state_mut().agent.kind = AgentKind::Codex;
+        h.state_mut().agent.found = [Some(None), Some(None), Some(None)];
+        h.state_mut().dock.reveal(PanelId::Agent);
+        h.run_steps(5);
+        // Not installed: a button that does it.
+        h.get_by_label("Set up an AI assistant");
+        assert_eq!(h.query_all_by_label("Install").count(), 3);
+        // A failed install says why, and can be tried again.
+        h.state_mut().agent.setup.step = Step::Failed {
+            kind: AgentKind::Codex,
+            install: true,
+            why: "The Codex installer stopped: curl: (6) Could not resolve host.".into(),
+        };
+        h.run_steps(3);
+        h.get_by_label_contains("Could not resolve host");
+        assert_eq!(h.query_all_by_label("Install").count(), 3);
+        h.state_mut().agent.setup.step = Step::Idle;
+        // Installed but plainly signed out: sign in instead of the ideas.
+        let codex = PathBuf::from("/usr/local/bin/codex");
+        h.state_mut().agent.found[AgentKind::Codex.index()] = Some(Some(codex));
+        h.state_mut().agent.setup.signed_in[AgentKind::Codex.index()] = Some(false);
+        h.run_steps(3);
+        h.get_by_label("Sign in to Codex");
+        h.get_by_label("Sign In");
+        h.get_by_label_contains("your ChatGPT account");
+        assert!(!an_idea_shows(&h), "signing in first");
+        // Signed in: the usual start.
+        h.state_mut().agent.setup.signed_in[AgentKind::Codex.index()] = Some(true);
+        h.run_steps(3);
+        assert!(h.query_by_label("Sign In").is_none());
+        assert!(an_idea_shows(&h));
+        // A chat that failed for want of signing in: the card is above the prompt.
+        h.state_mut().agent.log = vec![
+            Entry::You("Make it smaller".into()),
+            Entry::Error("Not logged in".into()),
+        ];
+        h.state_mut().agent.setup.signed_in[AgentKind::Codex.index()] = Some(false);
+        h.run_steps(3);
+        h.get_by_label("Sign In");
+    }
+
+    #[test]
+    fn a_turn_that_fails_asks_again_whether_its_signed_in() {
+        let mut h = studio();
+        let i = AgentKind::Codex.index();
+        h.state_mut().agent.kind = AgentKind::Codex;
+        h.state_mut().agent.setup.signed_in[i] = Some(true);
+        h.state_mut().agent.was_running = true;
+        h.state_mut().agent.log = vec![Entry::Error("Not logged in".into())];
+        h.run_steps(2);
+        assert_eq!(h.state().agent.setup.signed_in[i], None, "asked again");
+        // Stopping it isn't a reason to.
+        h.state_mut().agent.setup.signed_in[i] = Some(true);
+        h.state_mut().agent.was_running = true;
+        h.state_mut().agent.log.push(Entry::Error("Stopped.".into()));
+        h.run_steps(2);
+        assert_eq!(h.state().agent.setup.signed_in[i], Some(true));
+    }
+
+    #[test]
     fn check_again_forgets_what_was_found() {
         let mut a = AgentState {
             path: Some(Some("/nowhere".into())),
-            found: [Some(None), Some(None)],
+            found: [Some(None), Some(None), Some(None)],
             ..Default::default()
         };
         a.check_again();
-        assert_eq!(a.found, [None, None]);
+        assert_eq!(a.found, [None, None, None]);
         assert!(a.path.is_none(), "the login PATH is read again too");
     }
 
@@ -4845,6 +6715,8 @@ mod tests {
                 eof: true,
                 kind: AgentKind::Claude,
                 resumed: true,
+                agy: AgyStream::default(),
+                result_at: None,
             }),
             ..Default::default()
         };
@@ -4903,6 +6775,8 @@ mod tests {
                 eof: false,
                 kind: AgentKind::Claude,
                 resumed: false,
+                agy: AgyStream::default(),
+                result_at: None,
             }),
             ..Default::default()
         };
@@ -4981,5 +6855,276 @@ mod tests {
             Entry::Tool(String::new(), String::new(), Some(true)),
         );
         assert_eq!(a.status(), "Thinking");
+    }
+
+    /// Lines as Antigravity's `--output-format stream-json` writes them.
+    fn agy_lines(lines: &[&str]) -> (Vec<Entry>, Option<String>) {
+        let mut session = None;
+        let mut st = AgyStream::new();
+        let mut a = AgentState::default();
+        for l in lines {
+            let v: Value = serde_json::from_str(l).unwrap();
+            for (id, e) in agy_event(&v, &mut session, &mut st) {
+                a.push(id, e);
+            }
+        }
+        (a.log, session)
+    }
+
+    #[test]
+    fn antigravitys_stream_is_read() {
+        let (log, session) = agy_lines(&[
+            r#"{"event":"init","init":{"cwd":"/tmp/a","tools":["mcp_zigzag_get_design","call_mcp_tool"],"permission_mode":"request-review"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":0,"state":"DONE","step_type":"user_input"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Let me look "}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"at the design."}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"mcp_zigzag_get_design","tool_info":{"name":"mcp_zigzag_get_design","parameters":{}}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"mcp_zigzag_get_design","tool_info":{"name":"mcp_zigzag_get_design","parameters":{}}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":2,"state":"DONE","step_type":"tool","tool_name":"mcp_zigzag_get_design","duration_seconds":0.4,"tool_info":{"name":"mcp_zigzag_get_design","parameters":{},"output":"{\"objects\":[]}"}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool","parameters":{"server_name":"zigzag","tool_name":"set_object","arguments":{"object":1,"stitch":"satin"}}}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":3,"state":"DONE","step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool","parameters":{"server_name":"zigzag","tool_name":"set_object","arguments":{"object":1,"stitch":"satin"}},"error":{"type":"TOOL_ERROR","message":"no object 1"}}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-42","step_index":4,"state":"ACTIVE","step_type":"agent_response","text_delta":"There's nothing to restyle yet."}}"#,
+            r#"{"event":"result","result":{"conversation_id":"c-42","status":"SUCCESS","response":"Let me look at the design.There's nothing to restyle yet.","duration_seconds":12.2,"num_turns":1,"usage":{"total_tokens":10}}}"#,
+        ]);
+        assert_eq!(session.as_deref(), Some("c-42"), "kept to carry on");
+        assert_eq!(
+            log,
+            [
+                Entry::Said("Let me look at the design.".into()),
+                Entry::Tool("get_design".into(), String::new(), Some(true)),
+                Entry::Tool("set_object".into(), "object: 1, stitch: satin".into(), Some(false)),
+                Entry::Error("set_object: no object 1".into()),
+                Entry::Said("There's nothing to restyle yet.".into()),
+                Entry::Done("1 turns · 12 s".into()),
+            ]
+        );
+        // Nothing said along the way: the result's response is.
+        let (log, _) = agy_lines(&[
+            r#"{"event":"result","result":{"conversation_id":"c-1","status":"SUCCESS","response":"OK","duration_seconds":1,"num_turns":1}}"#,
+        ]);
+        assert_eq!(log, [Entry::Said("OK".into()), Entry::Done("1 turns · 1 s".into())]);
+        // A turn that failed says why; one signed out says to sign in.
+        let (log, session) = agy_lines(&[
+            r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"model quota exceeded","duration_seconds":0,"num_turns":0}}"#,
+        ]);
+        assert_eq!(log, [Entry::Error("model quota exceeded".into())]);
+        assert_eq!(session, None, "no conversation to carry on");
+        let (log, _) = agy_lines(&[
+            r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"authentication failed or timed out","duration_seconds":0,"num_turns":0,"finished_reason":"error"}}"#,
+        ]);
+        assert!(matches!(&log[..], [Entry::Error(m)] if m.contains("isn't signed in")), "{log:?}");
+        let (log, _) = agy_lines(&[r#"{"event":"result","result":{"status":"CANCELED"}}"#]);
+        assert_eq!(log, [Entry::Error("Stopped: canceled".into())]);
+    }
+
+    #[test]
+    fn antigravity_runs_with_only_zigzags_tools() {
+        let dir = std::env::temp_dir().join(format!("zigzag-agy-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let args = |a: &mut AgentState| -> Vec<String> {
+            a.command("agy".into(), "http://127.0.0.1:4711/mcp?panel=1", None, 4711)
+                .get_args()
+                .map(|x| x.to_string_lossy().into_owned())
+                .collect()
+        };
+        let mut a = AgentState {
+            kind: AgentKind::Antigravity,
+            config: Some(dir.join("agent.json")),
+            ..Default::default()
+        };
+        let c = args(&mut a);
+        let joined = c.join(" ");
+        assert!(joined.contains("--output-format stream-json"), "{joined}");
+        assert!(c.contains(&"--sandbox".to_string()));
+        assert!(!joined.contains("dangerously"), "never every tool");
+        assert!(!joined.contains("--conversation"), "a new one");
+        assert!(!c.contains(&"--mode".to_string()), "not auto");
+        assert_eq!(c.last().map(String::as_str), Some("-p"), "the prompt follows");
+        let settings: Value = c
+            .windows(2)
+            .find(|w| w[0] == "--settings")
+            .map(|w| serde_json::from_str(&w[1]).unwrap())
+            .expect("settings");
+        assert_eq!(settings["agentMode"], "", "its default mode, which asks");
+        let allow: Vec<&str> = settings["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(allow.contains(&"mcp(zigzag/*)"), "{allow:?}");
+        assert!(
+            allow.iter().all(|r| r.starts_with("mcp(zigzag/") || r.starts_with("read_file(")),
+            "nothing else: {allow:?}"
+        );
+        let deny = settings["permissions"]["deny"].to_string();
+        for d in ["command(*)", "write_file(*)", "read_url(*)", "execute_url(*)", "download_url(*)"] {
+            assert!(deny.contains(d), "{d} refused: {deny}");
+        }
+        // Its folder: ZigZag's server on this launch's port, and the brief.
+        let work = dir.join("agent").join("antigravity");
+        let config: Value = serde_json::from_str(
+            &std::fs::read_to_string(work.join(".agents/mcp_config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["mcpServers"]["zigzag"]["serverUrl"],
+            "http://127.0.0.1:4711/mcp?panel=1"
+        );
+        assert_eq!(config["mcpServers"].as_object().unwrap().len(), 1);
+        assert_eq!(config["mcpServers"]["zigzag"]["tools"]["add_svg"]["eager"], true);
+        let brief = std::fs::read_to_string(work.join("AGENTS.md")).unwrap();
+        assert!(brief.starts_with(BRIEF), "the brief");
+        // An image going with the prompt can be read, and nothing else.
+        a.sending_images = vec![PathBuf::from("/tmp/attached/cat.png")];
+        let joined = args(&mut a).join(" ");
+        assert!(joined.contains("read_file(/tmp/attached/cat.png)"), "{joined}");
+        a.sending_images.clear();
+        // The second turn carries on the conversation, with its choices.
+        a.session = Some("c-42".into());
+        a.model[AgentKind::Antigravity.index()] = Some("gemini-4-pro".into());
+        a.effort[AgentKind::Antigravity.index()] = Some("xhigh".into());
+        let joined = args(&mut a).join(" ");
+        assert!(joined.contains("--conversation c-42"), "{joined}");
+        assert!(joined.contains("--model gemini-4-pro"), "{joined}");
+        assert!(joined.contains("--effort xhigh"), "{joined}");
+        assert!(joined.ends_with(" -p"), "{joined}");
+        // A new launch, another port: the file follows.
+        let _ = a
+            .command("agy".into(), "http://127.0.0.1:5000/mcp?panel=1", None, 5000)
+            .get_args()
+            .count();
+        let config = std::fs::read_to_string(work.join(".agents/mcp_config.json")).unwrap();
+        assert!(config.contains("127.0.0.1:5000"), "{config}");
+        // Codex's and Claude's folder isn't Antigravity's (Codex reads AGENTS.md).
+        a.kind = AgentKind::Codex;
+        assert_eq!(a.work_dir(), dir.join("agent"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in for `agy`: it takes the prompt from its command line,
+    /// prints its result, then (as the real one sometimes does) doesn't exit.
+    #[cfg(unix)]
+    #[test]
+    fn an_antigravity_that_never_exits_is_stopped_after_its_result() {
+        let _env = AGENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("zigzag-agy-fake-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("agy");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nfor p; do :; done\n\
+             printf '{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"c-7\",\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"you said %s\"}}\\n' \"$p\"\n\
+             echo '{\"event\":\"result\",\"result\":{\"conversation_id\":\"c-7\",\"status\":\"SUCCESS\",\"response\":\"\",\"duration_seconds\":2,\"num_turns\":1}}'\n\
+             sleep 60\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut a = AgentState {
+            kind: AgentKind::Antigravity,
+            path: Some(None),
+            config: Some(dir.join("agent.json")),
+            ..Default::default()
+        };
+        a.found[AgentKind::Antigravity.index()] = Some(Some(fake.clone()));
+        unsafe { std::env::set_var("ZIGZAG_ANTIGRAVITY", &fake) };
+        let ctx = egui::Context::default();
+        a.prompt = "hello there".into();
+        a.send(Some("127.0.0.1:1".parse().unwrap()), &ctx);
+        unsafe { std::env::remove_var("ZIGZAG_ANTIGRAVITY") };
+        let t = Instant::now();
+        while a.running() && t.elapsed() < Duration::from_secs(20) {
+            a.poll();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!a.running(), "stopped once it had answered");
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        assert_eq!(a.session.as_deref(), Some("c-7"));
+        assert!(a.log.contains(&Entry::Said("you said hello there".into())), "{:?}", a.log);
+        assert_eq!(a.log.last(), Some(&Entry::Done("1 turns · 2 s".into())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_install_doesnt_hold_up_another_agent() {
+        use crate::agent_setup::Step;
+        let mut a = AgentState {
+            kind: AgentKind::Codex,
+            found: found_only(&[AgentKind::Claude]),
+            ..Default::default()
+        };
+        a.setup.step = Step::Failed {
+            kind: AgentKind::Codex,
+            install: true,
+            why: "The Codex installer stopped.".into(),
+        };
+        assert!(a.setup_page(), "Codex isn't here, and its install failed");
+        // Claude Code is installed: choosing it leaves Setup.
+        a.set_kind(AgentKind::Claude);
+        assert!(!a.setup_page());
+        assert!(!setting_up(&a, true) && !setting_up(&a, false));
+        // A failed sign-in to one agent isn't another's either.
+        a.setup.step = Step::Failed {
+            kind: AgentKind::Codex,
+            install: false,
+            why: "Signing in didn't finish.".into(),
+        };
+        assert!(!setting_up(&a, false), "Claude Code's panel");
+        a.kind = AgentKind::Codex;
+        assert!(setting_up(&a, false), "Codex's");
+    }
+
+    #[test]
+    fn antigravitys_prompt_names_its_images_and_is_never_an_option() {
+        assert_eq!(agy_prompt("make it blue", &[]), "make it blue");
+        assert_eq!(agy_prompt("--help", &[]), " --help", "not taken for an option");
+        let one = agy_prompt("trace this", &[PathBuf::from("/tmp/attached/cat.png")]);
+        assert!(one.starts_with("trace this\n\nAn image is attached"), "{one}");
+        assert!(one.ends_with("\n/tmp/attached/cat.png"), "{one}");
+        let two = agy_prompt("these", &[PathBuf::from("/a.png"), PathBuf::from("/b.png")]);
+        assert!(two.contains("Images are attached") && two.ends_with("\n/a.png\n/b.png"), "{two}");
+    }
+
+    #[test]
+    fn antigravity_is_found_where_its_installer_puts_it() {
+        let dirs = install_dirs(Os::Windows, r"C:\Users\pat", Some(r"C:\Users\pat\AppData\Roaming"), Some(r"C:\Users\pat\AppData\Local"));
+        assert!(dirs.contains(&PathBuf::from(r"C:\Users\pat\AppData\Local").join(r"agy\bin")), "{dirs:?}");
+        let dirs = install_dirs(Os::Mac, "/Users/pat", None, None);
+        assert!(dirs.contains(&PathBuf::from("/Users/pat/.local/bin")), "{dirs:?}");
+        assert!(!dirs.iter().any(|d| d.to_string_lossy().contains("agy")));
+        assert_eq!(AgentKind::from_key("antigravity"), Some(AgentKind::Antigravity));
+        assert_eq!(AgentKind::Antigravity.program(), "agy");
+        assert_eq!(AgentKind::ALL.last(), Some(&AgentKind::Antigravity), "last in the menu");
+    }
+
+    #[test]
+    fn signing_in_to_antigravity_takes_a_pasted_code() {
+        use crate::agent_setup::Step;
+        use crate::dock::PanelId;
+        use egui_kittest::kittest::Queryable;
+        let mut h = studio();
+        h.state_mut().agent.config = None;
+        h.state_mut().agent.kind = AgentKind::Antigravity;
+        let i = AgentKind::Antigravity.index();
+        h.state_mut().agent.found[i] = Some(Some(PathBuf::from("/usr/local/bin/agy")));
+        h.state_mut().agent.setup.signed_in[i] = Some(false);
+        h.state_mut().dock.reveal(PanelId::Agent);
+        h.run_steps(5);
+        h.get_by_label("Sign in to Antigravity");
+        h.get_by_label_contains("your Google account");
+        h.get_by_label("Sign In");
+        // Signing in failed for want of time: it says so, and can go again.
+        h.state_mut().agent.setup.step = Step::Failed {
+            kind: AgentKind::Antigravity,
+            install: false,
+            why: "Signing in took longer than a minute, so Antigravity gave up. Click Sign In to try again.".into(),
+        };
+        h.run_steps(3);
+        h.get_by_label_contains("longer than a minute");
+        h.get_by_label("Sign In");
+        // Its page shows a code to paste back (on Windows, into its window).
+        assert_eq!(AgentKind::Antigravity.pastes_code(), !cfg!(windows));
+        assert!(AgentKind::Claude.pastes_code() && !AgentKind::Codex.pastes_code());
     }
 }

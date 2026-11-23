@@ -41,6 +41,8 @@ const LONGEST_MESSAGE: u64 = 1 << 20;
 pub struct Request {
     pub files: Vec<PathBuf>,
     pub select: Option<usize>,
+    /// `zigzag://` links to open (see `link`).
+    pub links: Vec<String>,
 }
 
 pub enum Start {
@@ -194,6 +196,12 @@ fn answer(
             .flatten()
             .collect(),
         select: msg["select"].as_u64().map(|n| n as usize),
+        links: msg["links"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|l| l.as_str()).map(String::from))
+            .into_iter()
+            .flatten()
+            .collect(),
     };
     if tx.send(request).is_err() {
         return (&conn).write_all(b"closing\n");
@@ -230,7 +238,12 @@ fn hand_over(dir: &Path, request: &Request) -> std::io::Result<()> {
         .iter()
         .map(|f| f.to_string_lossy().into_owned())
         .collect();
-    let msg = serde_json::json!({ "token": token, "files": files, "select": request.select });
+    let msg = serde_json::json!({
+        "token": token,
+        "files": files,
+        "select": request.select,
+        "links": request.links,
+    });
     writeln!(conn, "{msg}")?;
     let mut reply = String::new();
     BufReader::new(conn).read_line(&mut reply)?;
@@ -306,6 +319,7 @@ mod tests {
         let request = Request {
             files: vec![dir.join("a.svg"), dir.join("b ü.svg")],
             select: Some(2),
+            links: vec!["zigzag://open?url=https%3A%2F%2Fzigzag.diy%2Fa.svg".into()],
         };
         assert!(matches!(claim(&dir, &request), Start::HandedOver));
         assert_eq!(arrived(&inbox), vec![request]);
@@ -329,7 +343,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let r = Request {
                         files: vec![dir.join(format!("{k}.svg"))],
-                        select: None,
+                        ..Default::default()
                     };
                     (r.clone(), claim(&dir, &r))
                 })
@@ -378,7 +392,7 @@ mod tests {
         // The second hands its file over, and opens no window.
         let second = Request {
             files: vec![b.clone()],
-            select: None,
+            ..Default::default()
         };
         assert!(matches!(claim(&dir, &second), Start::HandedOver));
 
@@ -396,7 +410,7 @@ mod tests {
         // The first file again: its tab comes forward, no third one.
         let again = Request {
             files: vec![a.clone()],
-            select: None,
+            ..Default::default()
         };
         assert!(matches!(claim(&dir, &again), Start::HandedOver));
         let until = Instant::now() + Duration::from_secs(5);
@@ -415,7 +429,7 @@ mod tests {
         inbox.close();
         let request = Request {
             files: vec![dir.join("late.svg")],
-            select: None,
+            ..Default::default()
         };
         let later = {
             let (dir, request) = (dir.clone(), request.clone());

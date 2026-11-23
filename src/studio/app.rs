@@ -151,6 +151,13 @@ pub struct Studio {
     /// What `review_design` found other settings would come to, for the
     /// design as it stood (document, revision, trims): see `trim_what_ifs`.
     pub(crate) what_ifs: std::cell::RefCell<Option<((u32, u64, usize), Vec<serde_json::Value>)>>,
+    /// The trim settings (over_sewn, connect_mm, blend_mm) the agent turned
+    /// on itself, per document (its recovery number): review_design asks it
+    /// to undo those where their thread shows, and leaves the person's own
+    /// choices (from a card of choices, or the Document panel) alone.
+    pub(crate) agent_set: std::collections::HashMap<u32, std::collections::HashSet<&'static str>>,
+    /// A card of choices is being applied: what it sets is the person's.
+    pub(crate) person_choosing: bool,
     pub names: Vec<String>,
     pub(crate) dirty: bool,
     pub(crate) plan_ms: f64,
@@ -220,6 +227,9 @@ pub struct Studio {
     pub(crate) batching: bool,
     /// Planning on a worker thread, for big designs.
     pub(crate) planner: crate::planner::Planner,
+    /// An MCP call whose edit is made, its answer waiting for the worker's
+    /// plan (see `handle_mcp`).
+    pub(crate) mcp_waiting: Option<WaitingCall>,
     /// When the menu bar's states were last brought up to date (egui time).
     pub(crate) menu_synced: f64,
     /// The stitches, tessellated (see `canvas::draw_design_cached`).
@@ -251,7 +261,6 @@ pub struct Studio {
     pub(crate) dock_ui: crate::dock::DockUi,
     /// The macOS menu bar (None elsewhere, and in tests).
     pub(crate) native_menu: Option<crate::native_menu::NativeMenu>,
-    pub(crate) show_jumps: bool,
     /// The gaps Connect sews across are lit up on the canvas until then
     /// (while its bar is being dragged, and a moment after).
     pub(crate) bridges_peek: Option<Instant>,
@@ -318,6 +327,12 @@ pub struct Studio {
     /// Bring the window to the front again next frame (it may only just
     /// have been restored from the taskbar or Dock).
     pub(crate) focus_again: bool,
+    /// File › Share… (see `share.rs`).
+    pub(crate) share: crate::share::ShareUi,
+    /// Settings › Account: signed in to zigzag.diy (see `account.rs`).
+    pub(crate) account: crate::account::AccountUi,
+    /// Settings that follow you between computers (see `sync.rs`).
+    pub(crate) sync: crate::sync::Sync,
 }
 
 impl Studio {
@@ -343,6 +358,9 @@ impl Studio {
             i.on_arrival(move || ctx.request_repaint());
         }
         s.inbox = inbox;
+        // And so does a `zigzag://` link's download, when it's done.
+        let ctx = cc.egui_ctx.clone();
+        crate::link::on_news(move || ctx.request_repaint());
         // So do files the Mac asks to open (from the Finder).
         let ctx = cc.egui_ctx.clone();
         crate::open_documents::on_arrival(move || ctx.request_repaint());
@@ -370,12 +388,53 @@ impl Studio {
                 Ok("settings") => s.open_settings(Section::Machines),
                 Ok("settings-general") => s.open_settings(Section::General),
                 Ok("settings-agent") => s.open_settings(Section::Agent),
+                Ok("settings-account") => s.open_settings(Section::Account),
+                // Changing the screen name.
+                Ok("settings-account-name") => {
+                    s.open_settings(Section::Account);
+                    s.account.editing = true;
+                }
+                // Signing in, a code on its way.
+                Ok("settings-account-code") => {
+                    s.open_settings(Section::Account);
+                    s.account.step = crate::account::Step::Code("you@example.com".into());
+                }
                 Ok("select") => s.select_index(Some(0)),
                 Ok("issues") => s.open_issues = true,
                 // (A selection box, part way through being dragged out.)
                 Ok("marquee") => s.marquee = Some((P::new(-220.0, -120.0), P::new(60.0, 90.0))),
                 // The windows about ZigZag itself.
                 Ok("about") => s.about = true,
+                // The floating Agent panel with its menu open.
+                Ok("agent-menu") => {
+                    use crate::dock::{PanelId, Place};
+                    s.dock.move_panel(PanelId::Agent, Place::Float, None);
+                    s.dock.reveal(PanelId::Agent);
+                    s.dock_ui.peek_menu = Some(PanelId::Agent);
+                }
+                // File › Share… on the design.
+                Ok("share") => {
+                    s.open_share();
+                    s.share.from_menu = false;
+                }
+                // File › Share…: the popover at the left.
+                Ok("share-menu") => s.open_share(),
+                // Its menus, open.
+                Ok(show @ ("share-who" | "share-license" | "share-downloads" | "share-length")) => {
+                    s.open_share();
+                    s.share.from_menu = false;
+                    s.share.peek = Some(match show {
+                        "share-who" => "who",
+                        "share-license" => "license",
+                        "share-length" => "length",
+                        _ => "downloads",
+                    });
+                }
+                Ok("share-export") => {
+                    s.open_share();
+                    s.share.from_menu = false;
+                    s.share.tab = crate::share::Tab::Export;
+                }
                 Ok("crash") => s.crash = Some(std::path::PathBuf::from("crash.txt")),
                 // Simplify Design, part way: half the threads, no small details.
                 Ok(
@@ -419,6 +478,34 @@ impl Studio {
                     }
                     .into();
                     s.agent.focus = true;
+                }
+                // Messages written while it works, waiting for its turn to end.
+                Ok("agent-queued") => {
+                    use crate::agent::Entry;
+                    s.dock.reveal(crate::dock::PanelId::Agent);
+                    s.agent.log = vec![
+                        Entry::You("make the sun satin".into()),
+                        Entry::Said("Changing the sun to satin and checking the trims.".into()),
+                    ];
+                    s.agent.queued = vec![
+                        "can you make the surrounding box a little less wide".into(),
+                        "and use a darker blue for the ring".into(),
+                        "then check it for problems before I sew, and if anything\nlooks off, tell me what you'd change".into(),
+                        "one more thing".into(),
+                    ];
+                    s.agent.start_fake_run();
+                }
+                // The panel put away: the Agent button's spinner while it
+                // works, or its dot for a reply not read yet.
+                Ok(away @ ("agent-away-working" | "agent-away-unread")) => {
+                    if s.dock.visible(crate::dock::PanelId::Agent) {
+                        s.dock.toggle(crate::dock::PanelId::Agent);
+                    }
+                    if away.ends_with("working") {
+                        s.agent.start_fake_run();
+                    } else {
+                        s.agent.unread = true;
+                    }
                 }
                 // One change on offer: a question and two buttons.
                 Ok("agent-choice") => {
@@ -589,6 +676,8 @@ impl Studio {
             route_drag: None,
             route_active: None,
             what_ifs: Default::default(),
+            agent_set: Default::default(),
+            person_choosing: false,
             names: Vec::new(),
             dirty: true,
             plan_ms: 0.0,
@@ -630,6 +719,7 @@ impl Studio {
             plan_cache: Default::default(),
             batching: false,
             planner: Default::default(),
+            mcp_waiting: None,
             menu_synced: f64::NEG_INFINITY,
             stitch_mesh: Default::default(),
             gpu: None,
@@ -642,7 +732,6 @@ impl Studio {
             dock_saved: Default::default(),
             dock_ui: Default::default(),
             native_menu: None,
-            show_jumps: true,
             bridges_peek: None,
             hoop_custom: false,
             renaming: None,
@@ -676,6 +765,9 @@ impl Studio {
             density: Default::default(),
             inbox: None,
             focus_again: false,
+            share: Default::default(),
+            account: Default::default(),
+            sync: Default::default(),
         };
         if let Some(p) = path {
             s.load(&p);
@@ -761,6 +853,11 @@ impl Studio {
         if self.agent.log.is_empty() && !self.agent.running() {
             self.agent.forget_document();
         }
+    }
+
+    /// The plan shown is of the document as it is now.
+    pub(crate) fn plan_is_current(&self) -> bool {
+        !self.dirty && !self.planner.pending && !self.plan_cut
     }
 
     pub fn replan(&mut self) {
@@ -1380,7 +1477,7 @@ impl eframe::App for Studio {
         if let Some(c) = &mut self.capture {
             c.frame(ctx);
         }
-        let calls_done = self.handle_mcp();
+        let calls_done = self.handle_mcp(Some(ctx));
         let handed_done = self.take_handed_over(ctx);
         if !(calls_done && handed_done) {
             // Calls (or files from another launch) may be waiting on a
@@ -1451,25 +1548,96 @@ impl eframe::App for Studio {
     }
 }
 
+/// An MCP call made, its answer waiting for the worker's plan (see
+/// [`Studio::handle_mcp`]): the answer so far, the design problems before
+/// it, and the document it was made in.
+pub(crate) struct WaitingCall {
+    call: crate::mcp::Call,
+    at: Instant,
+    result: crate::mcp::ToolResult,
+    before: Vec<(Option<String>, String)>,
+    tab: usize,
+    rec: u32,
+}
+
 impl Studio {
     /// Answer queued MCP tool calls (on the UI thread, between frames).
     /// False when they have to wait.
-    pub fn handle_mcp(&mut self) -> bool {
+    ///
+    /// With `ctx` (the app; tests may pass none), a big design's edit
+    /// asked for a short answer is made here and its stitches planned on
+    /// the worker, as the person's own edits are: the answer goes once the
+    /// plan is back (it says what the edit broke), and the next call waits
+    /// for it, so each still starts from the stitches as they are. The
+    /// window keeps drawing meanwhile, where planning here would freeze it.
+    pub fn handle_mcp(&mut self, ctx: Option<&egui::Context>) -> bool {
         if self.mcp.is_none() {
             return true;
+        }
+        if self.mcp_waiting.is_some() || self.planner.pending {
+            // (The worker wakes the window when it's done.)
+            self.take_plan();
+            if self.planner.pending {
+                return true;
+            }
+            if let Some(w) = self.mcp_waiting.take() {
+                // The plan it waited for never came (set aside for a look
+                // at another tab, or the worker failed): planned here, so
+                // the answer isn't about the stitches from before the edit.
+                if self.dirty && (self.tabs.active, self.session.rec) == (w.tab, w.rec) {
+                    self.replan();
+                }
+                self.answer_waiting(w);
+            }
         }
         if self.mid_gesture() {
             return false;
         }
-        let calls: Vec<crate::mcp::Call> = match &self.mcp {
-            Some(server) => server.rx.try_iter().collect(),
-            None => return true,
-        };
-        for call in calls {
+        // One at a time: a call that leaves its answer waiting on the
+        // worker holds the rest back, in order.
+        while let Some(call) = self.mcp.as_ref().and_then(|s| s.rx.try_recv().ok()) {
             let at = Instant::now();
             // Its client gave up waiting (a dialog was open): it was told
             // the call failed, so running it now would surprise it.
             if at > call.deadline {
+                continue;
+            }
+            if let Some(ctx) = ctx
+                && self.plans_later(&call)
+            {
+                let before = self.problems();
+                let (tab, rec) = (self.tabs.active, self.session.rec);
+                self.batching = true;
+                let result = self.answer_call(&call.name, &call.args, call.panel);
+                self.batching = false;
+                if self.undo.len() > UNDO_STEPS {
+                    let extra = self.undo.len() - UNDO_STEPS;
+                    self.undo.drain(..extra);
+                }
+                let w = WaitingCall {
+                    call,
+                    at,
+                    result,
+                    before,
+                    tab,
+                    rec,
+                };
+                if w.result.is_error || !(self.dirty || self.dirty_needs_plan()) {
+                    // (A call that changed something and then failed: the
+                    // next starts from the stitches as they are.)
+                    if self.dirty || self.dirty_needs_plan() {
+                        self.replan();
+                    }
+                    self.answer_waiting(w);
+                    continue;
+                }
+                self.plan_changes(ctx);
+                if self.planner.pending {
+                    self.mcp_waiting = Some(w);
+                    return true;
+                }
+                // (Planned here after all.)
+                self.answer_waiting(w);
                 continue;
             }
             let result = self.answer_call(&call.name, &call.args, call.panel);
@@ -1480,11 +1648,56 @@ impl Studio {
         true
     }
 
+    /// Whether `call` is one [`handle_mcp`] answers once the worker has
+    /// planned what it changed: a short answer asked for, on a design big
+    /// enough to plan on the worker, in the document in front, by a tool
+    /// that edits without reading the stitches (or switching documents).
+    fn plans_later(&self, call: &crate::mcp::Call) -> bool {
+        let tool = call.name.as_str();
+        self.planner.slow
+            && call.args.get("terse").and_then(serde_json::Value::as_bool) == Some(true)
+            && !crate::tools::reads_stitches(tool)
+            && !matches!(tool, "batch" | "trace_image" | "undo" | "redo")
+            && !changes_tabs(tool, &call.args)
+            && self
+                .agent_tab()
+                .filter(|_| call.panel)
+                .is_none_or(|chat| {
+                    self.agent.follow.and_then(|rec| self.tab_of(rec)).unwrap_or(chat)
+                        == self.tabs.active
+                })
+    }
+
+    /// Send a waiting call's answer, with the design problems its edit
+    /// made (unless the document in front changed while it waited).
+    fn answer_waiting(&mut self, w: WaitingCall) {
+        let mut result = w.result;
+        if !result.is_error
+            && (self.tabs.active, self.session.rec) == (w.tab, w.rec)
+            && let Some(crate::mcp::Content::Text(text)) = result.content.first_mut()
+            && let Ok(mut v @ serde_json::Value::Object(_)) =
+                serde_json::from_str::<serde_json::Value>(text)
+        {
+            if self.planner.failed {
+                // (No plan of the edit to check: said, not passed off as
+                // nothing new being wrong.)
+                v["plan_failed"] = "The stitches couldn't be planned after this edit, so its problems aren't known. Undo it, or change the object and try again.".into();
+            } else {
+                v["new_problems"] = serde_json::Value::Array(self.new_problems(&w.before));
+            }
+            *text = v.to_string();
+        }
+        let call = w.call;
+        self.mcp_ui.note(&call.name, &call.args, w.at, &result);
+        self.log_call(&call.name, &call.args, w.at, &result);
+        let _ = call.reply.send(result);
+    }
+
     /// A dialog previews into the document, or something is dragged: an
     /// agent's call or another launch's file waits (the drag works from the
     /// document as it was when it began, and would drop an edit made under
     /// it).
-    fn mid_gesture(&self) -> bool {
+    pub(crate) fn mid_gesture(&self) -> bool {
         self.previewing()
             || self.file_dialog_open()
             || self.drag.is_some()
@@ -1500,12 +1713,10 @@ impl Studio {
         if std::mem::take(&mut self.focus_again) {
             ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
-        if self.inbox.is_none() && !crate::open_documents::pending() {
-            return true;
-        }
         if self.mid_gesture() {
             return false;
         }
+        self.take_links(ctx);
         let mut requests = match &self.inbox {
             Some(i) => i.take(),
             None => Vec::new(),
@@ -1515,6 +1726,7 @@ impl Studio {
             requests.push(crate::instance::Request {
                 files: finder,
                 select: None,
+                links: Vec::new(),
             });
         }
         if requests.is_empty() {
@@ -1530,8 +1742,34 @@ impl Studio {
         true
     }
 
+    /// What `zigzag://` links brought (see `link`): a downloaded design
+    /// opens in a tab, in front, like a file opened with ZigZag.
+    pub(crate) fn take_links(&mut self, ctx: &egui::Context) {
+        use crate::link::Event;
+        let mut opened = false;
+        for e in crate::link::take() {
+            match e {
+                Event::Started(name) => self.status = format!("Downloading {name}…"),
+                Event::Failed(why) => self.status = why,
+                Event::Ready(path) => {
+                    self.load(&path);
+                    opened = true;
+                }
+            }
+        }
+        if opened {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.focus_again = true;
+            ctx.request_repaint();
+        }
+    }
+
     /// Another launch's files, as if they'd been opened here.
     pub(crate) fn open_handed_over(&mut self, r: &crate::instance::Request) {
+        for l in &r.links {
+            crate::link::open(l);
+        }
         for f in &r.files {
             self.load(f);
         }
@@ -1545,6 +1783,9 @@ impl Studio {
     /// One UI frame. Separate from `eframe::App::ui` so tests can drive it with plain egui.
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // Settings that follow you, while signed in (see `sync`).
+        self.take_account_news();
+        self.sync_tick(&ctx);
         crate::units::set_current(self.dock.units);
         crate::profile::begin();
         self.sync_ui_scale(&ctx);
@@ -1632,7 +1873,7 @@ impl Studio {
             )
             .show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("tools")
-            .exact_size(44.0)
+            .exact_size(crate::chrome::TOOLS_W)
             .resizable(false)
             .frame(egui::Frame::new().fill(pal.dock))
             .show(ui, |ui| self.tool_strip(ui));
@@ -1735,6 +1976,7 @@ impl Studio {
         self.machine_window(&ctx);
         self.cleanup_window(&ctx);
         self.swatch_window(&ctx);
+        self.share_window(&ctx);
         self.shape_window(&ctx);
         self.rotate_window(&ctx);
         self.trace_window(&ctx);
@@ -2423,9 +2665,27 @@ impl Studio {
         }
     }
 
+    /// Put the floating Agent panel away (its menu's Auto-Hide):
+    /// when the canvas is clicked or another tool picked.
+    pub(crate) fn auto_hide_agent(&mut self) {
+        use crate::dock::{PanelId, Place};
+        let p = PanelId::Agent;
+        if self.dock.agent_auto_hide
+            && self.dock.place_of(p) == Place::Float
+            && self.dock.visible(p)
+        {
+            self.dock.toggle(p);
+        }
+    }
+
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = resp.rect;
+        // Working on the canvas puts a floating Agent panel away, if that's
+        // asked for (not while pinning notes for it).
+        if !self.review.annotating && (resp.clicked() || resp.drag_started()) {
+            self.auto_hide_agent();
+        }
         // Pinning notes: clicks and drags are for that, not the tools
         // (this sits over the canvas, so the tools' response sees none).
         let notes = self.review.annotating.then(|| {
@@ -2540,7 +2800,7 @@ impl Studio {
             let mods = crate::layout::DragMods {
                 shift,
                 alt,
-                snap: self.view_tools.smart_guides,
+                snap: self.prefs.smart_guides,
                 tol,
             };
             self.direct_canvas(&ctx, &resp, rect, tol, mods);
@@ -2549,7 +2809,7 @@ impl Studio {
             let mods = crate::layout::DragMods {
                 shift,
                 alt,
-                snap: self.view_tools.smart_guides,
+                snap: self.prefs.smart_guides,
                 tol,
             };
             self.anchor_canvas(&ctx, &resp, rect, tol, mods);
@@ -2646,7 +2906,7 @@ impl Studio {
                 let mods = crate::layout::DragMods {
                     shift,
                     alt,
-                    snap: self.view_tools.smart_guides,
+                    snap: self.prefs.smart_guides,
                     tol,
                 };
                 self.update_drag(self.view.to_design(rect, pos), mods);
@@ -2802,7 +3062,7 @@ impl Studio {
             crate::view_tools::draw_grid(&painter, rect, &self.view);
         }
         let opts = DrawOptions {
-            show_jumps: self.show_jumps,
+            show_jumps: self.prefs.show_jumps,
             limit: self.player.unwrap_or(usize::MAX),
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,

@@ -289,7 +289,7 @@ impl Studio {
                         say(self, format!("Already talking to {}.", k.name()));
                     }
                     Some(k) => self.agent.set_kind(k),
-                    None => say(self, "Type /agent codex or /agent claude.".into()),
+                    None => say(self, "Type /agent codex, /agent claude or /agent antigravity.".into()),
                 }
             }
             "history" if arg.is_empty() => {
@@ -536,6 +536,7 @@ mod tests {
         s.agent.kind = AgentKind::Claude;
         s.agent.found = [
             Some(Some(PathBuf::from("/usr/local/bin/claude"))),
+            Some(None),
             Some(None),
         ];
         s

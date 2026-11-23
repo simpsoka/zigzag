@@ -6,7 +6,9 @@
 //! [`PlanCache`]: the canvas keeps showing the last plan (the status bar
 //! says it's updating) and swaps the new one in when it's done. Only the
 //! latest request matters: the worker skips any it's already behind on.
-//! MCP tools still plan synchronously, since agents read the result.
+//! An agent's edit asked for a short answer is planned there too, its
+//! answer sent once the plan is back (see `Studio::handle_mcp`); tools
+//! that read the stitches plan here, since the agent reads the result.
 
 use crate::app::Studio;
 use eframe::egui;
@@ -53,6 +55,9 @@ pub struct Planner {
     pub pending: bool,
     /// The last plan was slow: plan in the background from now on.
     pub slow: bool,
+    /// The last plan asked of the worker failed: what's shown (and
+    /// checked) is from before the edit it was for.
+    pub failed: bool,
     /// In tests: go by how long plans take, as the app does. Otherwise a
     /// test's plans are made here, where it reads them straight away,
     /// unless it sets `slow` itself: a debug build on a busy machine is
@@ -126,6 +131,15 @@ impl Planner {
         self.slow = true;
     }
 
+    /// A document came to the front: whether its plans are slow.
+    pub fn entered(&mut self, slow: bool) {
+        #[cfg(test)]
+        if !self.timed {
+            return;
+        }
+        self.slow = slow;
+    }
+
     /// A synchronous plan was just made: anything still out is stale.
     pub fn superseded(&mut self) {
         self.generation += 1;
@@ -195,6 +209,7 @@ impl Studio {
             return;
         };
         self.planner.pending = false;
+        self.planner.failed = d.result.is_err();
         let (design, issues) = match d.result {
             Ok(x) => x,
             Err(e) => {

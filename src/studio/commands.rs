@@ -25,6 +25,8 @@ pub enum Action {
     Save,
     SaveAs,
     Export(&'static str),
+    /// File › Share…: a page for the design at zigzag.diy.
+    Share,
     SendToSkitch,
     Undo,
     Redo,
@@ -239,6 +241,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 Item(Action::Save, "Save", cmd(Key::S)),
                 Item(Action::SaveAs, "Save As…", cmd_shift(Key::S)),
                 Sep,
+                Item(Action::Share, "Share…", None),
                 Sub("Export", export),
                 Item(Action::SendToSkitch, "Send to Skitch…", None),
             ]
@@ -647,6 +650,7 @@ impl Studio {
             | Action::CleanUp
             | Action::SimplifyDesign => !self.doc.shapes.is_empty(),
             Action::Export(_) | Action::PlayPause => has_design,
+            Action::Share => !self.doc.shapes.is_empty(),
             // (Only for a machine ZigZag sends to.)
             Action::SendToSkitch => has_design && self.sends_direct(),
             Action::FlipH
@@ -684,7 +688,7 @@ impl Studio {
     pub fn action_checked(&self, a: Action) -> Option<bool> {
         Some(match a {
             Action::ToggleGrid => self.view_tools.grid,
-            Action::ToggleSmartGuides => self.view_tools.smart_guides,
+            Action::ToggleSmartGuides => self.prefs.smart_guides,
             Action::Units(u) => self.dock.units == u,
             Action::ChangeCase(c) => {
                 let i = self.sel_index()?;
@@ -700,7 +704,7 @@ impl Studio {
                 self.view_tools.stitch_view == crate::canvas::StitchView::Lines
             }
             Action::TogglePoints => self.view_tools.points,
-            Action::ToggleJumps => self.show_jumps,
+            Action::ToggleJumps => self.prefs.show_jumps,
             Action::ToggleDensity => self.view_tools.density,
             Action::ToggleOrder => self.view_tools.order_labels,
             Action::Panel(p) => self.dock.visible(p),
@@ -771,6 +775,7 @@ impl Studio {
             }
             Action::SaveAs => self.save_as_dialog(),
             Action::Export(ext) => self.export_dialog(ext),
+            Action::Share => self.open_share(),
             Action::SendToSkitch => self.send_action(),
             Action::Undo => self.pending_history = Some(History::Undo),
             Action::Redo => self.pending_history = Some(History::Redo),
@@ -819,7 +824,8 @@ impl Studio {
             Action::ToggleGrid => self.view_tools.grid = !self.view_tools.grid,
             Action::Units(u) => self.set_units(u),
             Action::ToggleSmartGuides => {
-                self.view_tools.smart_guides = !self.view_tools.smart_guides
+                self.prefs.smart_guides = !self.prefs.smart_guides;
+                self.prefs.save();
             }
             Action::TransformAgain => self.transform_again(),
             Action::RotateDialog => self.open_rotate_dialog(None),
@@ -871,7 +877,10 @@ impl Studio {
                 };
             }
             Action::TogglePoints => self.view_tools.points = !self.view_tools.points,
-            Action::ToggleJumps => self.show_jumps = !self.show_jumps,
+            Action::ToggleJumps => {
+                self.prefs.show_jumps = !self.prefs.show_jumps;
+                self.prefs.save();
+            }
             Action::Settings => self.open_settings(self.settings_ui.section),
             Action::ReportIssue => crate::sew::open_url(&issue_url()),
             Action::GitHub => crate::sew::open_url(crate::about::GITHUB_URL),
@@ -926,6 +935,9 @@ impl Studio {
     }
 
     pub fn set_tool(&mut self, t: Tool) {
+        if t != self.tool {
+            self.auto_hide_agent();
+        }
         if self.tool == Tool::Text && t != Tool::Text {
             self.finish_typing();
         }

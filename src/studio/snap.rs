@@ -468,7 +468,7 @@ impl Studio {
             (true, Some(a)) => bezier::constrain_45(a, p),
             _ => p,
         };
-        if !self.view_tools.smart_guides {
+        if !self.prefs.smart_guides {
             return plain;
         }
         let Some(t) = &self.snap.targets else {
@@ -492,7 +492,7 @@ impl Studio {
         if self.view_tools.grid {
             return self.snap_to_grid(p);
         }
-        if !self.view_tools.smart_guides {
+        if !self.prefs.smart_guides {
             return p;
         }
         let Some(t) = &self.snap.targets else {

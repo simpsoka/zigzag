@@ -18,6 +18,14 @@ through.
 Bluetooth to the Brother Skitch (PP1) uses Windows Runtime Bluetooth LE and
 needs Windows 10 version 1709 or later.
 
+Open from zigzag.diy
+--------------------
+The Open button on a zigzag.diy share page opens the design in ZigZag. Each
+time ZigZag.exe starts it registers the zigzag:// link for your Windows
+account (HKCU\Software\Classes\zigzag), pointing at itself, so start it once
+from where you keep it (again after moving the folder). Designs it opens
+from links are saved in Downloads\ZigZag.
+
 Put it on the PATH
 ------------------
 Copy or move this folder somewhere permanent (for example C:\Program Files\
