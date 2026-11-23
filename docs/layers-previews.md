@@ -5,21 +5,24 @@ combined preview for each actual SVG group. Observed in ZigZag code: the shared
 `src/studio/shape_thumbnail.rs` painter projects `Shape.geometry`, using thread
 colors and one aspect-preserving transform over member union bounds. Group
 previews omit hidden members; individual hidden objects retain their preview.
-Fill rings are outlined rather than filled, preserving visible holes without
-introducing a tessellator. Open strokes remain open; closed paths remain closed.
+Fill rings render solid original thread colors using bounded interior scanlines
+with SVG EvenOdd and NonZero fill rules. Concave contours, holes and nested
+islands are preserved without introducing a tessellator. Open strokes stay open.
 Empty paths paint nothing, points paint dots, and degenerate bounds center safely.
 Coordinates are normalized before subtraction to avoid overflow.
 
 The 22 px painter has no separate interaction area. Existing row selection,
 collapse, eye/lock controls, counts, warnings, swatches, labels and drag/reorder
 remain in place. `show_rows` still virtualizes Layers, offscreen previews are
-skipped, and each preview emits at most 2,048 sampled points (128 per path).
+skipped, and each preview samples at most 2,048 outline points (128 per path).
+Interior fill sampling has independent fixed budgets (22 cells across, 16,384
+source vertices and 2,048 spans); extremely dense fills fall back to outlines.
 Bounds use all finite source points. Extremely dense composites can omit paths
 once that drawing budget is exhausted; outline sampling can simplify fine detail.
 
 Out of scope: Threads previews, file/schema changes, planning/export changes,
 external assets and new dependencies. No backward-compatibility migration.
-Threads preview work must wait for reviewer validation of this change.
+Follow-on Threads integration is separate and does not belong to this PR.
 
 ## Acceptance and validation
 
@@ -30,18 +33,21 @@ Threads preview work must wait for reviewer validation of this change.
   the composite are painted; object selection, group collapse and group drag
   still work. Existing object/group drag/reorder tests run in the full suite.
 - `CARGO_BUILD_JOBS=2 cargo test --offline --lib` on host:
-  **330 passed, 0 failed, 7 ignored**.
+  **324 passed, 0 failed, 7 ignored** (independent upstream base).
 - `CARGO_BUILD_JOBS=2 cargo test --offline --features gui --bin zigzag-studio`
-  on host: **477 passed, 0 failed, 16 ignored**.
+  on host, with one unrelated upstream Help-label baseline test skipped:
+  **469 passed, 0 failed, 16 ignored, 1 filtered**. Without the skip,
+  the GUI suite had 469 passes and 1 baseline-only failure; the
+  disambiguation is already part of upstream PR #38.
 - `CARGO_BUILD_JOBS=2 cargo build --offline --features gui --bin zigzag-studio --bin zigzag`:
   passed.
 - Targeted Rust 2024 formatting applied; unrelated baseline formatting preserved.
   `cargo fmt --all -- --check` reports existing formatting differences (including
   `src/formats/charts.rs` and existing Studio code). `git diff --check`: passed.
 
-Observed in application: real Studio captures of an author-created multielement
-SVG show coral/blue petals together in their actual group, separate member
-previews, an open green stem and a gold ring with a visible hole. Dark/light
+Observed in the full downstream Studio build: real captures of an author-created multielement
+SVG show multiple colored shapes in a group, individually filled previews, an
+open green stem and a gold ring with its hole preserved. Dark/light
 screenshots are `/tmp/zigzag-thumbnail-captures/still-001.png` and `still-002.png`;
 fixture is `/tmp/zigzag-thumbnail-fixture.svg`. Capture command (repeat with
 `ZIGZAG_THEME=light`):
@@ -55,3 +61,6 @@ target/debug/zigzag-studio /tmp/zigzag-thumbnail-fixture.svg
 Real captures use the default wider dock; 260 px layout and interactions are
 covered by the GUI harness. Initial sandbox GUI runs could not run local-server
 and process tests; the complete host run above passed.
+
+This independent upstream branch combines the original Layers preview commit and
+the later fill-rendering fix, avoiding an outline-only intermediate feature.
