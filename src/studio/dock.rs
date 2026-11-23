@@ -3783,16 +3783,24 @@ impl Studio {
         0
     }
 
-    /// The threads in sewing order: one row per color block, a stop where
+    /// Objects in execution order under each consecutive thread block, a stop where
     /// the same thread comes twice running. Click a row for its objects;
     /// click its swatch to change that block's thread.
     pub(crate) fn sequence_list(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
-        let p = pal_ui(ui);
         if self.design.blocks.is_empty() {
             caption(ui, "Nothing to sew yet.");
             return;
         }
+        egui::ScrollArea::vertical()
+            .id_salt("sequence-objects")
+            .max_height(theme::ROW_H * 10.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.sequence_rows(ui));
+    }
+
+    fn sequence_rows(&mut self, ui: &mut egui::Ui) {
+        let p = pal_ui(ui);
         let selected = self.sel_indices();
         let mut pick = None;
         let mut picker = None;
@@ -3886,7 +3894,41 @@ impl Studio {
                 .on_hover_text(format!("Sews: {}", names.join(", ")))
                 .clicked()
             {
-                pick = Some(objects);
+                pick = Some(objects.clone());
+            }
+            // block_shapes is the planner's execution order, not the Layers stack.
+            let mut seen = std::collections::HashSet::new();
+            for i in objects.into_iter().filter(|i| seen.insert(*i)) {
+                let Some(shape) = self.doc.shapes.get_mut(i) else {
+                    continue;
+                };
+                let name = self
+                    .names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Object {}", shape.uid));
+                ui.push_id(("sequence-object", k, shape.uid), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        let response = ui.selectable_label(selected.contains(&i), &name);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::Role::Button,
+                                true,
+                                selected.contains(&i),
+                                format!("Select sewn object {name}"),
+                            )
+                        });
+                        if response.clicked() {
+                            pick = Some(vec![i]);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(28.0);
+                        start_command_ui(ui, &mut shape.params);
+                        end_command_ui(ui, &mut shape.params);
+                    });
+                });
             }
         }
         if let Some(v) = pick {
@@ -4202,11 +4244,147 @@ fn eye_and_lock(
     }
 }
 
+// Shared choices edit only after a deliberate selection, retaining legacy false tokens
+// on display. A click on Auto also clears an explicit false override.
+fn start_command_ui(ui: &mut egui::Ui, params: &mut zigzag::params::Params) {
+    use zigzag::params::StartCommand::*;
+    let current = params.start_command();
+    egui::ComboBox::from_id_salt("start-command")
+        .selected_text(format!(
+            "Start: {}",
+            if current == Trim { "Trim" } else { "Auto" }
+        ))
+        .width(88.0)
+        .truncate()
+        .show_ui(ui, |ui| {
+            for (value, label) in [(Automatic, "Auto"), (Trim, "Trim")] {
+                if ui.selectable_label(current == value, label).clicked() {
+                    params.set_start_command(value);
+                }
+            }
+        })
+        .response
+        .on_hover_text("Start command: cut before this object, or Auto to let routing decide");
+}
+
+fn end_command_ui(ui: &mut egui::Ui, params: &mut zigzag::params::Params) {
+    use zigzag::params::EndCommand::*;
+    let choices = [
+        (Automatic, "Auto"),
+        (Trim, "Trim"),
+        (Stop, "Stop"),
+        (TrimAndStop, "Trim + Stop"),
+    ];
+    let current = params.end_command();
+    let label = choices.iter().find(|(v, _)| *v == current).unwrap().1;
+    egui::ComboBox::from_id_salt("end-command")
+        .selected_text(format!("End: {label}"))
+        .width(108.0)
+        .truncate()
+        .show_ui(ui, |ui| {
+            for (value, label) in choices {
+                if ui.selectable_label(current == value, label).clicked() {
+                    params.set_end_command(value);
+                }
+            }
+        })
+        .response
+        .on_hover_text("End command: cut and/or pause after this object; Auto clears overrides. Stop exports as a same-thread block change; machine behavior depends on format.");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn sequence_boundary_commands_follow_sewn_objects_and_undo() {
+        use zigzag::params::{EndCommand, StartCommand};
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="20mm" viewBox="0 0 80 20">
+            <path id="first_run" d="M0 0 L10 0" stroke="#aa0000" fill="none"/>
+            <path id="second_run" d="M20 0 L30 0" stroke="#00aa00" fill="none"/>
+            <path id="third_run" d="M40 0 L50 0" stroke="#aa0000" fill="none"/>
+            <path id="omitted_skip" d="M60 0 L70 0" stroke="#aa0000" fill="none"/>
+        </svg>"##;
+        let doc = zigzag::document::Document::from_svg(svg, "sequence", None).unwrap();
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 1000.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(None, None),
+            );
+        let s = h.state_mut();
+        s.set_document(doc);
+        for panel in [PanelId::Objects, PanelId::Stitch] {
+            if s.dock.visible(panel) {
+                s.dock.toggle(panel);
+            }
+        }
+        if !s.dock.visible(PanelId::Threads) {
+            s.dock.toggle(PanelId::Threads);
+        }
+        s.dock.move_panel(PanelId::Threads, Place::Left, None);
+        s.view_tools.thread_order = true;
+        h.run_steps(5);
+        assert_eq!(
+            h.state().design.block_shapes,
+            vec![vec![0], vec![1], vec![2]]
+        );
+        let first = h.get_by_label("Select sewn object first").rect();
+        let second = h.get_by_label("Select sewn object second").rect();
+        let third = h.get_by_label("Select sewn object third").rect();
+        assert!(first.top() < second.top() && second.top() < third.top());
+        assert!(h.query_by_label("Select sewn object omitted").is_none());
+        let undo = h.state().undo.len();
+        h.get_by_label("Select sewn object second").click();
+        h.run_steps(3);
+        assert_eq!(h.state().sel_indices(), vec![1]);
+        assert_eq!(
+            h.state().undo.len(),
+            undo,
+            "selection isn't a document edit"
+        );
+        // Each object has its own entry and exit choice, keyed by shape UID.
+        h.query_all_by_label_contains("Start command:")
+            .nth(1)
+            .unwrap()
+            .click();
+        h.run_steps(2);
+        h.get_by_label("Trim").click();
+        h.run_steps(4);
+        assert_eq!(
+            h.state().doc.shapes[1].params.start_command(),
+            StartCommand::Trim
+        );
+        assert_eq!(h.state().undo.len(), undo + 1);
+        h.query_all_by_label_contains("End command:")
+            .nth(1)
+            .unwrap()
+            .click();
+        h.run_steps(2);
+        h.get_by_label("Trim + Stop").click();
+        h.run_steps(4);
+        assert_eq!(
+            h.state().doc.shapes[1].params.end_command(),
+            EndCommand::TrimAndStop
+        );
+        assert_eq!(h.state().undo.len(), undo + 2);
+        assert!(
+            !h.state_mut()
+                .run_tool("undo", &serde_json::json!({}))
+                .is_error
+        );
+        h.run_steps(3);
+        assert_eq!(
+            h.state().doc.shapes[1].params.end_command(),
+            EndCommand::Automatic
+        );
+        assert_eq!(
+            h.state().doc.shapes[1].params.start_command(),
+            StartCommand::Trim
+        );
+    }
 
     fn dirs_with(os: Os, vars: &[(&str, &str)]) -> Option<(PathBuf, Vec<PathBuf>)> {
         let vars: Vec<(String, String)> = vars
