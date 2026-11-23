@@ -340,7 +340,49 @@ pub mod defaults {
     pub const RIPPLE_SPACING: f64 = 2.5;
 }
 
+/// Supported interventions at an object's entry. Auto leaves routing to the planner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartCommand {
+    Automatic,
+    Trim,
+}
+
+/// Supported interventions at an object's exit, independent of its geometric marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndCommand {
+    Automatic,
+    Trim,
+    Stop,
+    TrimAndStop,
+}
+
 impl Params {
+    pub fn start_command(&self) -> StartCommand {
+        if self.trim_before == Some(true) {
+            StartCommand::Trim
+        } else {
+            StartCommand::Automatic
+        }
+    }
+
+    pub fn set_start_command(&mut self, command: StartCommand) {
+        self.trim_before = (command == StartCommand::Trim).then_some(true);
+    }
+
+    pub fn end_command(&self) -> EndCommand {
+        match (self.trim == Some(true), self.stop == Some(true)) {
+            (false, false) => EndCommand::Automatic,
+            (true, false) => EndCommand::Trim,
+            (false, true) => EndCommand::Stop,
+            (true, true) => EndCommand::TrimAndStop,
+        }
+    }
+
+    pub fn set_end_command(&mut self, command: EndCommand) {
+        self.trim = matches!(command, EndCommand::Trim | EndCommand::TrimAndStop).then_some(true);
+        self.stop = matches!(command, EndCommand::Stop | EndCommand::TrimAndStop).then_some(true);
+    }
+
     /// Hidden: not shown, not sewn.
     pub fn hidden(&self) -> bool {
         self.hide == Some(true)
@@ -690,11 +732,15 @@ impl Params {
         if let Some(on) = self.trim_before {
             t.push(format!("trim_before={}", u8::from(on)));
         }
-        if self.trim == Some(true) {
-            t.push("trim".into());
+        match self.trim {
+            Some(true) => t.push("trim".into()),
+            Some(false) => t.push("trim=0".into()),
+            None => {}
         }
-        if self.stop == Some(true) {
-            t.push("stop".into());
+        match self.stop {
+            Some(true) => t.push("stop".into()),
+            Some(false) => t.push("stop=0".into()),
+            None => {}
         }
         if self.hide == Some(true) {
             t.push("hide=1".into());
@@ -881,6 +927,64 @@ pub fn decode_illustrator_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn boundary_commands_round_trip_svg_after_reordering() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20">
+            <path id="first_run_trim_before=0_trim=1_stop=1" d="M0 0 L10 0" stroke="#aa0000" fill="none"/>
+            <path id="second_run" d="M20 0 L30 0" stroke="#aa0000" fill="none"/>
+        </svg>"##;
+        let mut doc = crate::document::Document::from_svg(svg, "commands", None).unwrap();
+        assert_eq!(doc.shapes[0].params.end_command(), EndCommand::TrimAndStop);
+        doc.shapes[1].params.set_start_command(StartCommand::Trim);
+        doc.shapes.swap(0, 1);
+        let back =
+            crate::document::Document::from_svg(&doc.to_svg().unwrap(), "commands", None).unwrap();
+        assert_eq!(back.shapes[0].params.start_command(), StartCommand::Trim);
+        assert_eq!(back.shapes[1].params.end_command(), EndCommand::TrimAndStop);
+        assert_eq!(back.shapes[1].params.trim_before, Some(false));
+    }
+
+    #[test]
+    fn boundary_commands_preserve_legacy_combinations_and_tokens() {
+        for before in [None, Some(false), Some(true)] {
+            for trim in [None, Some(false), Some(true)] {
+                for stop in [None, Some(false), Some(true)] {
+                    let p = Params {
+                        trim_before: before,
+                        trim,
+                        stop,
+                        start: Some(0.25),
+                        end: Some(0.75),
+                        ..Params::default()
+                    };
+                    let back = Params::parse(&p.tokens().join("_"));
+                    assert_eq!(back, p);
+                    assert_eq!(
+                        back.start_command() == StartCommand::Trim,
+                        before == Some(true)
+                    );
+                    let mut edited = p.clone();
+                    edited.set_start_command(p.start_command());
+                    edited.set_end_command(p.end_command());
+                    assert_eq!(edited.trim_before == Some(true), before == Some(true));
+                    assert_eq!(edited.trim == Some(true), trim == Some(true));
+                    assert_eq!(edited.stop == Some(true), stop == Some(true));
+                    assert_eq!((edited.start, edited.end), (p.start, p.end));
+                    edited.set_start_command(StartCommand::Automatic);
+                    edited.set_end_command(EndCommand::Automatic);
+                    assert_eq!(
+                        (edited.trim_before, edited.trim, edited.stop),
+                        (None, None, None)
+                    );
+                }
+            }
+        }
+        let mut p = Params::default();
+        p.set_end_command(EndCommand::TrimAndStop);
+        assert_eq!(p.end_command(), EndCommand::TrimAndStop);
+        assert_eq!((p.trim, p.stop), (Some(true), Some(true)));
+    }
+
     #[test]
     fn trim_before_tokens_and_inheritance() {
         for on in [true, false] {
