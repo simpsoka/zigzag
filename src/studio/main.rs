@@ -54,6 +54,7 @@ mod rotate;
 mod session;
 mod settings;
 mod sew;
+mod shape_thumbnail;
 mod shapes;
 mod share;
 mod simplify;

@@ -2282,23 +2282,17 @@ impl Studio {
                                 },
                                 fg2,
                             );
-                            // A folder-ish stack of two squares.
-                            let f = Rect::from_center_size(
-                                Pos2::new(rect.left() + indent + 27.0, rect.center().y + 1.0),
-                                Vec2::new(13.0, 10.0),
-                            );
-                            painter.rect_stroke(
-                                f,
-                                2.0,
-                                Stroke::new(1.2, fg2),
-                                egui::StrokeKind::Middle,
-                            );
-                            painter.line_segment(
-                                [
-                                    f.left_top() + Vec2::new(2.0, -3.0),
-                                    f.right_top() + Vec2::new(-2.0, -3.0),
-                                ],
-                                Stroke::new(1.2, fg2),
+                            crate::shape_thumbnail::paint(
+                                painter,
+                                Rect::from_center_size(
+                                    Pos2::new(rect.left() + indent + 28.0, rect.center().y),
+                                    Vec2::splat(22.0),
+                                ),
+                                &members
+                                    .iter()
+                                    .map(|&m| &self.doc.shapes[m])
+                                    .collect::<Vec<_>>(),
+                                true,
                             );
                             let stitches: usize = members
                                 .iter()
@@ -2412,9 +2406,9 @@ impl Studio {
                     );
                     let icon = Rect::from_center_size(
                         Pos2::new(rect.left() + indent + 30.0, rect.center().y),
-                        Vec2::splat(13.0),
+                        Vec2::splat(22.0),
                     );
-                    draw_kind_icon(painter, icon, kind, fg2);
+                    crate::shape_thumbnail::paint(painter, icon, &[&self.doc.shapes[i]], false);
                     // (Off, or hidden: dimmed, and saying which.)
                     let name_color = if kind == Kind::Skip || hidden {
                         fg2
@@ -4196,6 +4190,68 @@ mod tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn layers_paint_object_and_composite_geometry_in_both_themes() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><g id="pair"><path id="triangle" d="M0 0L10 0L10 10Z" fill="#e01020"/><path id="line" d="M20 0L30 10" fill="none" stroke="#1020e0"/></g></svg>"##;
+        for dark in [true, false] {
+            let mut s = Studio::with_file(None, None);
+            s.set_document(zigzag::document::Document::from_svg(svg, "preview", None).unwrap());
+            s.names = zigzag::svg::display_names(&s.doc.shapes);
+            s.layout.expanded.insert("pair".into());
+            let mut h = Harness::builder()
+                .with_size(Vec2::new(260.0, 320.0))
+                .build_ui_state(
+                    move |ui, s: &mut Studio| {
+                        ui.ctx().set_visuals(if dark {
+                            egui::Visuals::dark()
+                        } else {
+                            egui::Visuals::light()
+                        });
+                        s.objects_body(ui);
+                    },
+                    s,
+                );
+            h.run_steps(3);
+            let paths = |h: &Harness<'_, Studio>| {
+                h.output()
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Path(p) if p.stroke.width == 1.25 => Some(p),
+                        _ => None,
+                    })
+                    .count()
+            };
+            assert_eq!(paths(&h), 4, "two member paths plus both in the group");
+            h.get_by_label("triangle").click();
+            h.run_steps(2);
+            assert_eq!(h.state().sel_indices(), vec![0]);
+            let group = h.get_by_label("pair").rect();
+            let at = Pos2::new(group.left() + GUTTER + 10.0, group.center().y);
+            h.hover_at(at);
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            h.run_steps(2);
+            assert_eq!(paths(&h), 2, "collapsed composite still has both members");
+            assert!(!h.state().layout.expanded.contains("pair"));
+            h.hover_at(group.center());
+            h.run_steps(1);
+            h.drag_at(group.center());
+            h.hover_at(group.center() + Vec2::new(0.0, 8.0));
+            h.run_steps(2);
+            assert!(h.state().dock_ui.layer_drag.is_some());
+            h.drop_at(group.center());
+            h.run_steps(2);
+        }
+    }
+
 
     fn dirs_with(os: Os, vars: &[(&str, &str)]) -> Option<(PathBuf, Vec<PathBuf>)> {
         let vars: Vec<(String, String)> = vars
