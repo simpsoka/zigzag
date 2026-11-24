@@ -1860,6 +1860,7 @@ impl Studio {
         canvas::draw_hoop(&p, body, view, hw, hh, "", false, color32(cloth));
         let opts = DrawOptions {
             show_jumps: self.prefs.show_jumps,
+            show_cut_jumps: self.prefs.show_cut_jumps,
             limit: usize::MAX,
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,

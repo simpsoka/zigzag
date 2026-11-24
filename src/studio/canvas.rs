@@ -88,7 +88,10 @@ pub enum StitchView {
 
 #[derive(Clone, Debug)]
 pub struct DrawOptions {
+    /// Show jumps that leave the thread uncut, not travel after a cut.
     pub show_jumps: bool,
+    /// Show machine travel after a cut, separately from uncut jumps.
+    pub show_cut_jumps: bool,
     /// Draw only the first N stitches (stitch player).
     pub limit: usize,
     /// Rendered thread thickness, mm.
@@ -283,6 +286,31 @@ fn block_key(blk: &zigzag::design::Block) -> u64 {
     h.finish()
 }
 
+/// Draw travel between runs using the same convention on CPU and GPU.
+/// Cut travel is a machine movement, not a thread left between objects.
+pub(crate) fn append_jump(
+    out: &mut Vec<egui::Shape>,
+    opt: &DrawOptions,
+    cut: bool,
+    from: Option<Pos2>,
+    to: Option<Pos2>,
+) {
+    if !(if cut { opt.show_cut_jumps } else { opt.show_jumps }) {
+        return;
+    }
+    if let (Some(a), Some(b)) = (from, to)
+        && a.distance(b) > 1.0
+    {
+        let color = if cut {
+            contrasting([35, 145, 210], opt.background)
+        } else {
+            Color32::from_gray(140)
+        };
+        let (dash, gap) = if cut { (2.0, 5.0) } else { (4.0, 3.0) };
+        out.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, color), dash, gap));
+    }
+}
+
 /// Draw the stitch plan; returns where the last stitch drawn is. Each color block's
 /// thousands of thread segments are tessellated once into a mesh, reused
 /// frame after frame (hovering, selecting, editing points, typing) until
@@ -334,7 +362,6 @@ pub fn draw_design_cached(
         .map(Some)
         .collect();
     let mut last: Option<Pos2> = None;
-    let jump_stroke = Stroke::new(1.0, Color32::from_gray(140));
     let one = |k: usize| -> Vec<bool> {
         let mut v = vec![false; d.blocks.len()];
         v[k] = true;
@@ -356,19 +383,16 @@ pub fn draw_design_cached(
             Some(m) => view.to_screen(rect, zigzag::geom::affine_apply(m, p)),
             None => view.to_screen(rect, p),
         };
-        // The jump into this block, drawn directly (it depends on the
-        // block before, so it's not part of either mesh).
-        let first = blk.runs.first().and_then(|r| r.pts.first()).map(|&p| at(p));
-        if let (Some(a), Some(b)) = (last, first)
-            && opt.show_jumps
-            && a.distance(b) > 1.0
-        {
-            painter.extend(egui::Shape::dashed_line(&[a, b], jump_stroke, 4.0, 3.0));
-        }
+        // Each new block begins after a cut, including same-color stops.
+        let first = blk.runs.iter().find_map(|r| r.pts.first()).map(|&p| at(p));
+        let mut travel = Vec::new();
+        append_jump(&mut travel, opt, true, last, first);
+        painter.extend(travel);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (
             style_key,
             opt.show_jumps,
+            opt.show_cut_jumps,
             block_keys.get(k).copied().unwrap_or(0),
         )
             .hash(&mut h);
@@ -570,7 +594,6 @@ fn design_shapes(
     let w = (opt.thread_mm * view.scale).max(1.0);
     let mut remaining = opt.limit;
     let mut last: Option<Pos2> = None;
-    let jump_stroke = Stroke::new(1.0, Color32::from_gray(140));
     let clip = clip.map(|c| c.expand(w * 2.0));
     let seen = |p: Pos2| clip.is_none_or(|c| c.contains(p));
     for (k, blk) in d.blocks.iter().enumerate() {
@@ -596,7 +619,7 @@ fn design_shapes(
             mix(blk.color, [255, 255, 255], 0.45),
         ];
         let line = contrasting(blk.color, opt.background);
-        for run in &blk.runs {
+        for (ri, run) in blk.runs.iter().enumerate() {
             if remaining == 0 {
                 return last;
             }
@@ -612,12 +635,13 @@ fn design_shapes(
                     .map(|&p| view.to_screen(rect, p))
                     .collect(),
             };
-            if let (Some(a), Some(&b)) = (last, pts.first())
-                && opt.show_jumps
-                && a.distance(b) > 1.0
-            {
-                out.extend(egui::Shape::dashed_line(&[a, b], jump_stroke, 4.0, 3.0));
-            }
+            append_jump(
+                out,
+                opt,
+                ri == 0 || run.trim_before,
+                last,
+                pts.first().copied(),
+            );
             match opt.view {
                 StitchView::Lines => {
                     if pts.len() >= 2 {
@@ -940,12 +964,26 @@ mod tests {
         limit: usize,
         cache: &mut Option<StitchMesh>,
     ) -> (usize, Option<Pos2>) {
+        let (vertices, _, needle) = draw_with_jumps(ctx, d, limit, cache, false, false, 1);
+        (vertices, needle)
+    }
+
+    fn draw_with_jumps(
+        ctx: &egui::Context,
+        d: &Design,
+        limit: usize,
+        cache: &mut Option<StitchMesh>,
+        show_jumps: bool,
+        show_cut_jumps: bool,
+        generation: u64,
+    ) -> (usize, usize, Option<Pos2>) {
         let mut needle = None;
         let mut out = ctx.run_pass(egui::RawInput::default(), |ctx| {
             let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
             let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), rect);
             let opt = DrawOptions {
-                show_jumps: false,
+                show_jumps,
+                show_cut_jumps,
                 limit,
                 thread_mm: 0.4,
                 view: StitchView::Thread,
@@ -958,7 +996,7 @@ mod tests {
                 center: P::new(400.0, 100.0),
                 scale: 10.0,
             };
-            needle = draw_design_cached(&painter, rect, &view, d, &opt, 1, cache);
+            needle = draw_design_cached(&painter, rect, &view, d, &opt, generation, cache);
         });
         let vertices = out
             .shapes
@@ -970,7 +1008,57 @@ mod tests {
             .sum();
         // This headless test inspects geometry without uploading textures.
         out.textures_delta.clear();
-        (vertices, needle)
+        (vertices, out.shapes.len(), needle)
+    }
+
+    #[test]
+    fn cut_travel_is_distinct_and_can_be_hidden_without_hiding_uncut_jumps() {
+        let ctx = egui::Context::default();
+        let mut d = zigzag_design();
+        d.blocks[1].runs[0].trim_before = false;
+        d.blocks[1].color = d.blocks[0].color; // same-thread stop
+        let draw = |d: &Design, limit, cache: &mut Option<StitchMesh>, uncut, cut, generation| {
+            draw_with_jumps(&ctx, d, limit, cache, uncut, cut, generation)
+        };
+        let mut cached = None;
+        let base = draw(&d, usize::MAX, &mut None, false, false, 1);
+        assert_eq!(draw(&d, usize::MAX, &mut None, true, false, 1), base);
+        assert_ne!(draw(&d, usize::MAX, &mut None, false, true, 1), base);
+        // Same geometry, but the first gap now keeps the thread.
+        d.blocks[0].runs[1].trim_before = false;
+        let connected = draw(&d, usize::MAX, &mut cached, true, false, 2);
+        assert!(connected.0 > base.0);
+        assert_ne!(draw(&d, usize::MAX, &mut None, false, true, 2), connected);
+        let mut player = None;
+        for limit in [39, 40, 41, 52, 65, 66, 90] {
+            assert_eq!(
+                draw(&d, limit, &mut player, true, true, 2),
+                draw(&d, limit, &mut None, true, true, 2),
+                "growing player mesh at {limit}",
+            );
+        }
+        d.blocks[0].runs[1].trim_before = true;
+        assert_eq!(draw(&d, usize::MAX, &mut cached, true, false, 3), base);
+        assert_eq!(
+            draw(&d, 52, &mut player, true, false, 3),
+            draw(&d, 52, &mut None, false, false, 3),
+        );
+        // Both paths use this shared overlay rule, including style.
+        let mut lines = Vec::new();
+        let mut opts = DrawOptions {
+            show_jumps: true, show_cut_jumps: true, limit: usize::MAX,
+            thread_mm: 0.4, view: StitchView::Thread, background: [255; 3],
+            moving: None, copy: false, hidden: None,
+        };
+        let (a, b) = (Some(Pos2::ZERO), Some(Pos2::new(100.0, 0.0)));
+        append_jump(&mut lines, &opts, false, a, b);
+        let uncut = std::mem::take(&mut lines);
+        append_jump(&mut lines, &opts, true, a, b);
+        assert_ne!(lines, uncut);
+        opts.show_cut_jumps = false;
+        lines.clear();
+        append_jump(&mut lines, &opts, true, a, b);
+        assert!(lines.is_empty());
     }
 
     #[test]
@@ -1009,6 +1097,7 @@ mod tests {
                 let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), rect);
                 let opt = DrawOptions {
                     show_jumps: false,
+                    show_cut_jumps: false,
                     limit: usize::MAX,
                     thread_mm: 0.4,
                     view: StitchView::Thread,

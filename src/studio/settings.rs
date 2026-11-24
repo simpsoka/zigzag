@@ -94,9 +94,11 @@ pub struct Prefs {
     /// General: most people keep what they're given, and Basic is for
     /// someone who asks for less.
     pub advanced: bool,
-    /// Draw the jump stitches between parts of a design (View › Jump
-    /// Stitches): for every document, and kept from one launch to the next.
+    /// Draw jumps without a thread cut (View › Uncut Jumps): for every
+    /// document, and kept from one launch to the next.
     pub show_jumps: bool,
+    /// Display machine travel after a cut in a separate color.
+    pub show_cut_jumps: bool,
     /// Snap to other objects and the hoop while dragging (View › Smart
     /// Guides, ⌘U): kept the same way.
     pub smart_guides: bool,
@@ -121,6 +123,7 @@ impl Default for Prefs {
             share_defaults: None,
             advanced: true,
             show_jumps: true,
+            show_cut_jumps: true,
             smart_guides: true,
             path: None,
         }
@@ -149,6 +152,11 @@ impl Prefs {
         }
         if let Some(on) = v["show_jumps"].as_bool() {
             p.show_jumps = on;
+            // Older settings had one switch for every jump.
+            p.show_cut_jumps = on;
+        }
+        if let Some(on) = v["show_cut_jumps"].as_bool() {
+            p.show_cut_jumps = on;
         }
         if let Some(on) = v["smart_guides"].as_bool() {
             p.smart_guides = on;
@@ -234,6 +242,7 @@ impl Prefs {
             "last_font": self.last_font,
             "advanced": self.advanced,
             "show_jumps": self.show_jumps,
+            "show_cut_jumps": self.show_cut_jumps,
             "smart_guides": self.smart_guides,
         });
         if let Some(dir) = path.parent() {
@@ -1177,8 +1186,10 @@ mod tests {
         p.agent_log = false;
         p.agent_prompts = false;
         p.auto_update = false;
-        assert!(p.show_jumps, "jump stitches drawn unless they're turned off");
+        assert!(p.show_jumps, "uncut jumps drawn unless they're turned off");
         p.show_jumps = false;
+        assert!(p.show_cut_jumps);
+        p.show_cut_jumps = false;
         assert!(p.smart_guides, "smart guides on unless they're turned off");
         p.smart_guides = false;
         p.set_fold("before-you-sew", false);

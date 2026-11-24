@@ -93,9 +93,12 @@ impl Studio {
                         ui.checkbox(&mut self.view_tools.grid, "Grid");
                         ui.checkbox(&mut self.view_tools.points, "Needle points");
                         if ui
-                            .checkbox(&mut self.prefs.show_jumps, "Jump stitches")
+                            .checkbox(&mut self.prefs.show_jumps, "Uncut jumps")
                             .changed()
                         {
+                            self.prefs.save();
+                        }
+                        if ui.checkbox(&mut self.prefs.show_cut_jumps, "Cut travel").changed() {
                             self.prefs.save();
                         }
                         ui.horizontal(|ui| {

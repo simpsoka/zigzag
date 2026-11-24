@@ -11,8 +11,8 @@
 //! The painter's [`crate::canvas::draw_design_cached`] remains for the
 //! tests (no OpenGL there) and for a context without the needed GL.
 
-use crate::canvas::{DrawOptions, StitchView, View, color32, contrasting};
-use eframe::egui::{self, Color32, Pos2, Rect, Stroke};
+use crate::canvas::{DrawOptions, StitchView, View, append_jump, color32, contrasting};
+use eframe::egui::{self, Pos2, Rect};
 use eframe::glow::{self, HasContext};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -348,7 +348,6 @@ impl StitchGpu {
         let mut cmds = Vec::with_capacity(d.blocks.len());
         let mut last: Option<Pos2> = None;
         let mut jumps: Vec<egui::Shape> = Vec::new();
-        let jump_stroke = Stroke::new(1.0, Color32::from_gray(140));
 
         let mut state = self.state.lock().ok()?;
         let frame = self.frame;
@@ -378,7 +377,7 @@ impl StitchGpu {
             // between its runs (thin dashed lines, drawn by the painter).
             let mut n_segs = 0i32;
             let mut n_pts = 0i32;
-            for run in &blk.runs {
+            for (ri, run) in blk.runs.iter().enumerate() {
                 if remaining == 0 {
                     break;
                 }
@@ -386,14 +385,13 @@ impl StitchGpu {
                 remaining -= n;
                 n_segs += n.saturating_sub(1) as i32;
                 n_pts += n as i32;
-                if let (Some(a), Some(&b)) = (last, run.pts.first())
-                    && opt.show_jumps
-                {
-                    let b = at(b);
-                    if a.distance(b) > 1.0 {
-                        jumps.extend(egui::Shape::dashed_line(&[a, b], jump_stroke, 4.0, 3.0));
-                    }
-                }
+                append_jump(
+                    &mut jumps,
+                    opt,
+                    ri == 0 || run.trim_before,
+                    last,
+                    run.pts.first().map(|&p| at(p)),
+                );
                 last = n
                     .checked_sub(1)
                     .and_then(|i| run.pts.get(i))
