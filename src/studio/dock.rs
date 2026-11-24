@@ -2635,15 +2635,15 @@ impl Studio {
                                 fg2,
                             );
                             let cw = galley.size().x;
-                            painter.galley(
-                                Pos2::new(right - cw, rect.center().y - galley.size().y / 2.0),
-                                galley,
-                                fg2,
-                            );
-                            let name_rect = Rect::from_min_max(
-                                Pos2::new(rect.left() + indent + 44.0, rect.top()),
-                                Pos2::new(right - cw - 6.0, rect.bottom()),
-                            );
+                            let (name_rect, count_rect) =
+                                layer_text_columns(rect, rect.left() + indent + 44.0, cw);
+                            painter
+                                .with_clip_rect(count_rect.intersect(ui.clip_rect()))
+                                .galley(
+                                    Pos2::new(right - cw, rect.center().y - galley.size().y / 2.0),
+                                    galley,
+                                    fg2,
+                                );
                             painter.with_clip_rect(name_rect).text(
                                 Pos2::new(name_rect.left(), rect.center().y),
                                 egui::Align2::LEFT_CENTER,
@@ -2783,14 +2783,18 @@ impl Studio {
                     let galley =
                         painter.layout_no_wrap(count_text, egui::FontId::proportional(11.0), fg2);
                     let cw = galley.size().x;
-                    painter.galley(
-                        Pos2::new(right - cw, rect.center().y - galley.size().y / 2.0),
-                        galley,
-                        fg2,
-                    );
+                    let (mut name_rect, count_rect) =
+                        layer_text_columns(rect, rect.left() + indent + 62.0, cw);
+                    painter
+                        .with_clip_rect(count_rect.intersect(ui.clip_rect()))
+                        .galley(
+                            Pos2::new(right - cw, rect.center().y - galley.size().y / 2.0),
+                            galley,
+                            fg2,
+                        );
                     let warn = warned.contains(&i);
-                    let mut name_right = right - cw - 6.0;
-                    if warn {
+                    let name_right = name_rect.right();
+                    if warn && name_rect.width() >= 16.0 {
                         let wr = Rect::from_center_size(
                             Pos2::new(name_right - 6.0, rect.center().y),
                             Vec2::splat(11.0),
@@ -2801,12 +2805,8 @@ impl Studio {
                             Icon::Warning,
                             if selected { Color32::WHITE } else { p.warning },
                         );
-                        name_right -= 16.0;
+                        name_rect.max.x -= 16.0;
                     }
-                    let name_rect = Rect::from_min_max(
-                        Pos2::new(rect.left() + indent + 62.0, rect.top()),
-                        Pos2::new(name_right, rect.bottom()),
-                    );
                     let uid = self.doc.shapes[i].uid;
                     let editing = self.renaming.as_ref().is_some_and(|r| r.0 == uid);
                     if let Some((_, text, fresh)) = self.renaming.as_mut().filter(|_| editing) {
@@ -4571,6 +4571,22 @@ const NEST: f32 = THUMB + 10.0;
 const FLAG_COL: f32 = 18.0;
 const GUTTER: f32 = 2.0 * FLAG_COL + 2.0;
 
+/// Reserve the leading icons even when a large count cannot fit in a narrow row.
+fn layer_text_columns(row: Rect, name_left: f32, count_width: f32) -> (Rect, Rect) {
+    let right = (row.right() - 8.0).max(row.left());
+    let left = name_left.clamp(row.left(), right);
+    let count_left = (right - count_width).max(left);
+    let name = Rect::from_min_max(
+        Pos2::new(left, row.top()),
+        Pos2::new((count_left - 6.0).max(left), row.bottom()),
+    );
+    let count = Rect::from_min_max(
+        Pos2::new(count_left, row.top()),
+        Pos2::new(right, row.bottom()),
+    );
+    (name, count)
+}
+
 /// The part of a row to the right of its eye and lock.
 fn row_body(row: Rect) -> Rect {
     Rect::from_min_max(Pos2::new(row.left() + GUTTER, row.top()), row.max)
@@ -4772,6 +4788,23 @@ mod tests {
         h.get_by_label("Cut").click();
         h.run_steps(3);
         assert_eq!(p(&h), (None, None));
+    }
+
+    #[test]
+    fn layer_text_columns_fit_large_counts_and_narrow_nested_rows() {
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(260.0, 26.0));
+        let (name, count) = layer_text_columns(row, 100.0, 90.0);
+        assert_eq!(count.width(), 90.0);
+        assert!(name.right() <= count.left());
+        for width in [80.0, 140.0, 260.0] {
+            let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 26.0));
+            for leading in [60.0, 120.0, 300.0] {
+                let (name, count) = layer_text_columns(row, leading, 90.0);
+                assert!(row.contains_rect(name) && row.contains_rect(count));
+                assert!(name.width() >= 0.0 && count.width() >= 0.0);
+                assert!(name.right() <= count.left());
+            }
+        }
     }
 
     #[test]
