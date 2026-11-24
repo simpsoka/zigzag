@@ -107,7 +107,7 @@ zigzag/
   src/checks.rs           digitizing checks (sizes, widths, lettering, hoop, travel in sight)
   src/machine/profile.rs  machine profiles: hoops and file format, built in (profiles.json) or your own
   src/formats/            PES (+PEC), DST, EXP, JEF, VP3, Skitch PEN writers;
-                          PES/PEC/DST/EXP/JEF readers; preview; worksheet;
+                          PES/PEC/DST/EXP/JEF/VP3 readers; preview; worksheet;
                           ZigZag's stitch-plan file (plan.rs)
   src/machine/            Skitch Bluetooth protocol (+ btleplug client, `ble` feature)
   src/studio/             editor (egui on OpenGL via glow) + MCP server (`gui` feature)
@@ -243,7 +243,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Pen** (P): draw filled shapes or lines with corners and curves, or place manual stitches one by one. Snaps to the grid when it's showing, else to smart guides.
 - **Shapes** (M, L, \\): rectangles (with rounded corners), ellipses, polygons, stars and lines.
 - **Measure**, **mm grid**, **needle points**, **First/Last**, **Group colors**.
-- **Open machine files** (PES, PEC, DST, EXP, JEF) to view, resize and re-export them, and **images** to trace.
+- **Open machine files** (PES, PEC, DST, EXP, JEF, VP3) to view, resize and re-export them, or **Place** them into a design that's already open; **images** open to trace.
 - **Settings per type:** fill angle (with a drag-to-set **angle tool**, `A`), spacing, length, pull, underlay. Satin options: column vs border, stitch (satin, S-stitch, zig-zag), threads across the column, width, underlay passes, short stitches. Contour and ripple: rings or spiral. Cross-stitch: cell size. Tartan: the stripes (color and width each, mirrored), angle, row spacing. Run options: single or triple.
 - **Lean** in the Stitch panel, for satins: how far the stitches lean from square across the column (a few degrees keeps them from sinking between a knit's rows; more shows a slant, like a leaf's veins).
 - **Zigzag: Even** in the Stitch panel, for satins: each step along the column is shared between the stitch over and the stitch back, so both slant the same and a narrow stem's edges are clean. Off, one stitch goes straight across and the next takes the whole step.
@@ -465,7 +465,7 @@ Checked against Wilcom Hatch's core feature set:
 | Digitize shapes and manual stitches by hand | ✓ (pen tool) |
 | Remove overlaps, color sequencing, re-order objects | ✓ |
 | Stitch player, show needle points, grid, measure | ✓ |
-| Open and save PES, DST, EXP, JEF, VP3 | ✓ (VP3 write only) |
+| Open and save PES, DST, EXP, JEF, VP3 | ✓ |
 | Production worksheet | ✓ (HTML) |
 | Auto-digitize bitmaps | ✓ (Image Trace: flat logos, posterized photos, centre lines) |
 | Built-in embroidery fonts, monogramming, multi-hooping, motif/pattern fills, 3D foam | not yet |

@@ -42,7 +42,8 @@
 //!   o=N        sewing order
 //!   st=T       start sewing at this point of the outline (0–1 along it)
 //!   en=T       end sewing at this point of the outline
-//!   trim_before cut the thread before this object (if a thread is running)
+//!   trimbefore cut before this object (if a thread is running); trimbefore=0
+//!              overrides an inherited request and leaves automatic planning
 //!   trim       cut the thread after this object
 //!   stop       pause the machine after this object (add foam, trim appliqué)
 //! A `stroke.` prefix (e.g. `stroke.run`) applies a token only to the stroke of
@@ -366,7 +367,7 @@ impl Params {
     }
 
     pub fn set_start_command(&mut self, command: StartCommand) {
-        self.trim_before = (command == StartCommand::Trim).then_some(true);
+        self.trim_before = Some(command == StartCommand::Trim);
     }
 
     pub fn end_command(&self) -> EndCommand {
@@ -379,8 +380,8 @@ impl Params {
     }
 
     pub fn set_end_command(&mut self, command: EndCommand) {
-        self.trim = matches!(command, EndCommand::Trim | EndCommand::TrimAndStop).then_some(true);
-        self.stop = matches!(command, EndCommand::Stop | EndCommand::TrimAndStop).then_some(true);
+        self.trim = Some(matches!(command, EndCommand::Trim | EndCommand::TrimAndStop));
+        self.stop = Some(matches!(command, EndCommand::Stop | EndCommand::TrimAndStop));
     }
 
     /// Hidden: not shown, not sewn.
@@ -578,7 +579,10 @@ impl Params {
         let decoded = decode_illustrator_id(id);
         let mut base = Params::default();
         let mut stroke = Params::default();
-        for tok in param_tokens(&decoded).filter(|t| !t.is_empty()) {
+        for tok in decoded
+            .split([' ', '_', ',', ';'])
+            .filter(|t| !t.is_empty())
+        {
             let lower = tok.to_ascii_lowercase();
             match lower.strip_prefix("stroke.") {
                 Some(rest) => stroke.apply_token(rest),
@@ -606,7 +610,7 @@ impl Params {
                 self.border = Some(true);
                 return;
             }
-            "trim_before" => {
+            "trimbefore" => {
                 self.trim_before = Some(true);
                 return;
             }
@@ -677,7 +681,7 @@ impl Params {
             "st" | "start" => self.start = num.map(|v| v.rem_euclid(1.0)),
             "en" | "end" => self.end = num.map(|v| v.rem_euclid(1.0)),
             "trim" => self.trim = flag,
-            "trim_before" => self.trim_before = flag,
+            "trimbefore" => self.trim_before = flag,
             "hide" => self.hide = flag.filter(|&on| on),
             "lock" => self.lock = flag.filter(|&on| on),
             "spiral" => self.spiral = flag,
@@ -730,7 +734,7 @@ impl Params {
             t.push("spiral".into());
         }
         if let Some(on) = self.trim_before {
-            t.push(format!("trim_before={}", u8::from(on)));
+            t.push(format!("trimbefore={}", u8::from(on)));
         }
         match self.trim {
             Some(true) => t.push("trim".into()),
@@ -853,31 +857,6 @@ pub fn parse_hex(v: &str) -> Option<[u8; 3]> {
     Some([b(0)?, b(2)?, b(4)?])
 }
 
-/// Split SVG id tokens, preserving the underscore in `trim_before`.
-pub fn param_tokens(id: &str) -> impl Iterator<Item = &str> {
-    let mut offset = 0;
-    id.split(move |c: char| {
-        let at = offset;
-        offset += c.len_utf8();
-        if c == '_' {
-            let head = id[..at].rsplit([' ', '_', ',', ';']).next().unwrap_or("");
-            let tail = &id[offset..];
-            if (head.eq_ignore_ascii_case("trim") || head.eq_ignore_ascii_case("stroke.trim"))
-                && tail
-                    .get(..6)
-                    .is_some_and(|s| s.eq_ignore_ascii_case("before"))
-                && tail[6..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| matches!(c, '=' | ' ' | '_' | ',' | ';'))
-            {
-                return false;
-            }
-        }
-        matches!(c, ' ' | '_' | ',' | ';')
-    })
-}
-
 /// True for tokens that carry settings (as opposed to plain name words).
 pub fn is_param_token(tok: &str) -> bool {
     let lower = tok.to_ascii_lowercase();
@@ -890,7 +869,7 @@ pub fn is_param_token(tok: &str) -> bool {
             lower,
             "border"
                 | "trim"
-                | "trim_before"
+                | "trimbefore"
                 | "spiral"
                 | "stop"
                 | "even"
@@ -930,7 +909,7 @@ mod tests {
     #[test]
     fn boundary_commands_round_trip_svg_after_reordering() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20">
-            <path id="first_run_trim_before=0_trim=1_stop=1" d="M0 0 L10 0" stroke="#aa0000" fill="none"/>
+            <path id="first_run_trimbefore=0_trim=1_stop=1" d="M0 0 L10 0" stroke="#aa0000" fill="none"/>
             <path id="second_run" d="M20 0 L30 0" stroke="#aa0000" fill="none"/>
         </svg>"##;
         let mut doc = crate::document::Document::from_svg(svg, "commands", None).unwrap();
@@ -974,7 +953,7 @@ mod tests {
                     edited.set_end_command(EndCommand::Automatic);
                     assert_eq!(
                         (edited.trim_before, edited.trim, edited.stop),
-                        (None, None, None)
+                        (Some(false), Some(false), Some(false))
                     );
                 }
             }
@@ -996,21 +975,22 @@ mod tests {
             assert_eq!(Params::default().merged(&p), p);
             assert_eq!(p.merged(&Params::default()), p);
         }
-        let p = Params::parse("name_trim_before_trim");
+        assert_eq!(Params::parse("trim_before_photo").trim_before, None);
+        let p = Params::parse("name_trimbefore_trim");
         assert_eq!((p.trim_before, p.trim), (Some(true), Some(true)));
-        assert!(is_param_token("trim_before"));
-        assert!(is_param_token("trim_before=0"));
+        assert!(is_param_token("trimbefore"));
+        assert!(is_param_token("trimbefore=0"));
         assert_eq!(
-            Params::parse_part("stroke.trim_before=1", true).trim_before,
+            Params::parse_part("stroke.trimbefore=1", true).trim_before,
             Some(true)
         );
         assert_eq!(
-            Params::parse("trim_before")
-                .merged(&Params::parse("trim_before=0"))
+            Params::parse("trimbefore")
+                .merged(&Params::parse("trimbefore=0"))
                 .trim_before,
             Some(false)
         );
-        assert_eq!(crate::svg::name_words("name_trim_before=0"), ["name"]);
+        assert_eq!(crate::svg::name_words("name_trimbefore=0"), ["name"]);
     }
 
     #[test]

@@ -168,7 +168,7 @@ impl Document {
     /// Absolute px transform of each element's parent, measured with probe
     /// paths inserted next to the elements (so usvg resolves everything).
     /// `by_id`: the elements of `self.xml`, parsed ([`super::elements_by_id`]).
-    fn parent_transforms(
+    pub(super) fn parent_transforms(
         &self,
         by_id: &HashMap<&str, roxmltree::Node>,
         ids: &[String],
@@ -210,7 +210,7 @@ impl Document {
         Ok(out)
     }
 
-    fn element_ids(&self, indices: &[usize]) -> Vec<String> {
+    pub(super) fn element_ids(&self, indices: &[usize]) -> Vec<String> {
         let mut seen = HashSet::new();
         indices
             .iter()
@@ -474,7 +474,8 @@ impl Document {
                 let decoded = crate::params::decode_illustrator_id(&base);
                 let mut parts = svg::name_words(&f.label);
                 parts.extend(
-                    crate::params::param_tokens(&decoded)
+                    decoded
+                        .split('_')
                         .filter(|t| crate::params::is_param_token(t))
                         .map(str::to_string),
                 );

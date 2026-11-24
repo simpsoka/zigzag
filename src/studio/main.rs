@@ -1,6 +1,10 @@
 //! ZigZag studio: visual stitch editor (egui, OpenGL via glow) with an
 //! MCP server so agents can work on the same canvas.
 
+// A window app on Windows, so opening ZigZag.exe doesn't also open a console
+// window. `attach_console` gives a launch from a terminal its output back.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod about;
 mod account;
 mod agent;
@@ -55,6 +59,7 @@ mod session;
 mod settings;
 mod sew;
 mod shapes;
+mod thumbs;
 mod share;
 mod simplify;
 mod slash;
@@ -73,12 +78,35 @@ mod update;
 mod view_tools;
 mod widgets;
 
+/// Windows starts a window app without a console, so `--help`, crash
+/// messages and logs printed from a terminal would go nowhere. Use the
+/// console of the terminal that started ZigZag, if any (as Alacritty and
+/// WezTerm do). Output that is already piped somewhere (an agent's
+/// `--mcp-stdio`, a script reading `--help`) stays where it goes.
+#[cfg(windows)]
+fn attach_console() {
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(pid: u32) -> i32;
+    }
+    // SAFETY: takes a constant and touches no memory of ours; fails
+    // harmlessly when there is no parent console.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 const USAGE: &str = "usage: zigzag-studio [design.svg | zigzag://open?url=… ...] [--select N] [--new-window] [--mcp-port PORT | --no-mcp | --mcp-stdio]\n\n  --mcp-stdio   no window: serve the MCP tools over stdin/stdout (headless, for agents)
   --new-window  a window of its own, even with ZigZag running already (also ZIGZAG_NEW_WINDOW=1)
 
 With ZigZag running already, the files open as tabs in its window instead.";
 
 fn main() -> eframe::Result {
+    attach_console();
     // A failure that stops ZigZag leaves a log to report (see `crash`).
     crash::install();
     // (To see the crash log and the report offer work: this fails on

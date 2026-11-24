@@ -1,4 +1,4 @@
-//! Reading machine files (PES, PEC, DST, EXP, JEF) into stitch blocks, and
+//! Reading machine files (PES, PEC, DST, EXP, JEF, VP3) into stitch blocks, and
 //! turning them into an editable SVG of manual-stitch paths.
 //! Decoding follows pyembroidery (MIT License, Copyright (c) 2018 Tatarize).
 
@@ -403,6 +403,169 @@ fn read_jef(d: &[u8]) -> Result<StitchFile> {
     })
 }
 
+/// A cursor over a VP3 file: big-endian fields, every read checked.
+struct Vp3<'a> {
+    d: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Vp3<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self.at.checked_add(n).filter(|&e| e <= self.d.len());
+        let Some(end) = end else {
+            bail!("VP3 file is truncated")
+        };
+        let s = &self.d[self.at..end];
+        self.at = end;
+        Ok(s)
+    }
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<usize> {
+        let b = self.take(2)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]) as usize)
+    }
+    fn i32(&mut self) -> Result<i32> {
+        let b = self.take(4)?;
+        Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    /// A length-prefixed string (16-bit byte count), skipped.
+    fn skip_string(&mut self) -> Result<()> {
+        let n = self.u16()?;
+        self.take(n).map(|_| ())
+    }
+    /// A position field: thousandths of a millimetre, as 0.1 mm units.
+    fn units(&mut self) -> Result<f64> {
+        Ok(self.i32()? as f64 / 100.0)
+    }
+}
+
+/// Husqvarna Viking / Pfaff VP3: one block per thread, each with its color
+/// (RGB), where it starts from the design's center, and its stitches.
+fn read_vp3(d: &[u8]) -> Result<StitchFile> {
+    if !d.starts_with(b"%vsm%") {
+        bail!("not a VP3 file");
+    }
+    let mut f = Vp3 { d, at: 6 };
+    f.skip_string()?; // "Produced by     Software Ltd"
+    f.take(7)?; // 00 02 00, bytes to the end of the file
+    f.skip_string()?; // notes
+    f.take(32)?; // extents, stitch count, thread count, 00 03 00, design length
+    let cx = f.units()?;
+    let cy = -f.units()?;
+    f.take(27)?; // the design's box and size
+    f.skip_string()?;
+    f.take(24)?; // 64 64, a unit matrix, "xxPP" 01 00
+    f.skip_string()?; // "Produced by     Software Ltd"
+    let count = f.u16()?;
+    let mut bld = Builder::new();
+    let mut colors = Vec::new();
+    for k in 0..count {
+        if f.at >= d.len() {
+            // Fewer blocks than the header promised: keep what's there.
+            break;
+        }
+        // One thread's block; whether the file ended before it did.
+        let read = (|| -> Result<bool> {
+            f.take(3)?; // 00 05 00
+            let len = f.i32()?;
+            let Some(whole) = usize::try_from(len)
+                .ok()
+                .and_then(|n| f.at.checked_add(n))
+            else {
+                bail!("VP3 thread block has no length")
+            };
+            // (Longer than the file: what's there of it.)
+            let end = whole.min(d.len());
+            let x = f.units()? + cx;
+            let y = -f.units()? + cy;
+            if k > 0 {
+                bld.color_change();
+            }
+            // Where the thread starts. (Any thread after the first starts
+            // where its block says, be that the design's center or on a line
+            // through it; the first, unless that's where the needle is.)
+            let start = P::new(x, y);
+            if k > 0 || start != bld.pos {
+                bld.pos = start;
+                bld.jumped = true;
+            }
+            // The thread: one color for plain thread, several for variegated
+            // (the first is shown).
+            let shades = f.u8()?;
+            f.u8()?; // transition
+            let mut color = [0u8; 3];
+            for m in 0..shades {
+                let rgb = f.take(3)?;
+                if m == 0 {
+                    color = [rgb[0], rgb[1], rgb[2]];
+                }
+                f.take(3)?; // parts, length
+            }
+            colors.push(color);
+            f.take(2)?; // thread type, weight
+            for _ in 0..3 {
+                f.skip_string()?; // catalog number, description, brand
+            }
+            f.take(15)?; // offset to the next block, 00 01 00, stitch bytes length
+            f.take(3)?; // 0A F6 00
+            let Some(body) = d.get(f.at..end) else {
+                bail!("VP3 thread block is truncated")
+            };
+            f.at = end;
+            let s8 = |b: u8| b as i8 as f64;
+            let s16 = |a: u8, b: u8| i16::from_be_bytes([a, b]) as f64;
+            let mut i = 0;
+            while i + 1 < body.len() {
+                let (b0, b1) = (body[i], body[i + 1]);
+                i += 2;
+                if b0 != 0x80 {
+                    bld.stitch(s8(b0), s8(b1));
+                    continue;
+                }
+                match b1 {
+                    // A long move: 16-bit deltas. Past what a needle sews in
+                    // one stitch, it's travel.
+                    0x01 => {
+                        let Some(w) = body.get(i..i + 4) else { break };
+                        i += 4;
+                        let (x, y) = (s16(w[0], w[1]), s16(w[2], w[3]));
+                        if x.abs() > 255.0 || y.abs() > 255.0 {
+                            bld.jump(x, y);
+                        } else {
+                            bld.stitch(x, y);
+                        }
+                    }
+                    0x03 => bld.jumped = true, // trim
+                    _ => {}                    // 02: the long move ends
+                }
+            }
+            Ok(whole > d.len())
+        })();
+        match read {
+            Ok(false) => {}
+            // Nothing read yet: not a VP3 that can be opened.
+            Err(e) if k == 0 => return Err(e),
+            // Cut short part way: what was read is kept, and it's said
+            // (as the other readers say it).
+            _ => {
+                bld.note(
+                    "It ends in the middle of a thread's stitches: the file was cut short, so the end of the design is missing.",
+                );
+                break;
+            }
+        }
+    }
+    // (A VP3 has no mark at its end: its blocks say how long they are.)
+    let (blocks, notes) = bld.finish(&colors, false);
+    Ok(StitchFile {
+        name: String::new(),
+        blocks,
+        notes,
+    })
+}
+
 /// Read a machine file by extension.
 pub fn read_stitch_file(data: &[u8], ext: &str) -> Result<StitchFile> {
     match ext.to_ascii_lowercase().as_str() {
@@ -429,7 +592,10 @@ pub fn read_stitch_file(data: &[u8], ext: &str) -> Result<StitchFile> {
             })
         }
         "jef" => read_jef(data),
-        other => bail!("can't read .{other} files (PES, PEC, DST, EXP and JEF are supported)"),
+        "vp3" => read_vp3(data),
+        other => {
+            bail!("can't read .{other} files (PES, PEC, DST, EXP, JEF and VP3 are supported)")
+        }
     }
 }
 
@@ -523,6 +689,7 @@ mod tests {
             ("dst", dst::write_dst(&d)),
             ("exp", more::write_exp(&d)),
             ("jef", more::write_jef(&d)),
+            ("vp3", more::write_vp3(&d)),
         ] {
             let f = read_stitch_file(&bytes, ext).unwrap_or_else(|e| panic!("{ext}: {e}"));
             assert_eq!(f.blocks.len(), 2, "{ext}: two colors");
@@ -544,6 +711,11 @@ mod tests {
             }
             if ext == "pes" || ext == "jef" {
                 assert_ne!(f.blocks[0].color, f.blocks[1].color, "{ext}: colors kept");
+            }
+            if ext == "vp3" {
+                // (VP3 stores the thread's own RGB.)
+                let colors: Vec<[u8; 3]> = f.blocks.iter().map(|b| b.color).collect();
+                assert_eq!(colors, [[237, 23, 31], [10, 85, 163]]);
             }
         }
     }
@@ -655,6 +827,100 @@ mod tests {
         for (x, y) in a.blocks.iter().zip(&b.blocks) {
             assert_eq!(x.runs, y.runs);
         }
+    }
+
+    /// A VP3 cut short anywhere, or with a byte gone wrong, is an error or
+    /// a partial design: never a crash.
+    #[test]
+    fn a_damaged_vp3_is_an_error_not_a_crash() {
+        let good = more::write_vp3(&sample());
+        // Whole: nothing to say about it. Cut short in its second thread:
+        // the first is there, and it says the end is missing.
+        let whole = read_stitch_file(&good, "vp3").unwrap();
+        assert_eq!((whole.blocks.len(), whole.notes.len()), (2, 0));
+        let cut = read_stitch_file(&good[..good.len() - 6], "vp3").unwrap();
+        assert!(!cut.blocks.is_empty());
+        assert_eq!(cut.blocks[0].runs, whole.blocks[0].runs);
+        assert!(
+            cut.notes.iter().any(|n| n.contains("cut short")),
+            "{:?}",
+            cut.notes
+        );
+        for n in 0..good.len() {
+            let _ = read_stitch_file(&good[..n], "vp3");
+        }
+        for at in 0..good.len() {
+            for v in [0x00, 0x7F, 0x80, 0xFF] {
+                let mut bad = good.clone();
+                bad[at] = v;
+                let _ = read_stitch_file(&bad, "vp3");
+            }
+        }
+        assert!(read_stitch_file(b"#PES0001", "vp3").is_err());
+    }
+
+    /// Real VP3 files (a folder named by ZIGZAG_VP3_DIR, not kept in the
+    /// repo): each reads to the stitch count and the box its own header
+    /// gives. `cargo test real_vp3 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_vp3_files_read_to_what_their_headers_say() {
+        let Some(dir) = std::env::var_os("ZIGZAG_VP3_DIR") else {
+            return;
+        };
+        let be = |d: &[u8], at: usize| {
+            i32::from_be_bytes(d[at..at + 4].try_into().unwrap()) as f64 / 100.0
+        };
+        let mut seen = 0;
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            if !path
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("vp3"))
+            {
+                continue;
+            }
+            let d = std::fs::read(&path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let f = read_stitch_file(&d, "vp3").unwrap_or_else(|e| panic!("{name}: {e}"));
+            // The header: two strings, then right, top, left, bottom
+            // (y up, thousandths of a mm) and the stitch count.
+            let s1 = 6 + 2 + u16::from_be_bytes([d[6], d[7]]) as usize + 7;
+            let at = s1 + 2 + u16::from_be_bytes([d[s1], d[s1 + 1]]) as usize;
+            let (right, top, left, bottom) =
+                (be(&d, at), be(&d, at + 4), be(&d, at + 8), be(&d, at + 12));
+            let count = (be(&d, at + 16) * 100.0) as usize;
+            let threads = d[at + 21] as usize;
+            let mut b = crate::geom::Bounds::empty();
+            let mut n = 0;
+            for p in f.blocks.iter().flat_map(|b| b.runs.iter().flatten()) {
+                b.add(*p);
+                n += 1;
+            }
+            let runs: usize = f.blocks.iter().map(|b| b.runs.len()).sum();
+            println!(
+                "{name}: {} threads (header {threads}) {:?}, {runs} runs, {n} points (header {count} stitches)\n  read  x {:.1}..{:.1}  y {:.1}..{:.1}\n  header x {left:.1}..{right:.1}  y {:.1}..{:.1}",
+                f.blocks.len(),
+                f.blocks.iter().map(|b| b.color).collect::<Vec<_>>(),
+                b.min.x,
+                b.max.x,
+                b.min.y,
+                b.max.y,
+                -top,
+                -bottom,
+            );
+            assert_eq!(f.blocks.len(), threads, "{name}: threads");
+            for (got, want) in [
+                (b.min.x, left),
+                (b.max.x, right),
+                (b.min.y, -top),
+                (b.max.y, -bottom),
+            ] {
+                assert!((got - want).abs() <= 1.0, "{name}: {got} for {want}");
+            }
+            seen += 1;
+        }
+        assert!(seen > 0, "no VP3 files in ZIGZAG_VP3_DIR");
     }
 
     #[test]

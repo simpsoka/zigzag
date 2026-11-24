@@ -19,10 +19,11 @@ Where a tool takes `objects` as one name or a list, \"all\" is every object; set
 Stitch types: fill (tatami rows; areas wider than ~7 mm), satin (glossy zigzag columns 1–7 mm wide; works on strokes, and on narrow filled shapes like letters, bars and rings), run (thin running stitch for details), \
 contour (rows following the outline inward), blanket (E-stitch edge), applique (placement line, stop, tack-down, stop, satin cover) and manual (every path point is a needle point). \
 Settings can also be preset in SVG element ids, e.g. id=\"logo_fill_a=45\" or id=\"border_satin_w=2\". \
+Groups are how the person selects and moves a part of the design as one thing (a click takes the whole group), and how the Layers list reads: put together only the objects that make one thing (a flower's petals, a bridge's towers and cables, the two waves of a wave mark), each in a <g> with an id that names it (id=\"bridge\"); leave everything else out of groups, and never wrap a whole drawing, or a background with what's drawn on it, in one. get_design gives each object's `group` (its name, or its id where it has none); group_objects and ungroup_objects change them afterwards. \
 An object is named for its id without the settings (id=\"Face_mask_fill\" is \"Face mask\"); name it to a tool by that name, by the id, or by its index. \
 list_machines and set_document's machine set a document up for a machine: its hoop, the file it reads, its shortest stitch and its lock stitches. \
 Hat designs are small (about 50 × 50 mm on the front of a cap): keep satin columns under 7 mm wide, letters at least 5 mm tall, and details at least 1.5 mm. \
-open_file also opens machine files (pes, pec, dst, exp, jef) as manual stitches. \
+open_file also opens machine files (pes, pec, dst, exp, jef, vp3) as manual stitches. \
 trace_image turns a logo (PNG, JPEG, WebP, GIF, BMP or TIFF) into shapes (snap colors to Brother or Janome threads with `threads`). simplify_design makes the whole design quicker to sew (fewer threads, no details too small to sew, fewer trims; try it with dry_run first to see what it comes to). add_outline gives a filled shape an outline (a running stitch, or satin) that is an object of its own, named \"<shape> (outline)\", with its own thread and stitch type. round_corners softens sharp corners, which stitch more cleanly; simplify takes extra points out of outlines (traced ones especially) and clean_up removes stray points, objects too small to sew and extra points across the design. \
 To make satin stitching cleaner: measure_stitching counts what shows (stitches outside the shape, bare cloth, crowded needle points, seams, piled satin, travel in sight, trims); change one thing (a letter's corners with set_object cut or mitred, its zigzag with even, its lean, underlay or pull; or break_into_columns and then move_object to reorder the columns and edit_path to move a rail's points or add, move or delete a rung, reading them first with get_path); measure again passing the first result's measures as `before`, keep the change if the verdict is better and undo it if it's worse; and look at render_preview, which sees what the numbers don't. Text is made shapes with create_outlines before its columns or points can be changed. Before breaking a shape into columns, duplicate it and set the copy's kind to skip, to pass as measure_stitching's `within` (the outline the columns are held to); delete the copy when done. \
 Use batch to make several changes in one call: it is all or nothing and one undo step, each step is {\"tool\": name, \"arguments\": {…}}, and later steps can use earlier results (\"$0.added.0.name\"). \
@@ -364,13 +365,13 @@ pub fn tool_specs() -> Value {
     let mut tools = vec![
         json!({
             "name": "get_design",
-            "description": "Describe the current document: every object (index, name, stitch type, color, position and size in mm, effective settings, stitch count, problems; `prompt`, where it has one, is the place in `prompts` of the request it was made for), what's selected, design stats, fabric, hoop and options.",
+            "description": "Describe the current document: every object (index, name, the `group` it's in if any (its name, or its id where it has none), stitch type, color, position and size in mm, effective settings, stitch count, problems; `prompt`, where it has one, is the place in `prompts` of the request it was made for), what's selected, design stats, fabric, hoop and options.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         }),
         json!({
             "name": "add_svg",
-            "description": "Add SVG artwork to the canvas (or replace the document). Every filled shape and stroke becomes an object; fills default to fill stitch, strokes to satin (≥1 mm) or run. Settings in element ids apply (e.g. id=\"leaf_satin\"). A satin can be given as its two edges: one stroked path (any stroke width, id with satin) whose two longest subpaths are the column's rails, with any shorter subpaths crossing both as rungs that keep the rails in step and set which way the stitches run, e.g. d=\"M4 10 C12 2 28 2 36 10 M4 10 C12 18 28 18 36 10 M14 5 L18 15\". By default the artwork keeps its own size (viewBox units scaled by width/height attributes, else 1 unit = 1 px) and is centered on the hoop.",
+            "description": "Add SVG artwork to the canvas (or replace the document). Every filled shape and stroke becomes an object; fills default to fill stitch, strokes to satin (≥1 mm) or run. Settings in element ids apply (e.g. id=\"leaf_satin\"). Group with <g id=\"name\"> only shapes that are parts of one thing, and name each group for it; don't put unrelated shapes (a background and what's on it, the whole drawing) in one <g>. A satin can be given as its two edges: one stroked path (any stroke width, id with satin) whose two longest subpaths are the column's rails, with any shorter subpaths crossing both as rungs that keep the rails in step and set which way the stitches run, e.g. d=\"M4 10 C12 2 28 2 36 10 M4 10 C12 18 28 18 36 10 M14 5 L18 15\". By default the artwork keeps its own size (viewBox units scaled by width/height attributes, else 1 unit = 1 px) and is centered on the hoop.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -414,7 +415,7 @@ pub fn tool_specs() -> Value {
                     "color": { "type": ["string", "null"], "description": "Thread color #rrggbb, or null for the SVG's color." },
                     "start": { "type": ["number", "null"], "description": "Where sewing starts: 0–1 along the object's outline (fills: the outer ring from its first point; lines: from their start). Null: the planner chooses." },
                     "end": { "type": ["number", "null"], "description": "Where sewing ends, 0–1 along the outline (the thread goes on from there to the next object)." },
-                    "trim_before": { "type": ["boolean", "null"], "description": "Cut before this object if a thread is running, overriding route_mm. False or null restores automatic planning." },
+                    "trim_before": { "type": ["boolean", "null"], "description": "Cut before this object if a thread is running, overriding route_mm. False overrides an inherited request and allows automatic planning; null clears the explicit setting." },
                     "trim": { "type": ["boolean", "null"], "description": "Cut the thread after this object even if the next one is close." },
                     "route_mm": { "type": ["array", "null"], "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "maxItems": 40, "description": "Route the thread to this object by hand, from the object sewn before it in the same thread: the points [[x, y], …] (mm from the hoop center) it's sewn through with running stitches, instead of being cut (or going the planner's way). Lay it where it won't be seen: along the edge of something in a like color, under what's sewn later, down a seam. [] sews straight there. Null: the planner decides again. get_cuts says where the thread is cut and where each cut's ends are; set start (and the object before's end) to choose where the way begins and ends. A trim on the object before still cuts." },
                     "stop": { "type": ["boolean", "null"], "description": "Pause the machine after this object (to lay foam, or trim appliqué fabric)." },
@@ -436,6 +437,22 @@ pub fn tool_specs() -> Value {
             "name": "rename_object",
             "description": "Give an object a name (letters, digits and spaces). A filled shape and its outline share the name; its stitch settings stay.",
             "inputSchema": { "type": "object", "properties": { "object": obj_schema(), "name": { "type": "string" } }, "required": ["object", "name"] }
+        }),
+        json!({
+            "name": "group_objects",
+            "description": "Make one group of objects that are parts of one thing (the person then selects and moves them with one click, and Layers lists them together), or with `into` put objects into a group there already. They stay where they are and as they look, and are sewn together: a new group's objects where the last of them was, objects put `into` a group after the last of it (check the order with get_design where one must sew over another). A group needs a `name` that says what it is.",
+            "inputSchema": { "type": "object", "properties": {
+                "objects": { "description": "The objects: a list of names or indices.", "type": "array", "items": { "oneOf": [{ "type": "integer" }, { "type": "string" }] } },
+                "name": { "type": "string", "description": "What the new group is (\"bridge\", \"left wing\"): letters, digits and spaces." },
+                "into": { "type": "string", "description": "An existing group (its name, as get_design's `group` gives it) to put the objects into, instead of making one." }
+            }, "required": ["objects"] }
+        }),
+        json!({
+            "name": "ungroup_objects",
+            "description": "Take objects out of the group each is in (\"all\": every object out of its group). They stay where they are, as they look and where they're sewn; a group left with nothing in it is gone.",
+            "inputSchema": { "type": "object", "properties": {
+                "objects": { "description": "One object, a list of them, or \"all\".", "oneOf": [{ "type": "integer" }, { "type": "string" }, { "type": "array", "items": { "oneOf": [{ "type": "integer" }, { "type": "string" }] } }] }
+            }, "required": ["objects"] }
         }),
         json!({
             "name": "align_objects",
@@ -524,7 +541,7 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "open_file",
-            "description": "Open a file in a new tab (or the empty tab in front), which becomes the document the other tools work on: an SVG, or a machine file (pes, pec, dst, exp, jef) which opens as manual stitches you can move, scale and recolor. A file that's already open comes to the front instead, keeping its unsaved changes.",
+            "description": "Open a file in a new tab (or the empty tab in front), which becomes the document the other tools work on: an SVG, or a machine file (pes, pec, dst, exp, jef, vp3) which opens as manual stitches you can move, scale and recolor. A file that's already open comes to the front instead, keeping its unsaved changes.",
             "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "Absolute path." } }, "required": ["path"] }
         }),
         json!({
@@ -1410,6 +1427,15 @@ impl Studio {
         json!({
             "index": i,
             "name": self.names.get(i),
+            // (By its name; one nobody named, by its id, which tells it
+            // from the others and names it to group_objects.)
+            "group": self.shown_group(i).map(|g| {
+                if zigzag::svg::name_words(&g).is_empty() {
+                    g
+                } else {
+                    Studio::group_label(&g)
+                }
+            }),
             "kind": kind.name(),
             "allowed_kinds": allowed_kinds(s).iter().map(|k| k.name()).collect::<Vec<_>>(),
             "lettering": self.doc.lettering(i).map(|t| json!({ "text": t.text, "font": t.font, "size_mm": t.size_mm, "spacing_mm": t.spacing_mm, "arc_mm": t.arc_mm, "bold": t.bold, "italic": t.italic, "leading": t.leading, "align": t.align.name(), "h_scale": t.h_scale, "v_scale": t.v_scale, "case": t.case.name(), "on_path": t.path.is_some(), "path_offset": t.path_offset, "path_flip": t.path_flip, "kern": t.kern.iter().map(|(k, v)| json!({ "at": k, "mm": v })).collect::<Vec<_>>() })),
@@ -1928,6 +1954,24 @@ impl Studio {
             "add_svg" => self.tool_add_svg(args),
             "set_object" => self.tool_set_object(args),
             "delete_object" => self.tool_delete_object(args),
+            "group_objects" => self.tool_group(args),
+            "ungroup_objects" => self.resolve_many(args.get("objects")).and_then(|idx| {
+                let mut out = 0;
+                self.structural(|d| {
+                    out = d.ungroup(&idx)?;
+                    if out == 0 {
+                        anyhow::bail!("none of those is in a group");
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+                self.replan_soon();
+                Ok(ToolResult::text(format!(
+                    "{out} {} out of {} group.",
+                    if out == 1 { "object is" } else { "objects are" },
+                    if out == 1 { "its" } else { "their" }
+                )))
+            }),
             "move_object" => self.resolve(args.get("object")).and_then(|i| {
                 let to =
                     args.get("to")
@@ -3854,6 +3898,116 @@ impl Studio {
         Ok(ToolResult::json(
             &json!({ "added": [self.object_json(new)] }),
         ))
+    }
+
+    /// The id of the group called `name` (its name as it's shown, or its
+    /// id), among the groups objects show in.
+    fn group_called(&self, name: &str) -> Result<String, String> {
+        let mut ids: Vec<String> = Vec::new();
+        for i in 0..self.doc.shapes.len() {
+            if let Some(g) = self.shown_group(i)
+                && !ids.contains(&g)
+            {
+                ids.push(g);
+            }
+        }
+        let is = |g: &&String| {
+            *g == name || Studio::group_label(g).eq_ignore_ascii_case(name.trim())
+        };
+        let found: Vec<&String> = ids.iter().filter(is).collect();
+        match found.as_slice() {
+            [g] => Ok((*g).clone()),
+            [] => Err(format!(
+                "no group called '{name}'. Groups: {}",
+                if ids.is_empty() {
+                    "none".to_string()
+                } else {
+                    ids.iter()
+                        .map(|g| Studio::group_label(g))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )),
+            many => Err(format!(
+                "{} groups are called '{name}': name the one by its id ({})",
+                many.len(),
+                many.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
+    /// group_objects: a group made of objects, or objects put into one.
+    fn tool_group(&mut self, args: &Value) -> Result<ToolResult, String> {
+        let idx = self.resolve_many(args.get("objects"))?;
+        let name = args.get("name").and_then(Value::as_str);
+        let uids: Vec<usize> = idx.iter().map(|&i| self.doc.shapes[i].uid).collect();
+        let group = match args.get("into").and_then(Value::as_str) {
+            Some(into) => {
+                let id = self.group_called(into)?;
+                // Sewn with the group, after the last of it: listed with
+                // it, not as a part of it somewhere else in the order.
+                let last = self
+                    .group_members(&id)
+                    .into_iter()
+                    .filter(|m| !idx.contains(m))
+                    .max();
+                let before = last.and_then(|last| {
+                    (last + 1..self.doc.shapes.len())
+                        .find(|i| !idx.contains(i))
+                        .map(|i| self.doc.shapes[i].uid)
+                });
+                let mut moved = false;
+                self.structural(|d| {
+                    moved = d.regroup(&idx, Some(&id))?;
+                    if !moved {
+                        anyhow::bail!("they're in that group already");
+                    }
+                    if last.is_some() {
+                        Studio::reorder(d, &uids, before);
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+                id
+            }
+            None => {
+                if idx.len() < 2 {
+                    return Err(
+                        "a group is of two or more objects (or `into` a group there already)"
+                            .into(),
+                    );
+                }
+                let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
+                    return Err("give the group a `name` that says what it is".into());
+                };
+                // Sewn together, where the last of them is.
+                let last = idx.iter().copied().max().unwrap_or(0);
+                let before = (last + 1..self.doc.shapes.len())
+                    .find(|i| !idx.contains(i))
+                    .map(|i| self.doc.shapes[i].uid);
+                let mut id = String::new();
+                self.structural(|d| {
+                    let made = d.group(&idx)?;
+                    id = d.rename_group(&made, name)?;
+                    Studio::reorder(d, &uids, before);
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+                id
+            }
+        };
+        self.replan_soon();
+        let members = self.group_members(&group);
+        Ok(ToolResult::text(format!(
+            "The group '{}' has {} objects: {}.",
+            Studio::group_label(&group),
+            members.len(),
+            members
+                .iter()
+                .filter_map(|&i| self.names.get(i).cloned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
     }
 
     pub(crate) fn resolve_many(&self, v: Option<&Value>) -> Result<Vec<usize>, String> {
@@ -6135,6 +6289,73 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_groups_objects_by_name_and_sees_which_group_each_is_in() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="30mm" viewBox="0 0 60 30">
+            <rect id="sky" x="0" y="0" width="60" height="30" fill="#203040"/>
+            <rect id="wave_one" x="5" y="18" width="50" height="3" fill="#f0e0c0"/>
+            <rect id="wave_two" x="5" y="23" width="50" height="3" fill="#f0e0c0"/>
+            <rect id="sun" x="40" y="4" width="8" height="8" fill="#f0a020"/>
+        </svg>"##;
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool("add_svg", &json!({"svg": svg, "replace": true})));
+        let group = |s: &mut Studio, name: &str| -> Value {
+            let r = ok(s.run_tool("get_design", &json!({})));
+            r["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["name"] == name)
+                .unwrap_or_else(|| panic!("no {name}"))["group"]
+                .clone()
+        };
+        let run = |s: &mut Studio, tool: &str, args: Value| !s.run_tool(tool, &args).is_error;
+        assert_eq!(group(&mut s, "wave one"), Value::Null);
+        // A group is of things that belong together, and says what it is.
+        let waves = json!(["wave one", "wave two"]);
+        assert!(!run(&mut s, "group_objects", json!({"objects": waves})), "no name");
+        assert!(!run(&mut s, "group_objects", json!({"objects": ["sun"], "name": "sun"})));
+        let undo = s.undo.len();
+        assert!(run(&mut s, "group_objects", json!({"objects": waves, "name": "Waves"})));
+        assert_eq!(s.undo.len(), undo + 1, "one step");
+        assert_eq!(group(&mut s, "wave one"), json!("Waves"));
+        assert_eq!(group(&mut s, "wave two"), json!("Waves"));
+        assert_eq!(group(&mut s, "sun"), Value::Null);
+        assert_eq!(group(&mut s, "sky"), Value::Null);
+        // Into a group that's there, by its name; not one that isn't.
+        assert!(run(&mut s, "group_objects", json!({"objects": ["sun"], "into": "waves"})));
+        assert_eq!(group(&mut s, "sun"), json!("Waves"));
+        // (Sewn with the group, so it's listed as one: not in two parts.)
+        let members = s.group_members("Waves");
+        assert_eq!(members.len(), 3);
+        assert_eq!(s.group_run("Waves", members[0]), members);
+        assert!(!run(&mut s, "group_objects", json!({"objects": ["sky"], "into": "clouds"})));
+        // One shape, or a shape and its own outline, is no group.
+        s.set_selection(&[0]);
+        assert!(!s.action_enabled(crate::commands::Action::Group));
+        assert!(!s.action_enabled(crate::commands::Action::Ungroup));
+        let waves_now = s.group_members("Waves");
+        s.set_selection(&waves_now[..1]);
+        assert!(s.action_enabled(crate::commands::Action::Ungroup));
+        // Out again: the one, then every one (a second time there's nothing to do).
+        assert!(run(&mut s, "ungroup_objects", json!({"objects": "sun"})));
+        assert_eq!(group(&mut s, "sun"), Value::Null);
+        assert_eq!(group(&mut s, "wave two"), json!("Waves"));
+        assert!(run(&mut s, "ungroup_objects", json!({"objects": "all"})));
+        assert_eq!(group(&mut s, "wave two"), Value::Null);
+        assert!(!run(&mut s, "ungroup_objects", json!({"objects": "all"})));
+        // What it's told: how to group what it draws, and that it can.
+        assert!(INSTRUCTIONS.contains("group_objects"));
+        let specs = tool_specs();
+        let add = specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "add_svg")
+            .unwrap();
+        assert!(add["description"].as_str().unwrap().contains("parts of one thing"));
+    }
+
+    #[test]
     fn blend_is_a_document_setting_that_saves_and_comes_back() {
         let mut s = Studio::with_file(None, None);
         ok(s.run_tool("add_svg", &json!({ "svg": BADGE, "replace": true })));
@@ -7857,11 +8078,14 @@ mod tests {
             s.run_tool("export", &json!({ "path": at("x.bin") })),
             "format is required",
         );
-        ok(s.run_tool("export", &json!({ "path": at("x.vp3"), "format": "vp3" })));
+        // A format that's written but not read says so; VP3 is read.
+        ok(s.run_tool("export", &json!({ "path": at("x.pen"), "format": "pen" })));
         no(
-            s.run_tool("open_file", &json!({ "path": at("x.vp3") })),
+            s.run_tool("open_file", &json!({ "path": at("x.pen") })),
             "isn't a file ZigZag can open",
         );
+        ok(s.run_tool("export", &json!({ "path": at("x.vp3"), "format": "vp3" })));
+        ok(s.run_tool("open_file", &json!({ "path": at("x.vp3") })));
         let _ = std::fs::remove_dir_all(&dir);
 
         // A batch step that isn't {tool, arguments} says what a step is.

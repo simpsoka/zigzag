@@ -49,6 +49,7 @@ pub struct Tab {
     multi: Vec<usize>,
     isolated: Vec<String>,
     expanded: HashSet<String>,
+    open_runs: std::collections::HashMap<String, HashSet<usize>>,
     pub(crate) view: View,
     fit_pending: bool,
     undo: Vec<Document>,
@@ -83,6 +84,7 @@ impl Tab {
             multi: Vec::new(),
             isolated: Vec::new(),
             expanded: HashSet::new(),
+            open_runs: Default::default(),
             view: View::default(),
             fit_pending: true,
             undo: Vec::new(),
@@ -241,6 +243,7 @@ impl Studio {
         swap(&mut self.layout.multi, &mut t.multi);
         swap(&mut self.layout.isolated, &mut t.isolated);
         swap(&mut self.layout.expanded, &mut t.expanded);
+        swap(&mut self.layout.open_runs, &mut t.open_runs);
         swap(&mut self.view, &mut t.view);
         swap(&mut self.fit_pending, &mut t.fit_pending);
         swap(&mut self.undo, &mut t.undo);

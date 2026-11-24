@@ -2739,6 +2739,7 @@ pub fn activity(tool: &str) -> &'static str {
         "transform_objects" | "move_object" | "align_objects" => "Placing",
         "combine_shapes" => "Combining shapes",
         "rename_object" => "Naming",
+        "group_objects" | "ungroup_objects" => "Grouping",
         "simplify" | "clean_up" => "Tidying",
         "open_file" | "new_document" | "switch_document" | "list_documents" => "Opening",
         "list_machines" | "machine_status" => "Checking the machine",

@@ -439,7 +439,7 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
           <g id="set" transform="translate(5 5) scale(1.5)">
             <path id="before_fill" fill="#aa0000" d="M0 0 H6 V6 H0 Z"/>
-            <path id="H_satin_trim_trim_before=1" fill="#123456" d="M10 10 L13 10 L13 19 L27 19 L27 10 L30 10 L30 30 L27 30 L27 21 L13 21 L13 30 L10 30 Z"/>
+            <path id="H_satin_trim_trimbefore=1" fill="#123456" d="M10 10 L13 10 L13 19 L27 19 L27 10 L30 10 L30 30 L27 30 L27 21 L13 21 L13 30 L10 30 Z"/>
             <path id="after_fill" fill="#00aa00" d="M40 0 H46 V6 H40 Z"/>
           </g>
         </svg>"##;

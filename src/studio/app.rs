@@ -831,6 +831,7 @@ impl Studio {
         self.layout.multi.clear();
         // Which groups are open in Layers was the last document's.
         self.layout.expanded.clear();
+        self.layout.open_runs.clear();
         self.open_lone_groups();
         self.drag = None;
         self.backing = None;
@@ -1381,6 +1382,120 @@ impl Studio {
             .collect()
     }
 
+    /// The objects with `uids` moved to just before the one with uid
+    /// `before` (none: to the end) in `d`'s sewing order, keeping their own
+    /// order among themselves.
+    pub(crate) fn reorder(d: &mut Document, uids: &[usize], before: Option<usize>) {
+        let (moving, stays): (Vec<_>, Vec<_>) = std::mem::take(&mut d.shapes)
+            .into_iter()
+            .partition(|s| uids.contains(&s.uid));
+        let at = before
+            .and_then(|u| stays.iter().position(|s| s.uid == u))
+            .unwrap_or(stays.len());
+        let mut stays = stays;
+        let rest = stays.split_off(at);
+        d.shapes = stays.into_iter().chain(moving).chain(rest).collect();
+    }
+
+    /// Layers dropped in the Layers list: the objects at `moving` put into
+    /// the group `group` (None: out of every group) and sewn just before
+    /// the one at `before` (past the last: at the end). One undo step.
+    /// False when nothing came of it.
+    pub(crate) fn drop_layers(
+        &mut self,
+        moving: &[usize],
+        before: usize,
+        group: Option<&str>,
+    ) -> bool {
+        let uids: Vec<usize> = moving
+            .iter()
+            .filter_map(|&i| self.doc.shapes.get(i))
+            .map(|s| s.uid)
+            .collect();
+        // (The first that isn't moving, from there on: where they go.)
+        let before = (before..self.doc.shapes.len())
+            .find(|i| !moving.contains(i))
+            .map(|i| self.doc.shapes[i].uid);
+        let label = match moving {
+            [i] => self.names.get(*i).cloned().unwrap_or_default(),
+            many => format!("{} layers", many.len()),
+        };
+        let moving = moving.to_vec();
+        let done = self.structural(|d| {
+            d.regroup(&moving, group)?;
+            Self::reorder(d, &uids, before);
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                self.status = match group {
+                    Some(g) => format!("Moved {label} into {}.", Self::group_label(g)),
+                    None => format!("Moved {label} out of its group."),
+                };
+                true
+            }
+            Err(e) => {
+                self.status = format!("Couldn't move {label}: {e}");
+                false
+            }
+        }
+    }
+
+    /// Object › Group: the selected objects made one group, sewn together
+    /// where the last of them is.
+    pub fn group_selected(&mut self) {
+        let sel = self.sel_indices();
+        if self.subjects().len() < 2 {
+            self.status = "Select two or more layers to group.".into();
+            return;
+        }
+        let uids: Vec<usize> = sel.iter().map(|&i| self.doc.shapes[i].uid).collect();
+        let last = sel.iter().copied().max().unwrap_or(0);
+        let before = self.doc.shapes.get(last + 1).map(|s| s.uid);
+        let mut made = None;
+        let done = self.structural(|d| {
+            made = Some(d.group(&sel)?);
+            Self::reorder(d, &uids, before);
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                // (Shown shut, as one thing, and selected as that.)
+                let members = made.map(|g| self.group_members(&g)).unwrap_or_default();
+                self.set_selection(&members);
+                self.status = format!("Grouped {} layers.", members.len());
+            }
+            Err(e) => self.status = format!("Couldn't group: {e}"),
+        }
+    }
+
+    /// Object › Ungroup: the selected objects taken out of the group each
+    /// is in (a group left empty is gone).
+    pub fn ungroup_selected(&mut self) {
+        let sel = self.sel_indices();
+        let uids: Vec<usize> = sel.iter().map(|&i| self.doc.shapes[i].uid).collect();
+        let mut out = 0;
+        let done = self.structural(|d| {
+            out = d.ungroup(&sel)?;
+            if out == 0 {
+                anyhow::bail!("nothing selected is in a group");
+            }
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                let now = self.uid_indices(&uids);
+                self.set_selection(&now);
+                self.status = format!(
+                    "Took {out} {} out of {} group.",
+                    if out == 1 { "layer" } else { "layers" },
+                    if out == 1 { "its" } else { "their" }
+                );
+            }
+            Err(e) => self.status = format!("Couldn't ungroup: {e}"),
+        }
+    }
+
     /// Move the objects at `moving` to just before the one at `before`
     /// (as they're numbered now; past the last: to the end) in the sewing
     /// order, keeping their own order among themselves. One undo step;
@@ -1431,20 +1546,41 @@ impl Studio {
         }
     }
 
-    /// Add an SVG file's artwork to the document (Illustrator's Place).
+    /// Add a file's artwork to the document (Illustrator's Place): an SVG,
+    /// an image to trace, or a machine file, whose stitches come in as
+    /// manual-stitch objects at the size they were digitized.
     pub fn place_svg(&mut self, path: &Path) {
-        if path
+        let ext = path
             .extension()
-            .is_some_and(|e| zigzag::trace::is_image(&e.to_string_lossy()))
-        {
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if zigzag::trace::is_image(&ext) {
             self.open_image(path, crate::trace_ui::Target::Place);
             return;
         }
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = format!("Couldn't read {}: {e}", path.display());
-                return;
+        let stitches = zigzag::formats::READABLE_FORMATS.contains(&ext.as_str());
+        let text = if stitches {
+            let read = std::fs::read(path)
+                .map_err(anyhow::Error::from)
+                .and_then(|b| zigzag::formats::read::read_stitch_file(&b, &ext));
+            match read {
+                Ok(f) if f.blocks.is_empty() => {
+                    self.status = format!("{} has no stitches in it.", path.display());
+                    return;
+                }
+                Ok(f) => zigzag::formats::read::to_svg(&f),
+                Err(e) => {
+                    self.status = format!("Couldn't read {}: {e:#}", path.display());
+                    return;
+                }
+            }
+        } else {
+            match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.status = format!("Couldn't read {}: {e}", path.display());
+                    return;
+                }
             }
         };
         let mut added = Vec::new();
@@ -1455,7 +1591,9 @@ impl Studio {
             Ok(()) => {
                 self.set_selection(&added);
                 self.status = format!("Placed {} ({} objects).", path.display(), added.len());
-                if let Some(s) = self.fit_to_hoop(true) {
+                // Stitch files keep their size: scaled, their stitches
+                // would be longer or shorter than they were made to be.
+                if !stitches && let Some(s) = self.fit_to_hoop(true) {
                     self.status = format!(
                         "Placed {}. It was bigger than the hoop, so it's scaled to {:.0}%. Undo puts it back to full size.",
                         path.display(),
@@ -4151,6 +4289,124 @@ mod tests {
             .state()
             .group_members(&h.state().doc.shapes[line].groups[0]);
         assert_eq!(sorted_sel(&h), lines);
+    }
+
+    /// Every machine format on the Export menu also opens, and places into
+    /// another design, with every stitch where the file has it.
+    #[test]
+    fn machine_files_open_and_place_stitch_for_stitch() {
+        use std::collections::HashSet;
+        use zigzag::formats::read::read_stitch_file;
+        use zigzag::geom::Bounds;
+        let dir = std::env::temp_dir().join(format!("tl-machine-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let badge = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg"));
+        let mut source = Studio::with_file(Some(badge.clone()), None);
+        let bounds = |pts: &[P]| {
+            let mut b = Bounds::empty();
+            pts.iter().for_each(|p| b.add(*p));
+            b
+        };
+        // Every stitch of the file is in the plan, the whole design moved
+        // by one shift (a file's origin isn't the hoop's center).
+        let same_stitches = |s: &mut Studio, file: &[P], what: &str| {
+            s.plan_now();
+            let plan: Vec<P> = s
+                .design
+                .blocks
+                .iter()
+                .flat_map(|b| b.runs.iter().flat_map(|r| r.pts.iter().copied()))
+                .collect();
+            let shift = bounds(&plan).min - bounds(file).min;
+            let have: HashSet<(i64, i64)> = plan
+                .iter()
+                .map(|q| {
+                    let q = *q - shift;
+                    assert!(
+                        (q.x - q.x.round()).abs() < 0.01 && (q.y - q.y.round()).abs() < 0.01,
+                        "{what}: {q:?} is off the file's 0.1 mm grid"
+                    );
+                    (q.x.round() as i64, q.y.round() as i64)
+                })
+                .collect();
+            for p in file {
+                assert!(
+                    have.contains(&(p.x.round() as i64, p.y.round() as i64)),
+                    "{what}: the stitch at {p:?} moved or went missing"
+                );
+            }
+        };
+        for ext in ["pes", "dst", "exp", "jef", "vp3"] {
+            let path = dir.join(format!("badge.{ext}"));
+            source.export_to(ext, &path).unwrap();
+            let file = read_stitch_file(&std::fs::read(&path).unwrap(), ext).unwrap();
+            let runs: usize = file.blocks.iter().map(|b| b.runs.len()).sum();
+            let pts: Vec<P> = file
+                .blocks
+                .iter()
+                .flat_map(|b| b.runs.iter().flatten().copied())
+                .collect();
+            assert!(pts.len() > 1000, "{ext}: {} stitches read", pts.len());
+            let size = bounds(&pts);
+            let manual = |s: &Studio, idx: &[usize]| {
+                idx.iter()
+                    .all(|&i| s.doc.shapes[i].params.kind == Some(Kind::Manual))
+            };
+
+            // Open.
+            let mut s = Studio::with_file(Some(path.clone()), None);
+            assert!(s.status.starts_with("Opened"), "{ext}: {}", s.status);
+            let all: Vec<usize> = (0..s.doc.shapes.len()).collect();
+            assert_eq!(all.len(), runs, "{ext}: an object for each run");
+            assert!(manual(&s, &all), "{ext}: opened as manual stitches");
+            assert!(s.doc.path.is_none(), "{ext}: never saved over as SVG");
+            same_stitches(&mut s, &pts, &format!("open {ext}"));
+
+            // Place, into an empty design.
+            let mut s = Studio::with_file(None, None);
+            s.place_svg(&path);
+            assert!(s.status.starts_with("Placed"), "{ext}: {}", s.status);
+            let added = s.sel_indices();
+            assert_eq!(added.len(), runs, "{ext}: every run placed and selected");
+            assert!(manual(&s, &added), "{ext}: placed as manual stitches");
+            same_stitches(&mut s, &pts, &format!("place {ext}"));
+
+            // Place, beside artwork that's already there: at the size it
+            // was digitized, the artwork untouched, one undo step.
+            let mut s = Studio::with_file(Some(badge.clone()), None);
+            let before = s.doc.shapes.len();
+            s.place_svg(&path);
+            assert!(s.status.starts_with("Placed"), "{ext}: {}", s.status);
+            let added = s.sel_indices();
+            assert_eq!(s.doc.shapes.len(), before + runs, "{ext}");
+            assert!(added.iter().all(|&i| i >= before), "{ext}: {added:?}");
+            assert!(manual(&s, &added), "{ext}");
+            assert!(
+                !manual(&s, &[0]),
+                "{ext}: the artwork keeps its stitch type"
+            );
+            let b = s.art_bounds(&added);
+            // (A manual run's 0.4 mm line: 0.2 mm past its points all round.)
+            assert!(
+                (b.width() - size.width() - 4.0).abs() < 0.5
+                    && (b.height() - size.height() - 4.0).abs() < 0.5,
+                "{ext}: placed {}x{}, the file is {}x{}",
+                b.width(),
+                b.height(),
+                size.width(),
+                size.height()
+            );
+            assert_eq!(s.undo.len(), 1, "{ext}");
+        }
+        // A file that isn't what its name says: an error, nothing added.
+        let bad = dir.join("bad.vp3");
+        std::fs::write(&bad, b"not a vp3").unwrap();
+        let mut s = Studio::with_file(None, None);
+        let before = s.doc.shapes.len();
+        s.place_svg(&bad);
+        assert!(s.status.starts_with("Couldn't read"), "{}", s.status);
+        assert_eq!(s.doc.shapes.len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

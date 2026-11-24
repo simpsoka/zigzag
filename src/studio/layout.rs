@@ -115,6 +115,12 @@ pub struct LayoutState {
     pub pastes: usize,
     /// Groups shown open in the Layers panel.
     pub expanded: std::collections::HashSet<String>,
+    /// Runs of a group shown open on their own (a group with other layers
+    /// sewn between its own is listed as a row for each run): by group,
+    /// the uids of the layers in its open runs. A run is open while any of
+    /// its layers is here, so it stays open as they're reordered, and a
+    /// layer that joins it is in an open run.
+    pub open_runs: std::collections::HashMap<String, std::collections::HashSet<usize>>,
     /// Groups entered by double-clicking (Illustrator's isolation mode),
     /// outermost first. Clicks select inside the innermost one.
     pub isolated: Vec<String>,
@@ -343,6 +349,96 @@ impl Studio {
             .collect()
     }
 
+    /// The objects of group `g` sewn one after another with object `i`
+    /// among them: all of the group, unless other objects are sewn between
+    /// its own. Then it's listed in Layers as a group for each such run,
+    /// and a run is what a click selects, as it's what the list shows: a
+    /// background sewn first doesn't take with it waves sewn last, for
+    /// having been added to the design together.
+    pub fn group_run(&self, g: &str, i: usize) -> Vec<usize> {
+        let shapes = &self.doc.shapes;
+        let within = |j: usize| shapes[j].groups.iter().any(|x| x == g);
+        if i >= shapes.len() || !within(i) {
+            return Vec::new();
+        }
+        let (mut lo, mut hi) = (i, i);
+        while lo > 0 && within(lo - 1) {
+            lo -= 1;
+        }
+        while hi + 1 < shapes.len() && within(hi + 1) {
+            hi += 1;
+        }
+        (lo..=hi).collect()
+    }
+
+    /// The group object `i` shows in, in Layers: the innermost it's in that
+    /// isn't a group of one (which is listed as its object).
+    pub fn shown_group(&self, i: usize) -> Option<String> {
+        self.doc
+            .shapes
+            .get(i)?
+            .groups
+            .iter()
+            .rev()
+            .find(|g| !one_thing(&self.doc.shapes, &self.group_members(g)))
+            .cloned()
+    }
+
+    /// Whether the Layers row of group `g` over object `i` is open: the
+    /// whole group is (`layout.expanded`: an entered group, a document's
+    /// only one), or that run of it (`layout.open_runs`).
+    pub fn run_open(&self, g: &str, i: usize) -> bool {
+        if self.layout.expanded.contains(g) {
+            return true;
+        }
+        let Some(open) = self.layout.open_runs.get(g).filter(|o| !o.is_empty()) else {
+            return false;
+        };
+        self.group_run(g, i)
+            .iter()
+            .any(|&m| open.contains(&self.doc.shapes[m].uid))
+    }
+
+    /// Open or close the Layers row of group `g` over object `i`: that
+    /// row, not the group's other runs (each stays as it was).
+    pub fn toggle_run(&mut self, g: &str, i: usize) {
+        let was = self.run_open(g, i);
+        let uids = |s: &Studio, of: Vec<usize>| -> Vec<usize> {
+            of.into_iter().map(|m| s.doc.shapes[m].uid).collect()
+        };
+        // Open as a whole till now: each run on its own from here.
+        if self.layout.expanded.remove(g) {
+            let all = uids(self, self.group_members(g));
+            self.layout.open_runs.entry(g.to_string()).or_default().extend(all);
+        }
+        let run = uids(self, self.group_run(g, i));
+        let open = self.layout.open_runs.entry(g.to_string()).or_default();
+        if was {
+            open.retain(|u| !run.contains(u));
+        } else {
+            open.extend(run);
+        }
+    }
+
+    /// Whether any of the objects at `of` is in a group that shows as one
+    /// (in one pass over the design, however many are asked about).
+    pub fn any_grouped(&self, of: &[usize]) -> bool {
+        // Each group's first element, and whether it has another.
+        let mut seen: std::collections::HashMap<&str, (&str, bool)> =
+            std::collections::HashMap::new();
+        for s in &self.doc.shapes {
+            for g in &s.groups {
+                let e = seen.entry(g.as_str()).or_insert((s.id.as_str(), false));
+                e.1 |= e.0 != s.id || s.id.is_empty();
+            }
+        }
+        of.iter().filter_map(|&i| self.doc.shapes.get(i)).any(|s| {
+            s.groups
+                .iter()
+                .any(|g| seen.get(g.as_str()).is_some_and(|e| e.1))
+        })
+    }
+
     /// The entered group, if any.
     pub fn scope(&self) -> Option<&str> {
         self.layout.isolated.last().map(String::as_str)
@@ -402,15 +498,16 @@ impl Studio {
             .collect()
     }
 
-    /// Select object `i` the way a click does: its whole group, unless
-    /// `direct` (⌘-click). `add` (Shift) adds to or removes from the
-    /// selection. Clicking outside the entered group leaves it.
+    /// Select object `i` the way a click does: its whole group (the run of
+    /// it that `i` is sewn in: see `group_run`), unless `direct`
+    /// (⌘-click). `add` (Shift) adds to or removes from the selection.
+    /// Clicking outside the entered group leaves it.
     pub fn click_select(&mut self, i: usize, add: bool, direct: bool) {
         if !self.in_scope(i) {
             self.exit_isolation();
         }
         let pick = match (direct, self.click_group(i)) {
-            (false, Some(g)) => self.group_members(&g),
+            (false, Some(g)) => self.group_run(&g, i),
             _ => vec![i],
         };
         if !add {

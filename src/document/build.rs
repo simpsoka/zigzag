@@ -1380,7 +1380,7 @@ mod tests {
         let three = || {
             let mut d = doc(&[
                 ("a", 10.0, 10.0, 20.0, "#c00"),
-                ("b_trim_trim_before=1", 20.0, 10.0, 20.0, "#00c"),
+                ("b_trim_trimbefore=1", 20.0, 10.0, 20.0, "#00c"),
                 ("c", 45.0, 45.0, 5.0, "#0c0"),
             ]);
             // Sewn c, b, a: an order that isn't the file's.
@@ -1442,16 +1442,34 @@ mod tests {
     }
 
     #[test]
+    fn trim_before_can_override_a_group_and_roundtrip() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
+          <g id="group_trimbefore">
+            <path id="first_fill" fill="#123456" d="M10 10 H20 V20 H10 Z"/>
+            <path id="second_fill" fill="#123456" d="M30 10 H40 V20 H30 Z"/>
+          </g>
+        </svg>"##;
+        let mut d = Document::from_svg(svg, "t", None).unwrap();
+        assert_eq!(d.shapes[0].params.trim_before, Some(true));
+        assert_eq!(d.shapes[1].params.trim_before, Some(true));
+        d.shapes[0].params.trim_before = Some(false);
+        d.sync().unwrap();
+        let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
+        assert_eq!(again.shapes[0].params.trim_before, Some(false));
+        assert_eq!(again.shapes[1].params.trim_before, Some(true));
+    }
+
+    #[test]
     fn a_trim_or_a_stop_turned_off_stays_off() {
         // (They're words in the id, as a stitch type is: each read as a
         // setting, and so no part of the name.)
         let mut d = doc(&[("box", 10.0, 10.0, 20.0, "#c00")]);
-        for word in ["trim", "trim_before", "stop", "spiral"] {
+        for word in ["trim", "trimbefore", "stop", "spiral"] {
             let set = |d: &mut Document, on: Option<bool>| {
                 let p = &mut d.shapes[0].params;
                 match word {
                     "trim" => p.trim = on,
-                    "trim_before" => p.trim_before = on,
+                    "trimbefore" => p.trim_before = on,
                     "stop" => p.stop = on,
                     _ => p.spiral = on,
                 }
@@ -1461,7 +1479,7 @@ mod tests {
                 let p = &d.shapes[0].params;
                 match word {
                     "trim" => p.trim,
-                    "trim_before" => p.trim_before,
+                    "trimbefore" => p.trim_before,
                     "stop" => p.stop,
                     _ => p.spiral,
                 }

@@ -922,10 +922,11 @@ mod tests {
         h.run_steps(2);
         assert_eq!(h.state().doc.shapes[sun].params.trim_before, Some(true));
         assert!(h.state().undo.len() > undos);
-        assert!(h.state().doc.to_svg().unwrap().contains("trim_before=1"));
+        assert!(h.state().doc.to_svg().unwrap().contains("trimbefore=1"));
         h.get_by_label("Trim Before").click();
         h.run_steps(2);
-        assert_eq!(h.state().doc.shapes[sun].params.trim_before, None);
+        assert_eq!(h.state().doc.shapes[sun].params.trim_before, Some(false));
+        assert!(h.state().doc.to_svg().unwrap().contains("trimbefore=0"));
         h.get_by_label("Trim Before").click();
         h.get_by_label("Trim After").click();
         h.get_by_label("Stop").click();

@@ -18,6 +18,7 @@ mod cleanup;
 mod columns;
 mod edit;
 mod glyphs;
+mod groups;
 mod lettering;
 mod paths;
 mod simplify;
@@ -344,7 +345,7 @@ impl Document {
         d
     }
 
-    /// Open an SVG, a machine file (PES/PEC/DST/EXP/JEF) as manual stitches,
+    /// Open an SVG, a machine file (PES/PEC/DST/EXP/JEF/VP3) as manual stitches,
     /// or a raster logo (PNG/JPEG/…) traced into shapes. Machine files and
     /// images get no save path, so they're never overwritten with SVG.
     pub fn open(path: &Path) -> Result<Document> {
@@ -373,7 +374,7 @@ impl Document {
             return Document::from_svg(&t.svg, &name, None);
         }
         // Anything else is taken for an SVG; what isn't even text is a
-        // kind of file ZigZag doesn't open (a VP3, say: written, not read).
+        // kind of file ZigZag doesn't open (a PEN, say: written, not read).
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let Ok(xml) = String::from_utf8(bytes) else {
             bail!(
@@ -704,6 +705,44 @@ impl Document {
             .map(|c| c.range().end)
             .unwrap_or(inner_start);
         let inner = &normalized[inner_start..inner_end];
+        // A drawing whose viewBox isn't its size comes out of usvg in one
+        // group, there only to scale it: not a group anyone made, though it
+        // would show as one (everything added, selected and listed as one
+        // thing). What's in it comes in bare, and its scale goes on the
+        // wrapper. (A group with an id, or with anything else to say, is
+        // the drawing's own, and stays.)
+        let kids: Vec<_> = root.children().filter(|c| c.is_element()).collect();
+        let scaler = match kids.as_slice() {
+            [g] | [_, g]
+                if g.tag_name().name() == "g"
+                    && g.attributes().all(|a| a.name() == "transform")
+                    && g.children().any(|c| c.is_element())
+                    && kids[..kids.len() - 1]
+                        .iter()
+                        .all(|d| d.tag_name().name() == "defs") =>
+            {
+                Some(*g)
+            }
+            _ => None,
+        };
+        let (inner, lead) = match scaler {
+            Some(g) => {
+                let defs = kids[..kids.len() - 1]
+                    .iter()
+                    .map(|d| &normalized[d.range()])
+                    .collect::<String>();
+                let (a, b) = (
+                    g.first_child().map_or(g.range().end, |c| c.range().start),
+                    g.last_child().map_or(g.range().end, |c| c.range().end),
+                );
+                (
+                    format!("{defs}{}", &normalized[a..b]),
+                    g.attribute("transform")
+                        .map_or(crate::geom::IDENTITY, edit::parse_transform),
+                )
+            }
+            None => (inner.to_string(), crate::geom::IDENTITY),
+        };
 
         // Fragment px → main px.
         let (fw, fh) = (bbox.width() as f64, bbox.height() as f64);
@@ -728,6 +767,8 @@ impl Document {
             mat_inv(root_ts).ok_or_else(|| anyhow!("document root transform isn't invertible"))?,
             m_px,
         );
+        // (With the scale of the group left out, if one was.)
+        let w = mat_mul(w, lead);
 
         self.next_group += 1;
         let gid = format!("tl-added-{}", self.next_group);

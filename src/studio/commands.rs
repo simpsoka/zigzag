@@ -47,6 +47,10 @@ pub enum Action {
     BringForward,
     SendBackward,
     SendToBack,
+    /// Object › Group / Ungroup: a group made of the selection, or the
+    /// selection taken out of its group.
+    Group,
+    Ungroup,
     GroupColors,
     AddText,
     Tool(Tool),
@@ -327,6 +331,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                         Item(Action::Pathfinder(PathOp::Exclude), "Exclude", None),
                     ],
                 ),
+                Sep,
+                Item(Action::Group, "Group", cmd(Key::G)),
+                Item(Action::Ungroup, "Ungroup", cmd_shift(Key::G)),
                 Sep,
                 Sub(
                     "Sewing Order",
@@ -672,6 +679,9 @@ impl Studio {
             | Action::SendBackward
             | Action::SendToBack => has_sel,
             Action::Pathfinder(_) => self.subjects().len() >= 2,
+            // (A shape and its own outline are one thing: not a group.)
+            Action::Group => self.subjects().len() >= 2,
+            Action::Ungroup => has_sel && self.any_grouped(&self.sel_indices()),
             Action::RemoveOutline => self
                 .subjects()
                 .iter()
@@ -763,7 +773,12 @@ impl Studio {
             Action::Place => {
                 let mut exts = vec!["svg"];
                 exts.extend(zigzag::trace::IMAGE_FORMATS);
-                let req = crate::file_dialog::Request::open().filter("Artwork", &exts);
+                let mut all = exts.clone();
+                all.extend(zigzag::formats::READABLE_FORMATS);
+                let req = crate::file_dialog::Request::open()
+                    .filter("Artwork and machine files", &all)
+                    .filter("Artwork", &exts)
+                    .filter("Machine files", &zigzag::formats::READABLE_FORMATS);
                 self.file_dialog(req, crate::file_dialog::Then::Place);
             }
             Action::Save => {
@@ -811,6 +826,8 @@ impl Studio {
             Action::CenterInHoop => {
                 self.transform_selected(translation(zigzag::geom::P::default() - c), "Centered");
             }
+            Action::Group => self.group_selected(),
+            Action::Ungroup => self.ungroup_selected(),
             Action::BringToFront => self.move_selected_to(false),
             Action::SendToBack => self.move_selected_to(true),
             Action::BringForward => self.move_selected(1),

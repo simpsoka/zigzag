@@ -96,9 +96,17 @@ jobs:
             $actualVersion = (Get-Item "$stage\$exeName").VersionInfo.ProductVersion
             if ($actualVersion -ne $ver) { throw "$exeName has version $actualVersion; expected $ver" }
           }
-          $studioHelp = & "$stage\ZigZag.exe" --help
-          if ($LASTEXITCODE -ne 0 -or "$studioHelp" -notmatch 'usage: zigzag-studio') {
-            throw "The packaged studio failed its startup check."
+          # The studio is a GUI-subsystem executable: wait explicitly so
+          # PowerShell keeps its output handles open until it exits.
+          $helpOut = Join-Path $env:RUNNER_TEMP 'zigzag-studio-help.stdout.txt'
+          $helpErr = Join-Path $env:RUNNER_TEMP 'zigzag-studio-help.stderr.txt'
+          $studio = Start-Process -FilePath (Resolve-Path "$stage\ZigZag.exe").Path `
+            -ArgumentList '--help' -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $helpOut -RedirectStandardError $helpErr
+          $studioHelp = Get-Content $helpOut -Raw
+          if ($studio.ExitCode -ne 0 -or "$studioHelp" -notmatch 'usage: zigzag-studio') {
+            $studioError = Get-Content $helpErr -Raw
+            throw "The packaged studio failed its startup check (exit $($studio.ExitCode)).`n$studioError`n$studioHelp"
           }
           $cliVersion = & "$stage\zigzag-cli.exe" --version
           if ($LASTEXITCODE -ne 0 -or $cliVersion -ne "zigzag $ver") {
