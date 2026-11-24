@@ -2637,13 +2637,13 @@ impl Studio {
                             let cw = galley.size().x;
                             let (name_rect, count_rect) =
                                 layer_text_columns(rect, rect.left() + indent + 44.0, cw);
-                            painter
-                                .with_clip_rect(count_rect.intersect(ui.clip_rect()))
-                                .galley(
+                            if count_rect.is_positive() {
+                                painter.with_clip_rect(count_rect).galley(
                                     Pos2::new(right - cw, rect.center().y - galley.size().y / 2.0),
                                     galley,
                                     fg2,
                                 );
+                            }
                             painter.with_clip_rect(name_rect).text(
                                 Pos2::new(name_rect.left(), rect.center().y),
                                 egui::Align2::LEFT_CENTER,
@@ -2781,17 +2781,17 @@ impl Studio {
                         fmt_int(count)
                     };
                     let galley =
-                        painter.layout_no_wrap(count_text, egui::FontId::proportional(11.0), fg2);
+                        painter.layout_no_wrap(count_text.clone(), egui::FontId::proportional(11.0), fg2);
                     let cw = galley.size().x;
                     let (mut name_rect, count_rect) =
                         layer_text_columns(rect, rect.left() + indent + 62.0, cw);
-                    painter
-                        .with_clip_rect(count_rect.intersect(ui.clip_rect()))
-                        .galley(
+                    if count_rect.is_positive() {
+                        painter.with_clip_rect(count_rect).galley(
                             Pos2::new(right - cw, rect.center().y - galley.size().y / 2.0),
                             galley,
                             fg2,
                         );
+                    }
                     let warn = warned.contains(&i);
                     let name_right = name_rect.right();
                     if warn && name_rect.width() >= 16.0 {
@@ -2899,6 +2899,11 @@ impl Studio {
                             clicked = Some(i);
                         }
                     }
+                    let resp = if !count_rect.is_positive() {
+                        resp.on_hover_text(format!("{label}: {count_text}"))
+                    } else {
+                        resp
+                    };
                     resp.context_menu(|ui| self.object_menu_items(ui));
                 }
                 // (A little below the list counts: one as tall as its rows
@@ -4571,14 +4576,18 @@ const NEST: f32 = THUMB + 10.0;
 const FLAG_COL: f32 = 18.0;
 const GUTTER: f32 = 2.0 * FLAG_COL + 2.0;
 
-/// Reserve the leading icons even when a large count cannot fit in a narrow row.
+/// Reserve the leading icons and some of the name. Never show a partial
+/// stitch count: if it cannot fit, the full value is available on hover.
 fn layer_text_columns(row: Rect, name_left: f32, count_width: f32) -> (Rect, Rect) {
     let right = (row.right() - 8.0).max(row.left());
     let left = name_left.clamp(row.left(), right);
-    let count_left = (right - count_width).max(left);
+    const GAP: f32 = 6.0;
+    const MIN_NAME: f32 = 24.0;
+    let fits = right - left >= count_width + GAP + MIN_NAME;
+    let count_left = if fits { right - count_width } else { right };
     let name = Rect::from_min_max(
         Pos2::new(left, row.top()),
-        Pos2::new((count_left - 6.0).max(left), row.bottom()),
+        Pos2::new(if fits { count_left - GAP } else { right }, row.bottom()),
     );
     let count = Rect::from_min_max(
         Pos2::new(count_left, row.top()),
@@ -4803,8 +4812,13 @@ mod tests {
                 assert!(row.contains_rect(name) && row.contains_rect(count));
                 assert!(name.width() >= 0.0 && count.width() >= 0.0);
                 assert!(name.right() <= count.left());
+                assert!(count.width() == 0.0 || count.width() == 90.0);
             }
         }
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(180.0, 26.0));
+        let (name, count) = layer_text_columns(row, 100.0, 90.0);
+        assert_eq!(count.width(), 0.0);
+        assert_eq!(name.width(), 72.0);
     }
 
     #[test]
