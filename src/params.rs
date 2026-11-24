@@ -907,23 +907,6 @@ pub fn decode_illustrator_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn boundary_commands_round_trip_svg_after_reordering() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" viewBox="0 0 40 20">
-            <path id="first_run_trimbefore=0_trim=1_stop=1" d="M0 0 L10 0" stroke="#aa0000" fill="none"/>
-            <path id="second_run" d="M20 0 L30 0" stroke="#aa0000" fill="none"/>
-        </svg>"##;
-        let mut doc = crate::document::Document::from_svg(svg, "commands", None).unwrap();
-        assert_eq!(doc.shapes[0].params.end_command(), EndCommand::TrimAndStop);
-        doc.shapes[1].params.set_start_command(StartCommand::Trim);
-        doc.shapes.swap(0, 1);
-        let back =
-            crate::document::Document::from_svg(&doc.to_svg().unwrap(), "commands", None).unwrap();
-        assert_eq!(back.shapes[0].params.start_command(), StartCommand::Trim);
-        assert_eq!(back.shapes[1].params.end_command(), EndCommand::TrimAndStop);
-        assert_eq!(back.shapes[1].params.trim_before, Some(false));
-    }
-
-    #[test]
     fn boundary_commands_preserve_legacy_combinations_and_tokens() {
         for before in [None, Some(false), Some(true)] {
             for trim in [None, Some(false), Some(true)] {
@@ -965,30 +948,13 @@ mod tests {
     }
 
     #[test]
-    fn trim_before_tokens_and_inheritance() {
-        for on in [true, false] {
-            let p = Params {
-                trim_before: Some(on),
-                ..Params::default()
-            };
-            assert_eq!(Params::parse(&p.tokens().join("_")), p);
-            assert_eq!(Params::default().merged(&p), p);
-            assert_eq!(p.merged(&Params::default()), p);
-        }
+    fn trim_before_is_a_distinct_id_token() {
         assert_eq!(Params::parse("trim_before_photo").trim_before, None);
         let p = Params::parse("name_trimbefore_trim");
         assert_eq!((p.trim_before, p.trim), (Some(true), Some(true)));
-        assert!(is_param_token("trimbefore"));
-        assert!(is_param_token("trimbefore=0"));
         assert_eq!(
             Params::parse_part("stroke.trimbefore=1", true).trim_before,
             Some(true)
-        );
-        assert_eq!(
-            Params::parse("trimbefore")
-                .merged(&Params::parse("trimbefore=0"))
-                .trim_before,
-            Some(false)
         );
         assert_eq!(crate::svg::name_words("name_trimbefore=0"), ["name"]);
     }

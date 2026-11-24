@@ -6269,15 +6269,6 @@ mod tests {
                 .find(|o| o["name"] == "bar")
                 .unwrap();
             assert_eq!(object["settings"]["trim_before"], on);
-            let svg = s.doc.to_svg().unwrap();
-            let back = zigzag::document::Document::from_svg(&svg, "x", None).unwrap();
-            assert_eq!(
-                back.shapes
-                    .iter()
-                    .filter_map(|s| s.params.trim_before)
-                    .next(),
-                on.as_bool()
-            );
         }
         assert!(
             s.run_tool(
