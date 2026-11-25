@@ -46,7 +46,15 @@ impl GroupTree {
         }
     }
 
-    fn emit(&self, pieces: &[String], used: &mut HashSet<String>, out: &mut String) {
+    /// Write the groups and what's in them; `names` are the copied groups'
+    /// names, which the new groups keep.
+    fn emit(
+        &self,
+        pieces: &[String],
+        used: &mut HashSet<String>,
+        names: &HashMap<String, String>,
+        out: &mut String,
+    ) {
         for it in &self.items {
             match it {
                 TreeItem::Fragment(k) => out.push_str(&pieces[*k]),
@@ -65,8 +73,16 @@ impl GroupTree {
                         id = format!("{base}_#{k}");
                     }
                     used.insert(id.clone());
-                    out.push_str(&format!("<g id=\"{}\">\n", xml_escape(&id)));
-                    g.emit(pieces, used, out);
+                    match names.get(&g.id) {
+                        Some(name) => out.push_str(&format!(
+                            "<g id=\"{}\" {}=\"{}\">\n",
+                            xml_escape(&id),
+                            super::GROUP_NAME_ATTR,
+                            xml_escape(name)
+                        )),
+                        None => out.push_str(&format!("<g id=\"{}\">\n", xml_escape(&id))),
+                    }
+                    g.emit(pieces, used, names, out);
                     out.push_str("</g>\n");
                 }
             }
@@ -90,6 +106,9 @@ pub struct Fragment {
     /// Groups it sits in that were copied whole, outermost first; pasting
     /// rebuilds them so a copied group stays a group.
     groups: Vec<String>,
+    /// Those groups' names (see `Document::group_name`), so they go with
+    /// them into whichever document they're pasted in.
+    group_names: HashMap<String, String>,
 }
 
 pub(super) fn fmt_matrix(m: Affine) -> String {
@@ -405,6 +424,18 @@ impl Document {
                     .find(|s| s.id == id)
                     .map(|s| s.groups.iter().filter(|g| whole(g)).cloned().collect())
                     .unwrap_or_default(),
+                group_names: self
+                    .shapes
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| {
+                        s.groups
+                            .iter()
+                            .filter(|g| whole(g))
+                            .filter_map(|g| Some((g.clone(), self.group_names.get(g)?.clone())))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 id,
             });
         }
@@ -504,7 +535,12 @@ impl Document {
             ));
         }
         let mut body = String::new();
-        tree.emit(&pieces, &mut used, &mut body);
+        // (The names came with the copies: from this document or another.)
+        let names: HashMap<String, String> = fragments
+            .iter()
+            .flat_map(|f| f.group_names.iter().map(|(g, n)| (g.clone(), n.clone())))
+            .collect();
+        tree.emit(&pieces, &mut used, &names, &mut body);
         let close = self
             .xml
             .rfind("</svg>")

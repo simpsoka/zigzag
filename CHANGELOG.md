@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A machine file placed with File › Place comes in as one group named
+  after the file, with its whole name (words that are also stitch types
+  too, like "Red Cross Logo"); renamed and copied groups keep theirs.
+- Agents can place files with `place_file`, and the command line with
+  `zigzag convert … --place FILE[@X,Y]` (PES, PEC, DST, EXP, JEF or VP3).
+
 ## 0.1.11 — 2026-11-23
 
 - Layers shows a picture of each layer beside its stitch type, in rows

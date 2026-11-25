@@ -249,7 +249,7 @@ impl Document {
     /// Read the objects from the file again, sewn in the order they were.
     /// (As read, they come in the file's order where their ids don't say
     /// another.)
-    fn read_again(&mut self) -> Result<()> {
+    pub(super) fn read_again(&mut self) -> Result<()> {
         let order: HashMap<usize, usize> = self
             .shapes
             .iter()
@@ -263,9 +263,10 @@ impl Document {
         Ok(())
     }
 
-    /// Give the group `id` a name (its letters, digits and spaces; a word
-    /// that's a stitch setting would be taken for one, and is left out).
-    /// Returns the id it has then.
+    /// Give the group `id` a name. Its id takes the name's letters, digits
+    /// and spaces (a word that's a stitch setting would be taken for one,
+    /// and is left out); the name itself is kept whole beside it, which is
+    /// what the group is called. Returns the id it has then.
     pub fn rename_group(&mut self, id: &str, name: &str) -> Result<String> {
         let plain: String = name
             .trim()
@@ -288,6 +289,7 @@ impl Document {
             k += 1;
         }
         self.xml = self.xml.replacen(&old, &format!("id=\"{new}\""), 1);
+        self.xml = super::with_group_name(&self.xml, &new, name.trim())?;
         self.read_again()?;
         Ok(new)
     }

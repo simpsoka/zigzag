@@ -303,6 +303,10 @@ pub struct Document {
     pub(crate) lettering_ids: HashSet<String>,
     /// The prompts agents made elements for (by element id; see [`PROMPT_ATTR`]).
     prompts: HashMap<String, String>,
+    /// Groups' names as they were given (`<g data-zigzag-name>`, by group id):
+    /// an id keeps only the words that aren't stitch settings, so a placed
+    /// "Fun Run 5k.pes" is id `Fun_5k` but still named "Fun Run 5k".
+    group_names: HashMap<String, String>,
     /// The SVG as usvg read it at the last import (outlines and transforms
     /// are read from it rather than parsing the SVG again). Shared by the
     /// document's copies (undo steps).
@@ -341,7 +345,12 @@ impl Document {
     pub fn empty() -> Document {
         let mut d =
             Document::from_svg(EMPTY_SVG, "untitled", None).expect("built-in template parses");
-        d.offset = P::default();
+        // The hoop's center is the canvas's (0, 0), where the template's
+        // viewBox puts it, so what's added on the hoop is saved where other
+        // apps show it on the canvas too. (Not the px origin: that's the
+        // viewBox's corner.)
+        let ts = d.root_transform().expect("built-in template has a size");
+        d.offset = P::new((ts[4] * PX_TO_UNITS).round(), (ts[5] * PX_TO_UNITS).round());
         d
     }
 
@@ -406,6 +415,7 @@ impl Document {
             next_group,
             lettering_ids: HashSet::new(),
             prompts: HashMap::new(),
+            group_names: HashMap::new(),
             tree: None,
             root_ts: Default::default(),
             lettering_memo: Default::default(),
@@ -455,13 +465,23 @@ impl Document {
                     ))
                 })
                 .collect();
-            (ids, prompts)
+            let group_names: HashMap<String, String> = doc
+                .descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "g")
+                .filter_map(|n| {
+                    let name = n.attribute(GROUP_NAME_ATTR)?.trim();
+                    let id = n.attribute("id")?;
+                    (!name.is_empty()).then(|| (id.to_string(), name.to_string()))
+                })
+                .collect();
+            (ids, prompts, group_names)
         };
         let (mut shapes, tree, found) =
             svg::load_with_tree_and(self.xml.as_bytes(), lettering_ids)?;
-        let (ids, prompts) = found.unwrap_or_default();
+        let (ids, prompts, group_names) = found.unwrap_or_default();
         self.lettering_ids = ids;
         self.prompts = prompts;
+        self.group_names = group_names;
         self.tree = Some(std::sync::Arc::new(tree));
         shapes.retain(|s| !self.removed_parts.contains(&(s.id.clone(), s.part)));
         for s in &mut shapes {
@@ -796,6 +816,100 @@ impl Document {
             .collect())
     }
 
+    /// Place a file in this design (Illustrator's Place): SVG artwork as
+    /// [`Document::add_svg`] adds it, a raster logo traced first, or a
+    /// machine file as [`Document::place_stitch_file`] places it. Returns
+    /// the indices of the new shapes.
+    pub fn place_file(&mut self, path: &Path, place: Placement) -> Result<Vec<usize>> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        if crate::formats::READABLE_FORMATS.contains(&ext.as_str()) {
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return self.place_stitch_file(&bytes, &ext, &name, place);
+        }
+        let svg = if crate::trace::is_image(&ext) {
+            crate::trace::trace_bytes(&bytes, &crate::trace::TraceOptions::default())
+                .with_context(|| format!("tracing {}", path.display()))?
+                .svg
+        } else {
+            String::from_utf8(bytes).map_err(|_| {
+                anyhow!(
+                    "{} isn't a file ZigZag can place: it places SVG, images to trace, and {} machine files",
+                    path.display(),
+                    crate::formats::READABLE_FORMATS.join("/").to_uppercase()
+                )
+            })?
+        };
+        self.add_svg(&svg, place)
+    }
+
+    /// Place a machine file's stitches (`ext` names its format): manual
+    /// stitches at the size they were digitized (scaled, they'd be longer or
+    /// shorter than they were made to be), in one group named `name` (the
+    /// file's name), so the design comes in as one thing.
+    pub fn place_stitch_file(
+        &mut self,
+        bytes: &[u8],
+        ext: &str,
+        name: &str,
+        place: Placement,
+    ) -> Result<Vec<usize>> {
+        let file = crate::formats::read::read_stitch_file(bytes, ext)?;
+        if file
+            .blocks
+            .iter()
+            .all(|b| b.runs.iter().all(|r| r.is_empty()))
+        {
+            bail!(
+                "the {} file has no stitches in it",
+                ext.to_ascii_uppercase()
+            );
+        }
+        let svg = crate::formats::read::to_svg_grouped(&file, &placed_group_id(name));
+        let added = self.add_svg(&svg, place)?;
+        // The id keeps only words that aren't stitch settings: the group's
+        // name is the file's, whole.
+        let group = added
+            .first()
+            .and_then(|&i| self.shapes[i].groups.first().cloned());
+        if let Some(g) = group
+            && !name.trim().is_empty()
+        {
+            self.xml = with_group_name(&self.xml, &g, name.trim())?;
+            self.read_again()?;
+        }
+        Ok(added)
+    }
+
+    /// The objects' names, as [`svg::display_names`] has them, except that
+    /// an object with no name of its own, called what its group is, has
+    /// the group's whole name (a placed file of one run: the file's).
+    pub fn object_names(&self) -> Vec<String> {
+        let mut names = svg::display_names(&self.shapes);
+        for (n, s) in names.iter_mut().zip(&self.shapes) {
+            if let Some(full) = self.group_names.get(&s.label) {
+                let base = svg::name_words(&s.label).join(" ");
+                if let Some(rest) = n.strip_prefix(base.as_str()) {
+                    *n = format!("{full}{rest}");
+                }
+            }
+        }
+        names
+    }
+
+    /// The name a group was given (see `group_names`), if it has one beyond
+    /// its id.
+    pub fn group_name(&self, id: &str) -> Option<&str> {
+        self.group_names.get(id).map(String::as_str)
+    }
+
     /// The transform from root user units to px (viewBox scaling).
     fn root_transform(&self) -> Result<[f64; 6]> {
         // It depends only on the root element's attributes (viewBox, size):
@@ -911,6 +1025,10 @@ impl Document {
                 Params {
                     thread: (s.color != s.paint).then_some(s.color),
                     order: write_order.then_some(i as u32),
+                    trim_before: s
+                        .params
+                        .trim_before
+                        .and_then(|on| s.trim_before_setting(on)),
                     ..s.params.clone()
                 }
             };
@@ -931,7 +1049,17 @@ impl Document {
                 if has_fill {
                     tokens.extend(toks.into_iter().map(|t| format!("stroke.{t}")));
                 } else {
-                    tokens.extend(toks);
+                    // Even a stroke-only element needs a stroke-specific
+                    // override if a group supplies one.
+                    let stroke_trim = stroke
+                        .is_some_and(|i| self.shapes[i].inherited_stroke_trim_before().is_some());
+                    tokens.extend(toks.into_iter().map(|t| {
+                        if stroke_trim && t.starts_with("trimbefore=") {
+                            format!("stroke.{t}")
+                        } else {
+                            t
+                        }
+                    }));
                 }
             }
             let words = match &self.renaming {
@@ -1307,6 +1435,55 @@ fn highest_numbered_id(xml: &str) -> usize {
         .filter(|&n| n < 1_000_000_000)
         .max()
         .unwrap_or(0)
+}
+
+/// The attribute a group's name is kept in when its id can't hold all of
+/// it. ZigZag's own: Illustrator writes `data-name`, with names that are
+/// the id's settings spelled out (`Face fill angle=45`), and those are left
+/// to the id.
+pub const GROUP_NAME_ATTR: &str = "data-zigzag-name";
+
+/// The id of a placed machine file's group: the file's name, in words that
+/// aren't stitch settings (a file called `rose satin.pes` mustn't turn its
+/// stitches into a satin). Its whole name goes in [`GROUP_NAME_ATTR`].
+fn placed_group_id(name: &str) -> String {
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !crate::params::is_param_token(w))
+        .collect();
+    if words.is_empty() || words[0].starts_with(|c: char| c.is_ascii_digit()) {
+        let mut id = String::from("placed");
+        for w in words {
+            id.push('_');
+            id.push_str(w);
+        }
+        id
+    } else {
+        words.join("_")
+    }
+}
+
+/// `xml` with the group `id` named `name` (its [`GROUP_NAME_ATTR`] set,
+/// or replaced).
+fn with_group_name(xml: &str, id: &str, name: &str) -> Result<String> {
+    let doc = roxmltree::Document::parse(xml).context("parsing document")?;
+    let g = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "g" && n.attribute("id") == Some(id))
+        .ok_or_else(|| anyhow!("there's no group {id}"))?;
+    let value = xml_escape(name);
+    let mut out = xml.to_string();
+    if let Some(a) = g.attributes().find(|a| a.name() == GROUP_NAME_ATTR) {
+        out.replace_range(a.range_value(), &value);
+    } else {
+        let at = g
+            .attributes()
+            .find(|a| a.name() == "id")
+            .map(|a| a.range().end)
+            .ok_or_else(|| anyhow!("group {id} has no id attribute"))?;
+        out.insert_str(at, &format!(" {GROUP_NAME_ATTR}=\"{value}\""));
+    }
+    Ok(out)
 }
 
 /// Give every drawable element a unique id: `tl-N` for a missing one, a
@@ -1712,6 +1889,26 @@ mod tests {
     }
 
     #[test]
+    fn routes_stay_with_their_own_svg_part_after_saving() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="50mm" viewBox="0 0 100 50">
+            <g id="group_via=direct">
+                <path id="plain" d="M0 0 L10 0" stroke="#aa0000" fill="none"/>
+                <path id="line_via=direct" d="M20 0 L30 0" stroke="#aa0000" fill="none"/>
+                <rect id="both_via=10:20_stroke.via=30:40" x="40" y="5" width="10" height="10" fill="#aa0000" stroke="#aa0000"/>
+            </g>
+        </svg>"##;
+        let doc = Document::from_svg(svg, "routes", None).unwrap();
+        let reopened = Document::from_svg(&doc.to_svg().unwrap(), "routes", None).unwrap();
+        for d in [&doc, &reopened] {
+            assert_eq!(d.shapes.len(), 4);
+            assert_eq!(d.shapes[0].params.via, None);
+            assert_eq!(d.shapes[1].params.via, Some(Vec::new()));
+            assert_eq!(d.shapes[2].params.via, Some(vec![(10.0, 20.0)]));
+            assert_eq!(d.shapes[3].params.via, Some(vec![(30.0, 40.0)]));
+        }
+    }
+
+    #[test]
     fn settings_round_trip_through_ids() {
         let mut d = Document::from_svg(ILLUSTRATOR, "t", None).unwrap();
         let sun = d.shapes.iter().position(|s| s.id == "sun").unwrap();
@@ -1881,6 +2078,271 @@ mod tests {
         assert!((b2.center().x - b.center().x).abs() < 0.5);
     }
 
+    /// A two-color machine file: a red zigzag 10 mm wide and a blue line.
+    fn sample_design() -> crate::design::Design {
+        use crate::design::{Block, Design, Run};
+        let run = |pts: &[(f64, f64)]| Run {
+            pts: pts.iter().map(|&(x, y)| P::new(x, y)).collect(),
+            trim_before: true,
+        };
+        Design {
+            name: "badge".into(),
+            blocks: vec![
+                Block {
+                    color: [237, 23, 31],
+                    runs: vec![run(&[
+                        (-50.0, 0.0),
+                        (-25.0, 20.0),
+                        (0.0, 0.0),
+                        (25.0, 20.0),
+                        (50.0, 0.0),
+                    ])],
+                },
+                Block {
+                    color: [10, 85, 163],
+                    runs: vec![run(&[(-50.0, 40.0), (0.0, 40.0), (50.0, 40.0)])],
+                },
+            ],
+            ..Design::default()
+        }
+    }
+
+    fn sample_pes() -> Vec<u8> {
+        crate::formats::pes::write_pes(&sample_design())
+    }
+
+    #[test]
+    fn a_placed_stitch_file_keeps_its_size_and_is_one_group_named_for_it() {
+        let mut d = Document::from_svg(ILLUSTRATOR, "t", None).unwrap();
+        let first: Vec<usize> = d.shapes.iter().map(|s| s.uid).collect();
+        let place = Placement {
+            center_mm: Some((5.0, -10.0)),
+            ..Placement::default()
+        };
+        let new = d
+            .place_stitch_file(&sample_pes(), "pes", "Red Cross Logo", place)
+            .unwrap();
+        assert_eq!(new.len(), 2, "one object per run");
+        assert_eq!(
+            d.shapes[..first.len()]
+                .iter()
+                .map(|s| s.uid)
+                .collect::<Vec<_>>(),
+            first,
+            "what was there stays, sewn first"
+        );
+        let added: Vec<Shape> = new.iter().map(|&i| d.shapes[i].clone()).collect();
+        let group = added[0].groups.first().cloned().expect("in a group");
+        for s in &added {
+            assert_eq!(s.params.kind, Some(Kind::Manual));
+            assert_eq!(
+                s.groups.first(),
+                Some(&group),
+                "one group, outermost: {:?}",
+                s.groups
+            );
+        }
+        // "Cross" is a stitch type: it can't be in the id, but it's in the name.
+        assert_eq!(svg::name_words(&group), ["Red", "Logo"]);
+        assert_eq!(d.group_name(&group), Some("Red Cross Logo"));
+        assert_eq!(
+            added.iter().map(|s| s.color).collect::<Vec<_>>(),
+            [[237, 23, 31], [10, 85, 163]]
+        );
+        let b = svg::shapes_bounds(&added);
+        assert!((b.width() - 100.0).abs() < 0.5, "10 mm wide: {}", b.width());
+        assert!((b.height() - 40.0).abs() < 0.5, "4 mm high: {}", b.height());
+        assert!(
+            (b.center().x - 50.0).abs() < 0.5 && (b.center().y + 100.0).abs() < 0.5,
+            "at (5, -10) mm: {:?}",
+            b.center()
+        );
+        // The name is saved with the design.
+        let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
+        assert_eq!(again.group_name(&group), Some("Red Cross Logo"));
+    }
+
+    #[test]
+    fn placing_a_file_twice_makes_two_groups_both_named_for_it() {
+        let mut d = Document::empty();
+        let a = d
+            .place_stitch_file(&sample_pes(), "pes", "Fun Run 5k", Placement::default())
+            .unwrap();
+        let b = d
+            .place_stitch_file(&sample_pes(), "pes", "Fun Run 5k", Placement::default())
+            .unwrap();
+        let group = |i: usize| d.shapes[i].groups.first().cloned().unwrap();
+        assert_ne!(group(a[0]), group(b[0]));
+        for g in [group(a[0]), group(b[0])] {
+            assert_eq!(d.group_name(&g), Some("Fun Run 5k"), "{g}");
+        }
+    }
+
+    #[test]
+    fn renaming_or_copying_a_placed_group_keeps_its_name_whole() {
+        let mut d = Document::empty();
+        let new = d
+            .place_stitch_file(&sample_pes(), "pes", "Red Cross Logo", Placement::default())
+            .unwrap();
+        let g = d.shapes[new[0]].groups[0].clone();
+        let renamed = d.rename_group(&g, "Fun Run 5k").unwrap();
+        assert_eq!(d.group_name(&renamed), Some("Fun Run 5k"));
+        let members: Vec<usize> = (0..d.shapes.len())
+            .filter(|&i| d.shapes[i].groups.first() == Some(&renamed))
+            .collect();
+        let copies = d.duplicate(&members, P::new(50.0, 0.0)).unwrap();
+        let copy = d.shapes[copies[0]].groups[0].clone();
+        assert_ne!(copy, renamed);
+        assert_eq!(d.group_name(&copy), Some("Fun Run 5k"));
+    }
+
+    #[test]
+    fn illustrators_data_name_is_left_to_the_id() {
+        // Illustrator writes the layer's name, settings and all, beside the
+        // id it makes of it: the name is still the id's words.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+          <g id="Face_fill_angle_x3D_45" data-name="Face fill angle=45">
+            <rect x="0" y="0" width="40" height="40" fill="#f80"/>
+            <rect x="50" y="0" width="40" height="40" fill="#08f"/>
+          </g>
+        </svg>"##;
+        let d = Document::from_svg(svg, "t", None).unwrap();
+        let g = d.shapes[0].groups[0].clone();
+        assert_eq!(d.group_name(&g), None);
+        assert_eq!(svg::name_words(&g), ["Face"]);
+        // And a placed file's name goes in ZigZag's own attribute.
+        let mut d = Document::empty();
+        d.place_stitch_file(&sample_pes(), "pes", "Red Cross Logo", Placement::default())
+            .unwrap();
+        let xml = d.to_svg().unwrap();
+        assert!(
+            xml.contains(r#"data-zigzag-name="Red Cross Logo""#),
+            "{xml}"
+        );
+        assert!(!xml.contains("data-name="), "{xml}");
+    }
+
+    #[test]
+    fn a_placed_file_of_one_run_is_one_object_called_what_the_file_is() {
+        use crate::design::{Block, Design, Run};
+        let one = crate::formats::dst::write_dst(&Design {
+            name: "line".into(),
+            blocks: vec![Block {
+                color: [10, 85, 163],
+                runs: vec![Run {
+                    pts: vec![P::new(-50.0, 0.0), P::new(0.0, 20.0), P::new(50.0, 0.0)],
+                    trim_before: true,
+                }],
+            }],
+            ..Design::default()
+        });
+        let mut d = Document::empty();
+        let new = d
+            .place_stitch_file(&one, "dst", "Red Cross Logo", Placement::default())
+            .unwrap();
+        assert_eq!(new.len(), 1);
+        assert_eq!(d.shapes[new[0]].params.kind, Some(Kind::Manual));
+        assert_eq!(d.object_names()[new[0]], "Red Cross Logo");
+        // Placed twice, the second is told apart.
+        let again = d
+            .place_stitch_file(&one, "dst", "Red Cross Logo", Placement::default())
+            .unwrap();
+        let names = d.object_names();
+        assert_ne!(names[new[0]], names[again[0]]);
+        assert!(names[again[0]].starts_with("Red Cross Logo"), "{names:?}");
+    }
+
+    #[test]
+    fn a_named_group_pasted_into_another_document_keeps_its_name() {
+        let mut from = Document::empty();
+        let new = from
+            .place_stitch_file(&sample_pes(), "pes", "Fun Run 5k", Placement::default())
+            .unwrap();
+        let copied = from.copy(&new).unwrap();
+        let mut to = Document::empty();
+        let pasted = to.paste(&copied, P::default()).unwrap();
+        let g = to.shapes[pasted[0]].groups[0].clone();
+        assert_eq!(to.group_name(&g), Some("Fun Run 5k"));
+    }
+
+    #[test]
+    fn placed_stitches_export_at_the_same_needle_points() {
+        // Each needle point once, and where the design sits in the hoop
+        // aside (exports add lock stitches on points already there).
+        let pts = |bytes: &[u8]| -> Vec<(i64, i64)> {
+            let f = crate::formats::read::read_stitch_file(bytes, "pes").unwrap();
+            let all: Vec<P> = f
+                .blocks
+                .iter()
+                .flat_map(|b| b.runs.iter().flatten().copied())
+                .collect();
+            let mut b = crate::geom::Bounds::empty();
+            for p in &all {
+                b.add(*p);
+            }
+            let mut out: Vec<(i64, i64)> = all
+                .iter()
+                .map(|p| {
+                    (
+                        (p.x - b.min.x).round() as i64,
+                        (p.y - b.min.y).round() as i64,
+                    )
+                })
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        };
+        let pes = sample_pes();
+        let mut d = Document::empty();
+        d.place_stitch_file(&pes, "pes", "badge", Placement::default())
+            .unwrap();
+        let out = crate::formats::pes::write_pes(&d.plan());
+        assert_eq!(pts(&pes), pts(&out));
+    }
+
+    #[test]
+    fn place_file_reads_the_file_by_its_extension() {
+        let dir = std::env::temp_dir().join(format!("zigzag-place-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = Document::empty();
+        for (ext, bytes) in [
+            ("pes", sample_pes()),
+            ("vp3", crate::formats::more::write_vp3(&sample_design())),
+        ] {
+            let path = dir.join(format!("tulip.{ext}"));
+            std::fs::write(&path, bytes).unwrap();
+            let new = d.place_file(&path, Placement::default()).unwrap();
+            assert_eq!(new.len(), 2, "{ext}");
+            assert_eq!(
+                d.group_name(&d.shapes[new[0]].groups[0]),
+                Some("tulip"),
+                "{ext}"
+            );
+        }
+        let art = dir.join("dot.svg");
+        std::fs::write(
+            &art,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle id="dot" cx="5" cy="5" r="4" fill="#0a0"/></svg>"##,
+        )
+        .unwrap();
+        assert_eq!(d.place_file(&art, Placement::default()).unwrap().len(), 1);
+        let junk = dir.join("junk.pes");
+        std::fs::write(&junk, b"not a pes").unwrap();
+        assert!(d.place_file(&junk, Placement::default()).is_err());
+        assert_eq!(d.shapes.len(), 5, "a file that can't be read adds nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_placed_files_name_never_becomes_stitch_settings() {
+        assert_eq!(placed_group_id("rose satin"), "rose");
+        assert_eq!(placed_group_id("Rose-Badge v2"), "Rose_Badge_v2");
+        assert_eq!(placed_group_id("2024 logo"), "placed_2024_logo");
+        assert_eq!(placed_group_id("fill"), "placed");
+        assert_eq!(placed_group_id(""), "placed");
+    }
+
     #[test]
     fn empty_document_uses_mm_around_hoop_center() {
         let mut d = Document::empty();
@@ -1903,6 +2365,36 @@ mod tests {
         );
         assert!((b.center().x + 200.0).abs() < 1.0);
         assert!(d.to_svg().unwrap().contains("data-zigzag="));
+    }
+
+    #[test]
+    fn whats_added_on_the_hoop_is_saved_on_the_canvas() {
+        // A square in the middle of the hoop is in the middle of the saved
+        // canvas, as a browser or Illustrator draws it (it was saved round
+        // the canvas's top-left corner).
+        let mut d = Document::empty();
+        let sq = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10"><rect id="sq" width="10" height="10" fill="#f00"/></svg>"##;
+        let new = d.add_svg(sq, Placement::default()).unwrap();
+        let b = svg::shapes_bounds(&d.shapes[new[0]..=new[0]]);
+        assert!(
+            b.center().len() < 0.5,
+            "in the middle of the hoop: {:?}",
+            b.center()
+        );
+        let saved = d.to_svg().unwrap();
+        let tree = svg::parse_tree(saved.as_bytes()).unwrap();
+        let px = tree.root().abs_bounding_box().unwrap();
+        let (w, h) = (tree.size().width(), tree.size().height());
+        let mid = |a: f32, b: f32| (a + b) / 2.0;
+        assert!(
+            (mid(px.left(), px.right()) - w / 2.0).abs() < 0.5
+                && (mid(px.top(), px.bottom()) - h / 2.0).abs() < 0.5,
+            "in the middle of the {w}x{h} canvas: {px:?}\n{saved}"
+        );
+        // And it opens where it was.
+        let again = Document::from_svg(&saved, "t", None).unwrap();
+        let b2 = svg::shapes_bounds(&again.shapes);
+        assert!((b2.width() - b.width()).abs() < 0.5);
     }
 
     #[test]

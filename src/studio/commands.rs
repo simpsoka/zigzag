@@ -1126,36 +1126,52 @@ impl Studio {
 
     fn menu_entries(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, entries: &[Entry]) {
         ui.set_min_width(220.0);
+        // A column for check marks, only in a menu that has something to
+        // check, and the same width on every row of it (submenus too), so
+        // the labels line up. Not spaces: their width is the font's, and
+        // a submenu's title had none.
+        let checks = entries
+            .iter()
+            .any(|e| matches!(e, Item(a, _, _) if self.action_checked(*a).is_some()));
+        let row = |checked: bool, label: &'static str| -> egui::Atoms<'static> {
+            let mut atoms = egui::Atoms::default();
+            if checks {
+                atoms.push_right(egui::Atom::paint(
+                    egui::Vec2::splat(MENU_CHECK),
+                    move |ui, args| {
+                        if checked {
+                            crate::icons::paint(
+                                ui.painter(),
+                                args.rect,
+                                crate::icons::Icon::Check,
+                                args.fallback_text_color,
+                            );
+                        }
+                    },
+                ));
+            }
+            atoms.push_right(label);
+            atoms
+        };
         for e in entries {
             match e {
                 Sep => {
                     ui.separator();
                 }
                 Sub(title, v) => {
-                    ui.menu_button(*title, |ui| self.menu_entries(ui, ctx, v));
+                    ui.menu_button(row(false, title), |ui| {
+                        self.menu_entries(ui, ctx, v)
+                    });
                 }
                 Item(a, label, sc) => {
-                    let checked = self.action_checked(*a).unwrap_or(false);
                     // The check is drawn, not typed: the fallback UI fonts
                     // (Arial on Windows) have no ✓ and show a box instead.
-                    let mut b = egui::Button::new(format!("      {label}"));
+                    let checked = self.action_checked(*a).unwrap_or(false);
+                    let mut b = egui::Button::new(row(checked, label));
                     if let Some(sc) = sc {
                         b = b.shortcut_text(ctx.format_shortcut(&sc.egui()));
                     }
                     let resp = ui.add_enabled(self.action_enabled(*a), b);
-                    if checked {
-                        let x = resp.rect.left() + ui.spacing().button_padding.x + 6.0;
-                        let r = egui::Rect::from_center_size(
-                            egui::pos2(x, resp.rect.center().y),
-                            egui::Vec2::splat(12.0),
-                        );
-                        crate::icons::paint(
-                            ui.painter(),
-                            r,
-                            crate::icons::Icon::Check,
-                            ui.visuals().text_color(),
-                        );
-                    }
                     if resp.clicked() {
                         self.run_action(*a);
                         ui.close();
@@ -1177,9 +1193,46 @@ impl Studio {
     }
 }
 
+/// The width of the check-mark column in an in-window menu.
+const MENU_CHECK: f32 = 12.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where `text` is drawn in the last frame, from its painted shapes.
+    fn text_left(h: &egui_kittest::Harness<'_, crate::app::Studio>, text: &str) -> Option<f32> {
+        fn find(shape: &egui::Shape, text: &str) -> Option<f32> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.x),
+                egui::Shape::Vec(v) => v.iter().find_map(|s| find(s, text)),
+                _ => None,
+            }
+        }
+        h.output().shapes.iter().find_map(|c| find(&c.shape, text))
+    }
+
+    #[test]
+    fn in_window_menu_labels_line_up_with_and_without_checks_and_submenus() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 700.0))
+            .build_ui_state(
+                |ui, s: &mut crate::app::Studio| s.menu_bar(ui),
+                crate::app::Studio::with_file(None, None),
+            );
+        h.get_by_label("View").click();
+        h.run_steps(4);
+        // A checked toggle, an unchecked one and a submenu: one column.
+        let grid = text_left(&h, "Grid").expect("Grid is drawn");
+        let guides = text_left(&h, "Smart Guides").expect("Smart Guides is drawn");
+        let units = text_left(&h, "Units").expect("Units is drawn");
+        assert!((grid - guides).abs() < 0.5, "Grid at {grid}, Smart Guides at {guides}");
+        assert!((grid - units).abs() < 0.5, "Grid at {grid}, the Units submenu at {units}");
+        // With room for the check mark before them.
+        let left = h.get_by_label("View").rect().left() as f32;
+        assert!(grid > left + MENU_CHECK, "no room for a check: {grid} vs {left}");
+    }
 
     #[test]
     fn help_reports_an_issue_on_github_saying_which_zigzag() {

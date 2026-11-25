@@ -72,6 +72,35 @@ pub struct Shape {
     pub joined: Vec<usize>,
 }
 
+impl Shape {
+    /// Only keep an explicit off setting when a group would turn it on.
+    pub fn trim_before_setting(&self, on: bool) -> Option<bool> {
+        if on {
+            return Some(true);
+        }
+        let base = || {
+            self.groups
+                .iter()
+                .rev()
+                .find_map(|id| Params::parse(id).trim_before)
+        };
+        let inherited = if self.part == Part::Stroke {
+            self.inherited_stroke_trim_before().or_else(base)
+        } else {
+            base()
+        };
+        (inherited == Some(true)).then_some(false)
+    }
+
+    /// A stroke-specific group setting takes precedence over plain tokens.
+    pub(crate) fn inherited_stroke_trim_before(&self) -> Option<bool> {
+        self.groups
+            .iter()
+            .rev()
+            .find_map(|id| stroke_only(id).trim_before)
+    }
+}
+
 /// ZigZag's own wrapper groups (placed artwork, pastes, lettering, pen
 /// drawings) aren't groups the user made.
 pub fn is_wrapper_group(id: &str) -> bool {
@@ -420,7 +449,14 @@ fn import_path(path: &usvg::Path, inherited: &Inherit, out: &mut Vec<Shape>) {
         } else {
             ctx.base.clone()
         };
-        let params = base.merged(&ctx.stroke);
+        let params = Params {
+            // A route belongs to the element's own sewn part, not its group.
+            // For a stroke-only element its unprefixed route is the stroke's.
+            via: ctx.stroke.via.clone().or_else(|| {
+                if filled { None } else { ctx.base.via.clone() }
+            }),
+            ..base.merged(&ctx.stroke)
+        };
         let width = params
             .width
             .map(|w| w * 10.0)

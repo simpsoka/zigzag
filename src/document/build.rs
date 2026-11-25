@@ -411,6 +411,7 @@ impl Document {
             start: None,
             end: None,
             trim: None,
+            trim_before: None,
             stop: None,
             ..self.fill_params(i)
         }
@@ -493,6 +494,7 @@ impl Document {
                 // (A trim or a stop after the shape comes after the last
                 // of its pieces.)
                 let own = &self.shapes[i].params;
+                made[before].3.trim_before = own.trim_before;
                 if let Some(last) = made.last_mut() {
                     (last.3.trim, last.3.stop) = (own.trim, own.stop);
                 }
@@ -1378,7 +1380,7 @@ mod tests {
         let three = || {
             let mut d = doc(&[
                 ("a", 10.0, 10.0, 20.0, "#c00"),
-                ("b_trim", 20.0, 10.0, 20.0, "#00c"),
+                ("b_trim_trimbefore=1", 20.0, 10.0, 20.0, "#00c"),
                 ("c", 45.0, 45.0, 5.0, "#0c0"),
             ]);
             // Sewn c, b, a: an order that isn't the file's.
@@ -1404,6 +1406,8 @@ mod tests {
         // The trim after b comes after the last of its pieces, once.
         assert_eq!(d.shapes[1].params.trim, None);
         assert_eq!(d.shapes[2].params.trim, Some(true));
+        assert_eq!(d.shapes[1].params.trim_before, Some(true));
+        assert_eq!(d.shapes[2].params.trim_before, None);
         // And so it comes back from the file.
         let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
         assert_eq!(order(&again), ['c', 'b', 'b', 'a']);
@@ -1438,15 +1442,71 @@ mod tests {
     }
 
     #[test]
+    fn trim_before_can_override_a_group_and_roundtrip() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
+          <g id="group_trimbefore">
+            <path id="first_fill" fill="#123456" d="M10 10 H20 V20 H10 Z"/>
+            <path id="second_fill" fill="#123456" d="M30 10 H40 V20 H30 Z"/>
+          </g>
+        </svg>"##;
+        let mut d = Document::from_svg(svg, "t", None).unwrap();
+        assert_eq!(d.shapes[0].params.trim_before, Some(true));
+        assert_eq!(d.shapes[1].params.trim_before, Some(true));
+        d.shapes[0].params.trim_before = d.shapes[0].trim_before_setting(false);
+        d.sync().unwrap();
+        let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
+        assert_eq!(again.shapes[0].params.trim_before, Some(false));
+        assert_eq!(again.shapes[1].params.trim_before, Some(true));
+    }
+
+    #[test]
+    fn trim_before_off_only_overrides_an_inherited_cut() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
+          <rect id="ungrouped_trimbefore" x="0" y="0" width="10" height="10" fill="#123456"/>
+          <g id="outer_trimbefore_stroke.trimbefore=0">
+            <rect id="both_trimbefore_stroke.trimbefore" x="15" y="0" width="10" height="10" fill="#123456" stroke="#abcdef"/>
+            <g id="inner_trimbefore=0_stroke.trimbefore">
+              <rect id="nested_trimbefore_stroke.trimbefore" x="30" y="0" width="10" height="10" fill="#123456" stroke="#abcdef"/>
+              <path id="line_trimbefore" d="M45 0 H55" fill="none" stroke="#abcdef"/>
+            </g>
+          </g>
+        </svg>"##;
+        let mut d = Document::from_svg(svg, "t", None).unwrap();
+        assert_eq!(d.shapes.len(), 6);
+        let expected = [None, Some(false), None, None, Some(false), Some(false)];
+        for (shape, expected) in d.shapes.iter_mut().zip(expected) {
+            shape.params.trim_before = shape.trim_before_setting(false);
+            assert_eq!(shape.params.trim_before, expected, "{}", shape.id);
+        }
+        let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
+        let again = Document::from_svg(&again.to_svg().unwrap(), "t", None).unwrap();
+        // A group may already supply false without an explicit object token.
+        for (shape, expected) in again.shapes.iter().zip(expected) {
+            assert_ne!(shape.params.trim_before, Some(true), "{}", shape.id);
+            let token = if shape.outline
+                || shape.inherited_stroke_trim_before().is_some()
+                    && shape.part == crate::svg::Part::Stroke
+            {
+                "stroke.trimbefore=0"
+            } else {
+                "trimbefore=0"
+            };
+            let has_off = shape.id.split('_').any(|t| t == token);
+            assert_eq!(has_off, expected == Some(false), "{}", shape.id);
+        }
+    }
+
+    #[test]
     fn a_trim_or_a_stop_turned_off_stays_off() {
         // (They're words in the id, as a stitch type is: each read as a
         // setting, and so no part of the name.)
         let mut d = doc(&[("box", 10.0, 10.0, 20.0, "#c00")]);
-        for word in ["trim", "stop", "spiral"] {
+        for word in ["trim", "trimbefore", "stop", "spiral"] {
             let set = |d: &mut Document, on: Option<bool>| {
                 let p = &mut d.shapes[0].params;
                 match word {
                     "trim" => p.trim = on,
+                    "trimbefore" => p.trim_before = on,
                     "stop" => p.stop = on,
                     _ => p.spiral = on,
                 }
@@ -1456,6 +1516,7 @@ mod tests {
                 let p = &d.shapes[0].params;
                 match word {
                     "trim" => p.trim,
+                    "trimbefore" => p.trim_before,
                     "stop" => p.stop,
                     _ => p.spiral,
                 }

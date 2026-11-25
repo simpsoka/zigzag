@@ -2517,7 +2517,7 @@ impl Studio {
                                     moving.extend(all_sel.iter().filter(|m| !members.contains(m)));
                                 }
                                 drag_start =
-                                    Some((moving, Studio::group_label(id), Some(id.clone())));
+                                    Some((moving, self.group_label(id), Some(id.clone())));
                             }
                             // Dragged over: above the group, or below it
                             // (at the top of it, while it's open).
@@ -2567,7 +2567,7 @@ impl Studio {
                                 &p,
                             );
                             let open = *is_open;
-                            let label = Studio::group_label(id);
+                            let label = self.group_label(id);
                             let all = members.iter().all(|m| all_sel.contains(m));
                             let some = members.iter().any(|m| all_sel.contains(m));
                             resp.widget_info(|| {
@@ -3160,7 +3160,7 @@ impl Studio {
                 if let Some(at) = self.doc.shapes.iter().position(|s| s.uid == uid) {
                     self.set_selection(&[at]);
                 }
-                self.names = zigzag::svg::display_names(&self.doc.shapes);
+                self.names = self.doc.object_names();
                 self.status = format!("Renamed to {name}.");
             }
             Err(e) => self.status = format!("Couldn't rename it: {e}."),
@@ -3354,7 +3354,7 @@ impl Studio {
                 // (The group, or the run of it that Layers lists as one.)
                 .find(|g| self.group_members(g) == sel || self.group_run(g, i) == sel)
             {
-                Some(g) => format!("{} · {count} objects", Studio::group_label(g)),
+                Some(g) => format!("{} · {count} objects", self.group_label(g)),
                 None => format!("{count} objects"),
             }
         } else {
@@ -4094,13 +4094,18 @@ impl Studio {
         use crate::view_tools::Marker;
         let advanced = self.prefs.advanced;
         let pr = &mut self.doc.shapes[i].params;
-        let set = pr.start.is_some() || pr.end.is_some() || pr.trim.is_some() || pr.stop.is_some();
+        let set = pr.start.is_some()
+            || pr.end.is_some()
+            || pr.trim.is_some()
+            || pr.trim_before.is_some()
+            || pr.stop.is_some();
         if !advanced && !set {
             return 1;
         }
         theme::section_break(ui);
         let p = pal_ui(ui);
         let picking = self.view_tools.marker_pick;
+        let mut trim_before = None;
         let mut pick: Option<Option<Marker>> = None;
         let mut clear: Option<Marker> = None;
         form_for(ui, "sewing-form", advanced, |fm| {
@@ -4144,9 +4149,16 @@ impl Studio {
                     pick = Some(None);
                 }
                 ui.add_space(theme::space::S);
+                let mut before = pr.trim_before == Some(true);
+                if ui.checkbox(&mut before, "Trim Before")
+                    .on_hover_text("Cut before this object if a thread is running; turn off to let the planner decide")
+                    .changed()
+                {
+                    trim_before = Some(before);
+                }
                 let mut trim = pr.trim == Some(true);
                 if ui
-                    .checkbox(&mut trim, "Trim")
+                    .checkbox(&mut trim, "Trim After")
                     .on_hover_text("Cut the thread after this object, even if the next one is close")
                     .changed()
                 {
@@ -4167,6 +4179,10 @@ impl Studio {
                 Marker::Start => pr.start = None,
                 Marker::End => pr.end = None,
             }
+        }
+        if let Some(on) = trim_before {
+            let shape = &mut self.doc.shapes[i];
+            shape.params.trim_before = shape.trim_before_setting(on);
         }
         if let Some(m) = pick {
             self.view_tools.marker_pick = m;
@@ -5244,7 +5260,7 @@ mod tests {
             .with_size(Vec2::new(300.0, 400.0))
             .build_ui_state(
                 |ui, s: &mut Studio| {
-                    s.names = zigzag::svg::display_names(&s.doc.shapes);
+                    s.names = s.doc.object_names();
                     s.objects_body(ui)
                 },
                 s,
@@ -5575,7 +5591,8 @@ mod tests {
             "Corners",
             "Short stitches",
             "Auto split",
-            "Trim",
+            "Trim Before",
+            "Trim After",
             "Remove overlaps",
             "Connect gaps",
         ];

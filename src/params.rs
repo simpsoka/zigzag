@@ -42,6 +42,8 @@
 //!   o=N        sewing order
 //!   st=T       start sewing at this point of the outline (0–1 along it)
 //!   en=T       end sewing at this point of the outline
+//!   trimbefore cut before this object (if a thread is running); trimbefore=0
+//!              overrides an inherited request and leaves automatic planning
 //!   trim       cut the thread after this object
 //!   stop       pause the machine after this object (add foam, trim appliqué)
 //! A `stroke.` prefix (e.g. `stroke.run`) applies a token only to the stroke of
@@ -210,6 +212,8 @@ pub struct Params {
     pub via: Option<Vec<(f64, f64)>>,
     /// Cut the thread after this object, whatever comes next.
     pub trim: Option<bool>,
+    /// Force a cut before this object; false/None lets the planner decide.
+    pub trim_before: Option<bool>,
     /// Hidden: not shown and not sewn (its stitch settings are kept for
     /// when it's shown again). `hide=1` in an id.
     pub hide: Option<bool>,
@@ -520,6 +524,7 @@ impl Params {
             // (An object's own: not every object of a group it's set on.)
             via: child.via.clone(),
             trim: child.trim.or(self.trim),
+            trim_before: child.trim_before.or(self.trim_before),
             hide: child.hide.or(self.hide),
             lock: child.lock.or(self.lock),
             stop: child.stop.or(self.stop),
@@ -561,6 +566,10 @@ impl Params {
         match tok {
             "border" => {
                 self.border = Some(true);
+                return;
+            }
+            "trimbefore" => {
+                self.trim_before = Some(true);
                 return;
             }
             "trim" => {
@@ -630,6 +639,7 @@ impl Params {
             "st" | "start" => self.start = num.map(|v| v.rem_euclid(1.0)),
             "en" | "end" => self.end = num.map(|v| v.rem_euclid(1.0)),
             "trim" => self.trim = flag,
+            "trimbefore" => self.trim_before = flag,
             "hide" => self.hide = flag.filter(|&on| on),
             "lock" => self.lock = flag.filter(|&on| on),
             "spiral" => self.spiral = flag,
@@ -680,6 +690,9 @@ impl Params {
         }
         if self.spiral == Some(true) {
             t.push("spiral".into());
+        }
+        if let Some(on) = self.trim_before {
+            t.push(format!("trimbefore={}", u8::from(on)));
         }
         if self.trim == Some(true) {
             t.push("trim".into());
@@ -808,7 +821,15 @@ pub fn is_param_token(tok: &str) -> bool {
     Kind::parse(lower).is_some()
         || matches!(
             lower,
-            "border" | "trim" | "spiral" | "stop" | "even" | "overlap" | "cut" | "mitred"
+            "border"
+                | "trim"
+                | "trimbefore"
+                | "spiral"
+                | "stop"
+                | "even"
+                | "overlap"
+                | "cut"
+                | "mitred"
         )
         || lower.contains('=')
 }
@@ -839,6 +860,18 @@ pub fn decode_illustrator_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trim_before_is_a_distinct_id_token() {
+        assert_eq!(Params::parse("trim_before_photo").trim_before, None);
+        let p = Params::parse("name_trimbefore_trim");
+        assert_eq!((p.trim_before, p.trim), (Some(true), Some(true)));
+        assert_eq!(
+            Params::parse_part("stroke.trimbefore=1", true).trim_before,
+            Some(true)
+        );
+        assert_eq!(crate::svg::name_words("name_trimbefore=0"), ["name"]);
+    }
+
     #[test]
     fn a_thread_route_is_kept_in_the_name() {
         let mut p = Params::default();
@@ -906,6 +939,7 @@ mod tests {
             start: Some(0.25),
             end: Some(0.875),
             trim: Some(true),
+            trim_before: Some(true),
             stop: Some(true),
             spiral: Some(true),
             style: Some(crate::stitch::satin::SatinStyle::SStitch),

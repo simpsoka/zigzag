@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -36,6 +36,13 @@ enum Cmd {
         /// each stitch, jump and trim in it is for.
         #[arg(long)]
         objects: bool,
+        /// Place another file in the design, as File › Place does: a
+        /// machine file (PES, PEC, DST, EXP, JEF or VP3) at the size it was
+        /// digitized, or an SVG or image. Centered in the hoop, or FILE@X,Y
+        /// for a center X mm right of and Y mm below the hoop's. Repeat for
+        /// more; each is sewn after the ones before.
+        #[arg(long, value_name = "FILE[@X,Y]", value_parser = parse_place)]
+        place: Vec<(PathBuf, Option<(f64, f64)>)>,
         #[command(flatten)]
         settings: SettingsArgs,
     },
@@ -215,10 +222,21 @@ fn main() -> Result<()> {
             out,
             hoop,
             objects,
+            place,
             settings,
         } => {
             let t0 = Instant::now();
-            let doc = settings.open(&input)?;
+            let mut doc = settings.open(&input)?;
+            for (file, at) in &place {
+                let at = zigzag::document::Placement {
+                    center_mm: *at,
+                    ..Default::default()
+                };
+                let added = doc
+                    .place_file(file, at)
+                    .with_context(|| format!("placing {}", file.display()))?;
+                eprintln!("placed {} ({} objects)", file.display(), added.len());
+            }
             let hoop = hoop.unwrap_or(doc.settings.hoop);
             let t_load = t0.elapsed();
             let d = doc.plan();
@@ -269,22 +287,7 @@ fn main() -> Result<()> {
         }
         Cmd::Machines => {
             for p in zigzag::machine::profile::builtin() {
-                let hoops: Vec<String> = p
-                    .hoops
-                    .iter()
-                    .map(|&h| zigzag::document::format_hoop(h))
-                    .collect();
-                println!(
-                    "{:<15} {}\n{:<15} hoops {} mm{}{}",
-                    p.id,
-                    p.name,
-                    "",
-                    hoops.join(", "),
-                    p.format
-                        .map(|f| format!("; reads .{f}"))
-                        .unwrap_or_default(),
-                    if p.tested { "; sewn from ZigZag" } else { "" }
-                );
+                println!("{}", machine_lines(p));
             }
         }
         Cmd::Skitch { cmd, name, scan } => skitch(cmd, name, scan)?,
@@ -331,6 +334,19 @@ fn parse_hoop(v: &str) -> std::result::Result<(f64, f64), String> {
         .ok_or_else(|| "use WIDTHxHEIGHT in mm, e.g. 130x180, each side 10 to 1000".to_string())
 }
 
+/// `--place`: `FILE`, or `FILE@X,Y` (mm from the hoop's center).
+fn parse_place(v: &str) -> std::result::Result<(PathBuf, Option<(f64, f64)>), String> {
+    if let Some((file, at)) = v.rsplit_once('@')
+        && let Some((x, y)) = at.split_once(',')
+        && let (Ok(x), Ok(y)) = (x.trim().parse::<f64>(), y.trim().parse::<f64>())
+        && x.is_finite()
+        && y.is_finite()
+    {
+        return Ok((PathBuf::from(file), Some((x, y))));
+    }
+    Ok((PathBuf::from(v), None))
+}
+
 fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Result<()> {
     let ext = path
         .extension()
@@ -352,7 +368,7 @@ fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Re
                     hoop.1,
                 )),
                 background: [255, 255, 255],
-                names: zigzag::svg::display_names(&doc.shapes),
+                names: doc.object_names(),
                 spm: 400.0,
             };
             zigzag::formats::worksheet::html(d, &info)?.into_bytes()
@@ -368,7 +384,7 @@ fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Re
 }
 
 fn print_checks(doc: &Document, d: &Design, hoop: (f64, f64)) {
-    let names = zigzag::svg::display_names(&doc.shapes);
+    let names = doc.object_names();
     for issue in checks::check(&doc.shapes, d, &doc.plan_options(), Some(hoop)) {
         let level = match issue.level {
             Level::Error => "error",
@@ -380,6 +396,44 @@ fn print_checks(doc: &Document, d: &Design, hoop: (f64, f64)) {
             None => eprintln!("{level}: {}", issue.message),
         }
     }
+}
+
+/// `zigzag machines`'s two lines for one profile: name and hoops, then what
+/// choosing it (`--machine`) changes besides the hoop (`Profile::apply`) -
+/// easy to miss otherwise, since picking a machine doesn't ask for them.
+fn machine_lines(p: &zigzag::machine::profile::Profile) -> String {
+    let hoops: Vec<String> = p
+        .hoops
+        .iter()
+        .map(|&h| zigzag::document::format_hoop(h))
+        .collect();
+    let min_stitch = p
+        .min_stitch_mm
+        .map(|m| format!("; min stitch {} mm", zigzag::params::fmt_num(m)))
+        .unwrap_or_default();
+    let lock = p
+        .lock
+        .map(|l| format!("; lock {}", l.format()))
+        .unwrap_or_default();
+    let link = p
+        .link
+        .and_then(|id| zigzag::machine::profile::LINKS.iter().find(|l| l.0 == id))
+        .map(|l| format!("; sends over {}", l.1))
+        .unwrap_or_default();
+    format!(
+        "{:<15} {}\n{:<15} hoops {} mm{}{}{}{}{}",
+        p.id,
+        p.name,
+        "",
+        hoops.join(", "),
+        p.format
+            .map(|f| format!("; reads .{f}"))
+            .unwrap_or_default(),
+        min_stitch,
+        lock,
+        link,
+        if p.tested { "; sewn from ZigZag" } else { "" }
+    )
 }
 
 fn summary(d: &Design) {
@@ -514,4 +568,41 @@ fn skitch(cmd: SkitchCmd, name: Option<String>, scan: u64) -> Result<()> {
         let _ = m.disconnect().await;
         result
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_lines_says_nothing_extra_for_a_plain_profile() {
+        let p = zigzag::machine::profile::builtin_named("brother-4x4").unwrap();
+        let s = machine_lines(p);
+        assert!(s.contains("brother-4x4"));
+        assert!(s.contains("hoops 100x100 mm"));
+        assert!(s.contains("; reads .pes"));
+        assert!(!s.contains("min stitch"));
+        assert!(!s.contains("lock"));
+        assert!(!s.contains("sends over"));
+        assert!(!s.contains("sewn from ZigZag"));
+    }
+
+    #[test]
+    fn machine_lines_says_what_the_machine_changes() {
+        // Drops stitches under 0.4 mm (see profiles.json): worth knowing
+        // before `--machine melco-summit` quietly merges short stitches.
+        let p = zigzag::machine::profile::builtin_named("melco-summit").unwrap();
+        let s = machine_lines(p);
+        assert!(s.contains("; min stitch 0.4 mm"), "{s}");
+        assert!(!s.contains("; lock"), "{s}");
+        assert!(!s.contains("sends over"), "{s}");
+    }
+
+    #[test]
+    fn machine_lines_says_how_a_linked_machine_is_reached() {
+        let p = zigzag::machine::profile::builtin_named("brother-skitch").unwrap();
+        let s = machine_lines(p);
+        assert!(s.contains("; sends over Bluetooth (Brother Skitch)"), "{s}");
+        assert!(s.contains("; sewn from ZigZag"), "{s}");
+    }
 }

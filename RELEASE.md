@@ -3,8 +3,9 @@
 Downloads live in [GitHub Releases](https://github.com/simpsoka/zigzag/releases).
 The README uses a stable `releases/latest/download/ZigZag.dmg` link for the
 Mac download; every release includes that filename, a versioned DMG, and
-`SHA256SUMS.txt`. GitHub Actions attach the Windows zip and Linux tarball
-to the same release — one release page and one source tag for all platforms.
+`SHA256SUMS.txt`. GitHub Actions attach the Windows installer and zip and
+the Linux tarball to the same release — one release page and one source tag
+for all platforms.
 Build products stay in the ignored `dist/` directory, outside Git history.
 
 ## Mac
@@ -123,20 +124,70 @@ including versions with the in-app updater, use
 
 ## Windows
 
-The Windows zip is built by `.github/workflows/windows-release.yml` on GitHub
-Actions. Nothing needs to run on a Windows machine locally.
+The Windows installer and zip are built by
+`.github/workflows/windows-release.yml` on GitHub Actions. Nothing needs to
+run on a Windows machine locally.
 
 The workflow fires once the GitHub release is **published** (the Mac flow
-above flips the draft to published on its last step), builds
-`ZigZag-<version>-x86_64-windows.zip` on the `windows-latest` runner, and
-uploads it alongside the DMGs on the same release — plus a
-`SHA256SUMS-windows.txt` file. No signing: Windows SmartScreen warns on
-first run until the app builds reputation (click *More info* → *Run anyway*).
+above flips the draft to published on its last step). On the
+`windows-latest` runner it builds
+`ZigZag-<version>-x86_64-windows-setup.exe` (the installer) and
+`ZigZag-<version>-x86_64-windows.zip`, and uploads them alongside the DMGs
+on the same release — plus a `SHA256SUMS-windows.txt` file.
 
-The zip bundles `ZigZag.exe` (the studio), `zigzag-cli.exe`, `zigzag-mcp.exe`,
+Both hold `ZigZag.exe` (the studio), `zigzag-cli.exe`, `zigzag-mcp.exe`,
 `LICENSE`, `NOTICE`, `THIRD-PARTY-NOTICES.md`, and a short `README.txt`.
 The binaries statically link the MSVC runtime, so users don't need the
 Visual C++ redistributable.
+
+The installer is [Inno Setup](https://jrsoftware.org/isinfo.php), from
+`packaging/windows/installer.iss`. It installs for the current user without
+administrator rights (`%LOCALAPPDATA%\Programs\ZigZag`; `/ALLUSERS` on its
+command line installs for everyone), adds the Start menu shortcut, the
+`zigzag://` link and ZigZag in *Open with* for SVG and stitch files, and
+offers a desktop shortcut and `zigzag-cli` on the PATH. Before anything is
+uploaded the workflow installs it on the runner, checks the files, the PATH
+and the link, and uninstalls it again, so a broken installer fails the run
+instead of reaching the release.
+
+### Signing
+
+Without signing, Windows SmartScreen warns on first run (*More info* →
+*Run anyway*). The workflow signs the three executables and the installer
+with [Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/)
+as soon as the repository has these settings (Settings › Secrets and
+variables › Actions), and builds unsigned files until then:
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Variable | `AZURE_SIGNING_ACCOUNT` | The Artifact Signing account's name. Setting it turns signing on. |
+| Variable | `AZURE_SIGNING_PROFILE` | The certificate profile's name. |
+| Variable | `AZURE_SIGNING_ENDPOINT` | The account's region endpoint, for example `https://eus.codesigning.azure.net/`. |
+| Secret | `AZURE_CLIENT_ID` | The app registration the workflow signs in as. |
+| Secret | `AZURE_TENANT_ID` | Its directory (tenant). |
+| Secret | `AZURE_SUBSCRIPTION_ID` | The subscription the signing account is in. |
+
+One-time setup in the Azure portal:
+
+1. Create an Artifact Signing account (Basic), complete identity
+   validation, and create a **Public Trust** certificate profile.
+2. Create an app registration and give it a federated credential for
+   GitHub Actions: organization `simpsoka`, repository `zigzag`, entity
+   type **Environment**, environment `windows-release` (the workflow's job
+   runs in that environment so one credential covers every release tag and
+   manual run). No password is stored: GitHub signs in with OpenID Connect.
+   GitHub's subject for this repository carries the owner's and the
+   repository's numeric ids
+   (`repo:<owner>@<id>/<repo>@<id>:environment:windows-release`); if Azure
+   refuses the sign-in, compare the subject in its error with the
+   credential's.
+3. On the certificate profile, give that app the **Artifact Signing
+   Certificate Profile Signer** role.
+
+A signed download names its publisher at once; SmartScreen can still warn
+until enough people have downloaded ZigZag for Windows to trust it, which
+carries over from one release to the next. The workflow fails if signing is
+on and any of the four files comes out without a valid signature.
 
 To check the Windows UI before a release, build on the Mac and open the
 result in a Windows 11 ARM VM (Parallels, or UTM for free):
@@ -157,17 +208,19 @@ resources, which `build.rs` compiles in only on Windows. Check them at 100%,
 ### Rebuild without re-tagging
 
 Use the workflow's `workflow_dispatch` entry from the Actions tab: enter the
-existing tag (for example `v0.1.0`) and run it. The zip and checksum file on
-the release are replaced in place (`gh release upload --clobber`). Use this
-to retry a failed build, or to produce a Windows zip for a Mac release that
-shipped without one.
+existing tag (for example `v0.1.0`) and run it. The installer, zip and
+checksum file on the release are replaced in place
+(`gh release upload --clobber`). Use this to retry a failed build, or to
+produce Windows downloads for a Mac release that shipped without them.
 Every run checks out the requested tag, including manual retries, so the
-Windows and Mac binaries come from the same source.
+Windows and Mac binaries come from the same source. Only the installer
+script and `README.txt` come from the commit the workflow runs at, which is
+how a tag from before the installer existed gets one.
 
 ### If the Mac flow never publishes the release
 
 Dispatch the Windows workflow manually with the tag. It creates the release
-as a draft if it isn't there yet, uploads the zip, and leaves it draft so
+as a draft if it isn't there yet, uploads the installer and zip, and leaves it draft so
 the Mac flow can finish it later (or so you can publish it by hand).
 
 ### Regenerate the Windows icon
@@ -219,11 +272,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 
 The two DMG filenames contain identical bytes; either can be used to install.
 
-For the Windows zip:
+For the Windows installer and zip:
 
 ```sh
 shasum -a 256 --ignore-missing -c SHA256SUMS-windows.txt   # on Mac or Linux
-certutil -hashfile ZigZag-<version>-x86_64-windows.zip SHA256   # on Windows
+certutil -hashfile ZigZag-<version>-x86_64-windows-setup.exe SHA256   # on Windows
 ```
 
 For the Linux tarball, download its checksum file alongside it and run:

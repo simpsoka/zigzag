@@ -898,7 +898,7 @@ impl Studio {
         // supersedes any still out.
         self.planner.took(self.plan_ms);
         self.planner.superseded();
-        self.names = svg::display_names(&self.doc.shapes);
+        self.names = self.doc.object_names();
         self.dirty = false;
     }
 
@@ -1429,7 +1429,7 @@ impl Studio {
         match done {
             Ok(()) => {
                 self.status = match group {
-                    Some(g) => format!("Moved {label} into {}.", Self::group_label(g)),
+                    Some(g) => format!("Moved {label} into {}.", self.group_label(g)),
                     None => format!("Moved {label} out of its group."),
                 };
                 true
@@ -1558,29 +1558,15 @@ impl Studio {
             self.open_image(path, crate::trace_ui::Target::Place);
             return;
         }
-        let stitches = zigzag::formats::READABLE_FORMATS.contains(&ext.as_str());
-        let text = if stitches {
-            let read = std::fs::read(path)
-                .map_err(anyhow::Error::from)
-                .and_then(|b| zigzag::formats::read::read_stitch_file(&b, &ext));
-            match read {
-                Ok(f) if f.blocks.is_empty() => {
-                    self.status = format!("{} has no stitches in it.", path.display());
-                    return;
-                }
-                Ok(f) => zigzag::formats::read::to_svg(&f),
-                Err(e) => {
-                    self.status = format!("Couldn't read {}: {e:#}", path.display());
-                    return;
-                }
-            }
-        } else {
-            match std::fs::read_to_string(path) {
-                Ok(t) => t,
-                Err(e) => {
-                    self.status = format!("Couldn't read {}: {e}", path.display());
-                    return;
-                }
+        if zigzag::formats::READABLE_FORMATS.contains(&ext.as_str()) {
+            self.place_stitches(path, &ext);
+            return;
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = format!("Couldn't read {}: {e}", path.display());
+                return;
             }
         };
         let mut added = Vec::new();
@@ -1591,9 +1577,7 @@ impl Studio {
             Ok(()) => {
                 self.set_selection(&added);
                 self.status = format!("Placed {} ({} objects).", path.display(), added.len());
-                // Stitch files keep their size: scaled, their stitches
-                // would be longer or shorter than they were made to be.
-                if !stitches && let Some(s) = self.fit_to_hoop(true) {
+                if let Some(s) = self.fit_to_hoop(true) {
                     self.status = format!(
                         "Placed {}. It was bigger than the hoop, so it's scaled to {:.0}%. Undo puts it back to full size.",
                         path.display(),
@@ -1602,6 +1586,38 @@ impl Studio {
                 }
             }
             Err(e) => self.status = format!("Couldn't place {}: {e:#}", path.display()),
+        }
+    }
+}
+
+impl Studio {
+    /// Place a machine file: its stitches come in as manual stitches at the
+    /// size they were digitized (scaled, they'd be longer or shorter than
+    /// they were made to be), in one group named after the file, selected.
+    fn place_stitches(&mut self, path: &Path, ext: &str) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Couldn't read {}: {e}", path.display());
+                return;
+            }
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut added = Vec::new();
+        match self.structural(|d| {
+            added =
+                d.place_stitch_file(&bytes, ext, &name, zigzag::document::Placement::default())?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                self.set_selection(&added);
+                self.status = format!("Placed {} ({} objects).", path.display(), added.len());
+            }
+            // (Not a file of the kind its name says, or one with no stitches.)
+            Err(e) => self.status = format!("Couldn't read {}: {e:#}", path.display()),
         }
     }
 }
@@ -2756,7 +2772,7 @@ impl Studio {
                             ui.add_space(crate::theme::space::XS);
                             let n = self.layout.isolated.len();
                             let crumbs: Vec<String> = std::iter::once("Document".to_string())
-                                .chain(self.layout.isolated.iter().map(|g| Self::group_label(g)))
+                                .chain(self.layout.isolated.iter().map(|g| self.group_label(g)))
                                 .collect();
                             for (k, name) in crumbs.iter().enumerate() {
                                 if k > 0 {
@@ -3472,6 +3488,7 @@ pub(crate) fn give_settings(shape: &mut Shape, src: &Params) {
         start: own.start,
         end: own.end,
         trim: own.trim,
+        trim_before: own.trim_before,
         stop: own.stop,
         lock: own.lock,
         hide: own.hide,

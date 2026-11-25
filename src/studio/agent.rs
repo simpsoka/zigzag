@@ -1255,6 +1255,7 @@ impl AgentState {
         std::thread::spawn(move || {
             let run = |args: &[&str]| {
                 let mut cmd = Command::new(&program);
+                crate::no_console(&mut cmd);
                 cmd.args(args).stdin(Stdio::null()).stderr(Stdio::null());
                 if let Some(p) = &path {
                     cmd.env("PATH", p);
@@ -1621,6 +1622,7 @@ impl AgentState {
         port: u16,
     ) -> Command {
         let mut cmd = Command::new(program);
+        crate::no_console(&mut cmd);
         match self.kind {
             AgentKind::Claude => {
                 let config = serde_json::json!({
@@ -2754,6 +2756,7 @@ pub fn activity(tool: &str) -> &'static str {
         "add_outline" => "Outlining",
         "simplify_design" => "Simplifying",
         "trace_image" => "Tracing",
+        "place_file" => "Placing",
         "render_preview" => "Looking",
         "check_design" | "measure_stitching" | "get_cuts" => "Checking",
         "offer_choices" => "Offering choices",

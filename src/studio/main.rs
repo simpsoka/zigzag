@@ -78,6 +78,20 @@ mod update;
 mod view_tools;
 mod widgets;
 
+/// Runs `cmd` without a console window of its own. ZigZag is a window app
+/// on Windows (above), so a console program it starts (curl, claude, codex)
+/// would otherwise open a console window for as long as it runs. Elsewhere
+/// it does nothing.
+pub(crate) fn no_console(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Windows starts a window app without a console, so `--help`, crash
 /// messages and logs printed from a terminal would go nowhere. Use the
 /// console of the terminal that started ZigZag, if any (as Alacritty and

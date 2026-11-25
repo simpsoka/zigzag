@@ -652,7 +652,7 @@ impl Studio {
                 // the first time).
                 self.design = design;
                 self.issues = issues;
-                self.names = zigzag::svg::display_names(&self.doc.shapes);
+                self.names = self.doc.object_names();
                 self.replans += 1;
                 self.planner.expect_slow();
             }

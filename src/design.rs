@@ -2760,7 +2760,7 @@ fn joined_satin(shapes: &[Shape], order: &[usize], pos: usize) -> Option<(Vec<us
     // (Settings but for what happens after: that's the last one's to say.)
     let settings_of = |s: &Shape| {
         let mut p = s.params.clone();
-        (p.trim, p.stop) = (None, None);
+        (p.trim, p.stop, p.trim_before) = (None, None, None);
         format!("{p:?}")
     };
     let ends = |s: &Shape| s.params.trim == Some(true) || s.params.stop == Some(true);
@@ -2769,6 +2769,7 @@ fn joined_satin(shapes: &[Shape], order: &[usize], pos: usize) -> Option<(Vec<us
     for &j in &order[pos..] {
         let s = &shapes[j];
         if column(s).is_none()
+            || (!members.is_empty() && s.params.trim_before == Some(true))
             || s.groups != first.groups
             || s.color != first.color
             || settings_of(s) != settings
@@ -2984,6 +2985,7 @@ fn shorten_travel(shapes: &[Shape], order: &mut [usize]) {
             && p.start.is_none()
             && p.end.is_none()
             && p.trim != Some(true)
+            && p.trim_before != Some(true)
             && p.stop != Some(true)
             && p.colors.as_ref().is_none_or(|c| c.len() < 2)
             && satin_column(s).is_none()
@@ -3522,6 +3524,8 @@ fn plan_shown(name: &str, shapes: &[Shape], opt: &PlanOptions, cache: &mut PlanC
             design.block_shapes.push(Vec::new());
             design.stitch_shapes.push(Vec::new());
         }
+        // Consume this request only at the first sewn piece, alongside any prior cut.
+        force_trim |= shape.params.trim_before == Some(true);
         let last_group = sr.groups.iter().rposition(|g| !g.is_empty()).unwrap_or(0);
         let tops = sr.tops.clone();
         // The object sewn next in the same thread, if nothing says to cut
@@ -3535,6 +3539,7 @@ fn plan_shown(name: &str, shapes: &[Shape], opt: &PlanOptions, cache: &mut PlanC
                 shapes[j].color == shape.color
                     && sr.colors.is_empty()
                     && sr.stops.is_empty()
+                    && shapes[j].params.trim_before != Some(true)
                     && shape.params.trim != Some(true)
                     && shape.params.stop != Some(true)
             })
@@ -7092,6 +7097,133 @@ mod tests {
         assert_eq!(
             plan("p", &[cut, b.clone()], &PlanOptions::default()).trim_count(),
             1
+        );
+    }
+
+    #[test]
+    fn trim_before_joined_satin_only_cuts_at_entry() {
+        let column = |x| {
+            let mut s = shape(
+                Geometry::Stroke {
+                    lines: vec![
+                        (vec![P::new(x, 0.0), P::new(x, 100.0)], false),
+                        (vec![P::new(x + 20.0, 0.0), P::new(x + 20.0, 100.0)], false),
+                    ],
+                    width: 20.0,
+                },
+                Kind::Satin,
+                [0; 3],
+            );
+            s.groups = vec!["columns".into()];
+            s.params.rails = Some((1, 2));
+            s
+        };
+        let mut a = column(0.0);
+        let mut b = column(20.0);
+        a.params.trim_before = Some(true);
+        let (_, joined) = joined_satin(&[a.clone(), b.clone()], &[0, 1], 0).unwrap();
+        assert_eq!(joined.params.trim_before, Some(true));
+        assert_eq!(
+            plan("p", &[a.clone(), b.clone()], &PlanOptions::default()).trim_count(),
+            0
+        );
+        let prior = shape(fill(sq(-100.0, 0.0, 50.0)), Kind::Fill, [0; 3]);
+        assert_eq!(
+            plan("p", &[prior, a.clone(), b.clone()], &PlanOptions::default()).trim_count(),
+            1
+        );
+        b.params.trim_before = Some(true);
+        assert!(
+            joined_satin(&[a, b], &[0, 1], 0).is_none(),
+            "an explicit boundary splits the join"
+        );
+    }
+
+    #[test]
+    fn trim_before_overrides_a_short_same_color_hop() {
+        let line = |x| {
+            shape(
+                Geometry::Stroke {
+                    lines: vec![(vec![P::new(x, 0.0), P::new(x + 50.0, 0.0)], false)],
+                    width: 1.0,
+                },
+                Kind::Run,
+                [0; 3],
+            )
+        };
+        let a = line(0.0);
+        let mut b = line(55.0);
+        let opt = PlanOptions::default();
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        b.params.trim_before = Some(true);
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 1);
+        b.params.trim_before = None;
+        assert_eq!(plan("p", &[a, b], &opt).trim_count(), 0);
+    }
+
+    #[test]
+    fn trim_before_is_one_object_boundary_cut() {
+        let mut a = shape(fill(sq(0.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let mut b = shape(fill(sq(130.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let opt = PlanOptions {
+            connect: 150.0,
+            ..PlanOptions::default()
+        };
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        a.params.trim_before = Some(true);
+        assert_eq!(plan("p", &[a.clone()], &opt).trim_count(), 0);
+        b.params.trim_before = Some(true);
+        let d = plan("p", &[a.clone(), b.clone()], &opt);
+        assert_eq!(d.trim_count(), 1);
+        assert!(!d.blocks[0].runs[0].trim_before);
+        assert!(d.blocks[0].runs[1].trim_before);
+        assert!(
+            crate::formats::dst::stream(&d)
+                .iter()
+                .any(|c| c.op == crate::formats::Op::Trim)
+        );
+        a.params.trim = Some(true);
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 1);
+        let mut empty = shape(fill(Vec::new()), Kind::Fill, [0; 3]);
+        empty.params.trim_before = Some(true);
+        let mut skip = b.clone();
+        skip.params.kind = Some(Kind::Skip);
+        assert_eq!(
+            plan(
+                "p",
+                &[a.clone(), empty.clone(), skip.clone(), b.clone()],
+                &opt
+            )
+            .trim_count(),
+            1
+        );
+        let mut automatic = b.clone();
+        automatic.params.trim_before = None;
+        assert_eq!(
+            plan(
+                "p",
+                &[a.clone(), empty.clone(), skip.clone(), automatic.clone()],
+                &opt
+            )
+            .trim_count(),
+            1
+        );
+        assert_eq!(plan("p", &[empty, skip, automatic], &opt).trim_count(), 0);
+        a.params.trim = None;
+        b.params.via = Some(vec![(20.0, 30.0)]);
+        let d = plan("p", &[a.clone(), b.clone()], &opt);
+        assert_eq!(d.trim_count(), 1);
+        assert!(d.routes.is_empty());
+        b.params.trim_before = None;
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        b.params.trim_before = Some(false);
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        b.color = [255; 3];
+        b.params.trim_before = Some(true);
+        assert_eq!(
+            plan("p", &[a, b], &opt).trim_count(),
+            0,
+            "no prior run in a new thread block"
         );
     }
 

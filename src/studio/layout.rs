@@ -537,7 +537,7 @@ impl Studio {
             self.layout.expanded.insert(g.clone());
             self.status = format!(
                 "Editing group \"{}\". Press Esc or double-click empty canvas to leave it.",
-                Self::group_label(&g)
+                self.group_label(&g)
             );
             self.layout.isolated.push(g);
         }
@@ -552,7 +552,7 @@ impl Studio {
         let members = self.group_members(&g);
         self.set_selection(&members);
         match self.scope() {
-            Some(outer) => self.status = format!("Editing group \"{}\".", Self::group_label(outer)),
+            Some(outer) => self.status = format!("Editing group \"{}\".", self.group_label(outer)),
             None => self.clear_group_status(),
         }
         true
@@ -593,7 +593,10 @@ impl Studio {
     }
 
     /// Readable name for a group id.
-    pub fn group_label(g: &str) -> String {
+    pub fn group_label(&self, g: &str) -> String {
+        if let Some(name) = self.doc.group_name(g) {
+            return name.to_string();
+        }
         let words = zigzag::svg::name_words(g);
         if words.is_empty() {
             "Group".into()

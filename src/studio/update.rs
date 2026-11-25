@@ -182,6 +182,7 @@ fn run(cmd: &mut Command) -> Result<String, String> {
 
 fn curl() -> Command {
     let mut c = Command::new("curl");
+    crate::no_console(&mut c);
     c.args(["--fail", "--silent", "--show-error", "--location"])
         .args(["--connect-timeout", "20"])
         .args([
