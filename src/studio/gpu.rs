@@ -389,6 +389,7 @@ impl StitchGpu {
                     &mut jumps,
                     opt,
                     ri == 0 || run.trim_before,
+                    blk.color,
                     last,
                     run.pts.first().map(|&p| at(p)),
                 );

@@ -97,7 +97,7 @@ pub struct Prefs {
     /// Draw jumps without a thread cut (View › Uncut Jumps): for every
     /// document, and kept from one launch to the next.
     pub show_jumps: bool,
-    /// Display machine travel after a cut in a separate color.
+    /// Display machine travel after a cut (off unless requested).
     pub show_cut_jumps: bool,
     /// Snap to other objects and the hoop while dragging (View › Smart
     /// Guides, ⌘U): kept the same way.
@@ -123,7 +123,7 @@ impl Default for Prefs {
             share_defaults: None,
             advanced: true,
             show_jumps: true,
-            show_cut_jumps: true,
+            show_cut_jumps: false,
             smart_guides: true,
             path: None,
         }
@@ -152,8 +152,6 @@ impl Prefs {
         }
         if let Some(on) = v["show_jumps"].as_bool() {
             p.show_jumps = on;
-            // Older settings had one switch for every jump.
-            p.show_cut_jumps = on;
         }
         if let Some(on) = v["show_cut_jumps"].as_bool() {
             p.show_cut_jumps = on;
@@ -1188,8 +1186,8 @@ mod tests {
         p.auto_update = false;
         assert!(p.show_jumps, "uncut jumps drawn unless they're turned off");
         p.show_jumps = false;
-        assert!(p.show_cut_jumps);
-        p.show_cut_jumps = false;
+        assert!(!p.show_cut_jumps, "cut travel is hidden by default");
+        p.show_cut_jumps = true;
         assert!(p.smart_guides, "smart guides on unless they're turned off");
         p.smart_guides = false;
         p.set_fold("before-you-sew", false);
@@ -1208,6 +1206,14 @@ mod tests {
         )
         .unwrap();
         let odd = Prefs::load_from(Some(file.clone()));
+        assert!(odd.show_jumps && !odd.show_cut_jumps);
+        // Old files keep their jump visibility; cut travel is opt-in.
+        std::fs::write(&file, r#"{"show_jumps":true}"#).unwrap();
+        let old = Prefs::load_from(Some(file.clone()));
+        assert!(old.show_jumps && !old.show_cut_jumps);
+        std::fs::write(&file, r#"{"show_jumps":false}"#).unwrap();
+        let old = Prefs::load_from(Some(file.clone()));
+        assert!(!old.show_jumps && !old.show_cut_jumps);
         assert!(odd.folds.is_empty());
         assert!(odd.advanced, "settings that don't say: every setting");
         std::fs::write(

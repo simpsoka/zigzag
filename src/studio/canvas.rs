@@ -292,6 +292,7 @@ pub(crate) fn append_jump(
     out: &mut Vec<egui::Shape>,
     opt: &DrawOptions,
     cut: bool,
+    thread: [u8; 3],
     from: Option<Pos2>,
     to: Option<Pos2>,
 ) {
@@ -302,9 +303,9 @@ pub(crate) fn append_jump(
         && a.distance(b) > 1.0
     {
         let color = if cut {
-            contrasting([35, 145, 210], opt.background)
-        } else {
             Color32::from_gray(140)
+        } else {
+            contrasting(thread, opt.background)
         };
         let (dash, gap) = if cut { (2.0, 5.0) } else { (4.0, 3.0) };
         out.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, color), dash, gap));
@@ -386,7 +387,7 @@ pub fn draw_design_cached(
         // Each new block begins after a cut, including same-color stops.
         let first = blk.runs.iter().find_map(|r| r.pts.first()).map(|&p| at(p));
         let mut travel = Vec::new();
-        append_jump(&mut travel, opt, true, last, first);
+        append_jump(&mut travel, opt, true, blk.color, last, first);
         painter.extend(travel);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (
@@ -639,6 +640,7 @@ fn design_shapes(
                 out,
                 opt,
                 ri == 0 || run.trim_before,
+                blk.color,
                 last,
                 pts.first().copied(),
             );
@@ -1051,14 +1053,25 @@ mod tests {
             moving: None, copy: false, hidden: None,
         };
         let (a, b) = (Some(Pos2::ZERO), Some(Pos2::new(100.0, 0.0)));
-        append_jump(&mut lines, &opts, false, a, b);
+        let thread = [180, 40, 60];
+        append_jump(&mut lines, &opts, false, thread, a, b);
         let uncut = std::mem::take(&mut lines);
-        append_jump(&mut lines, &opts, true, a, b);
-        assert_ne!(lines, uncut);
+        let segment = [a.unwrap(), b.unwrap()];
+        assert_eq!(uncut, egui::Shape::dashed_line(&segment,
+            Stroke::new(1.0, contrasting(thread, opts.background)), 4.0, 3.0));
+        append_jump(&mut lines, &opts, true, thread, a, b);
+        assert_eq!(lines, egui::Shape::dashed_line(&segment,
+            Stroke::new(1.0, Color32::from_gray(140)), 2.0, 5.0));
         opts.show_cut_jumps = false;
         lines.clear();
-        append_jump(&mut lines, &opts, true, a, b);
+        append_jump(&mut lines, &opts, true, thread, a, b);
         assert!(lines.is_empty());
+        append_jump(&mut lines, &opts, false, thread, a, b);
+        assert_eq!(lines, uncut);
+        // A different thread has its own color.
+        lines.clear();
+        append_jump(&mut lines, &opts, false, [30, 120, 70], a, b);
+        assert_ne!(lines, uncut);
     }
 
     #[test]
