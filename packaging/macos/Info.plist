@@ -56,8 +56,20 @@
 				<string>dev.zigzag.pes</string>
 				<string>dev.zigzag.pec</string>
 				<string>dev.zigzag.dst</string>
-				<string>dev.zigzag.exp</string>
 				<string>dev.zigzag.jef</string>
+				<string>dev.zigzag.vp3</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Melco EXP embroidery</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>dev.zigzag.exp</string>
 			</array>
 		</dict>
 		<dict>
@@ -162,6 +174,23 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>jef</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>dev.zigzag.vp3</string>
+			<key>UTTypeDescription</key>
+			<string>Pfaff VP3 embroidery</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>vp3</string>
 				</array>
 			</dict>
 		</dict>
