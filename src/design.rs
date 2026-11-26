@@ -6052,6 +6052,62 @@ impl Design {
             .sum()
     }
 
+    /// Remove inter-object travel from a temporary transform preview when
+    /// exactly one endpoint moves. The real plan is regenerated on release.
+    /// Do this before splitting blocks, while travel indices still refer to
+    /// the original runs. Keep the endpoints and every object's own stitches.
+    pub fn hide_crossing_travel(&mut self, picked: &[usize]) -> bool {
+        use std::collections::BTreeMap;
+        let mut gaps = BTreeMap::<(usize, usize), Vec<std::ops::Range<usize>>>::new();
+        let picked: std::collections::HashSet<_> = picked.iter().copied().collect();
+        for t in &self.travels {
+            let Some(spans) = self.stitch_shapes.get(t.block).and_then(|b| b.get(t.run)) else {
+                continue;
+            };
+            let Some(run) = self.blocks.get(t.block).and_then(|b| b.runs.get(t.run)) else {
+                continue;
+            };
+            if t.to >= run.pts.len() || t.from.saturating_add(1) >= t.to {
+                continue;
+            }
+            let owner = |at| {
+                spans
+                    .partition_point(|&(start, _)| start <= at)
+                    .checked_sub(1)
+                    .map(|i| spans[i].1)
+            };
+            if let (Some(a), Some(b)) = (owner(t.from), owner(t.to))
+                && picked.contains(&a) != picked.contains(&b)
+            {
+                gaps.entry((t.block, t.run))
+                    .or_default()
+                    .push(t.from + 1..t.to);
+            }
+        }
+        let any = !gaps.is_empty();
+        for ((b, r), ranges) in gaps {
+            let run = &mut self.blocks[b].runs[r];
+            let mut remove = vec![false; run.pts.len()];
+            for range in ranges {
+                remove[range].fill(true);
+            }
+            let mut kept = vec![0; remove.len() + 1];
+            for (i, &gone) in remove.iter().enumerate() {
+                kept[i + 1] = kept[i] + usize::from(!gone);
+            }
+            for (at, _) in &mut self.stitch_shapes[b][r] {
+                *at = kept[(*at).min(remove.len())];
+            }
+            let mut i = 0;
+            run.pts.retain(|_| {
+                let keep = !remove[i];
+                i += 1;
+                keep
+            });
+        }
+        any
+    }
+
     /// Put the stitches of the input shapes `picked` (see
     /// [`Design::stitch_shapes`]) in blocks of their own: a block with
     /// their stitches and others' becomes two in the same thread, the
@@ -7098,6 +7154,40 @@ mod tests {
             plan("p", &[cut, b.clone()], &PlanOptions::default()).trim_count(),
             1
         );
+    }
+
+    #[test]
+    fn transform_preview_omits_travel_only_between_moving_and_fixed_objects() {
+        let a = shape(fill(sq(0.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let mut b = shape(fill(sq(400.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        b.params.via = Some(Vec::new());
+        let whole = plan("preview", &[a, b], &PlanOptions::default());
+        let travel = whole
+            .travels
+            .iter()
+            .find(|t| t.how == TravelHow::Routed)
+            .unwrap();
+        let n = travel.to - travel.from - 1;
+        assert!(n > 0);
+        let mut together = whole.clone();
+        assert!(!together.hide_crossing_travel(&[0, 1]));
+        assert_eq!(together.stitch_count(), whole.stitch_count());
+        for i in [0, 1] {
+            let mut preview = whole.clone();
+            assert!(preview.hide_crossing_travel(&[i]));
+            assert!(preview.split_shapes(&[i]));
+            assert_eq!(preview.stitch_count(), whole.stitch_count() - n);
+            let original = &whole.blocks[travel.block].runs[travel.run].pts;
+            let preview_points: Vec<_> = preview
+                .blocks
+                .iter()
+                .flat_map(|b| &b.runs)
+                .flat_map(|r| &r.pts)
+                .collect();
+            for p in &original[travel.from + 1..travel.to] {
+                assert!(!preview_points.contains(&p), "stale travel point: {p:?}");
+            }
+        }
     }
 
     #[test]

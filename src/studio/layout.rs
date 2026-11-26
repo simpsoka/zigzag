@@ -1783,11 +1783,14 @@ impl Studio {
         // on show, or they'd stay where they were until the drop.
         if !drag.split && m != IDENTITY {
             drag.split = true;
-            if self.design.per_shape.len() == self.doc.shapes.len()
-                && self.design.split_shapes(&drag.carried)
-            {
-                self.replans += 1;
-                self.plan_cut = true;
+            if self.design.per_shape.len() == self.doc.shapes.len() {
+                let removed = !self.plan_cut && !self.planner.pending && !self.dirty
+                    && self.design.hide_crossing_travel(&drag.carried);
+                let split = self.design.split_shapes(&drag.carried);
+                if removed || split {
+                    self.replans += 1;
+                    self.plan_cut = true;
+                }
             }
         }
     }
@@ -2604,6 +2607,35 @@ mod tests {
             (b2.min.x - b.min.x).abs() < 1.0,
             "top-left corner stays put"
         );
+    }
+
+    #[test]
+    fn a_drag_hides_the_cross_object_route_until_replanning() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="30mm" viewBox="0 0 100 30">
+            <rect id="a_fill" x="0" y="10" width="10" height="10" fill="#aa0000"/>
+            <rect id="b_fill_via=direct" x="40" y="10" width="10" height="10" fill="#aa0000"/>
+        </svg>"##;
+        let mut h = studio();
+        let doc = Document::from_svg(svg, "drag connection", None).unwrap();
+        h.state_mut().set_document(doc);
+        h.run_steps(5);
+        let s = h.state_mut();
+        assert_eq!(s.design.routes.len(), 1);
+        let before = s.design.stitch_count();
+        let route = s.design.travels.iter().find(|t| t.how == zigzag::design::TravelHow::Routed).unwrap();
+        let travel_points = route.to - route.from - 1;
+        assert!(travel_points > 0);
+        s.set_selection(&[1]);
+        let at = shape_bounds(&s.doc.shapes[1]).center();
+        s.begin_drag(None, at);
+        s.update_drag(at + P::new(0.0, 50.0), DragMods::default());
+        assert!(s.plan_cut);
+        assert_eq!(s.design.stitch_count(), before - travel_points);
+        s.end_drag();
+        assert!(!s.plan_cut);
+        assert_eq!(s.design.routes.len(), 1);
+        assert_eq!(s.design.trim_count(), 0);
+        assert_eq!(s.undo.len(), 1);
     }
 
     #[test]

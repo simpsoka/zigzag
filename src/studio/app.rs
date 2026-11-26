@@ -3204,8 +3204,8 @@ impl Studio {
             crate::view_tools::draw_grid(&painter, rect, &self.view);
         }
         let opts = DrawOptions {
-            show_jumps: self.prefs.show_jumps,
-            show_cut_jumps: self.prefs.show_cut_jumps,
+            show_jumps: self.prefs.show_jumps && self.drag.is_none() && !self.plan_cut,
+            show_cut_jumps: self.prefs.show_cut_jumps && self.drag.is_none() && !self.plan_cut,
             limit: self.player.unwrap_or(usize::MAX),
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,
@@ -3255,7 +3255,7 @@ impl Studio {
             self.paint_stitches(&painter, rect, &self.design, &opts, 0, self.replans)
         };
         crate::profile::mark("c:stitches");
-        if sewing.is_none() {
+        if sewing.is_none() && self.plan_is_current() && self.drag.is_none() {
             self.draw_bridges(&painter, rect);
             self.route_handles(ui, &painter, rect);
         }
@@ -3867,6 +3867,42 @@ mod tests {
         h.drop_at(away);
         h.run_steps(2);
         assert_eq!(h.state().route_active, None);
+        assert!(h.query_by_label("Thread route point 1").is_none());
+    }
+
+    #[test]
+    fn a_pending_plan_keeps_the_route_in_hand() {
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 900.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(None, None),
+            );
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="30mm" viewBox="0 0 80 30">
+            <rect id="left" x="0" y="0" width="10" height="10" fill="#aa0000"/>
+            <rect id="right_via=0:20" x="60" y="0" width="10" height="10" fill="#aa0000"/>
+        </svg>"##;
+        h.state_mut()
+            .set_document(zigzag::document::Document::from_svg(svg, "route", None).unwrap());
+        h.state_mut().set_tool(Tool::Select);
+        h.run_steps(4);
+        let uid = h.state().doc.shapes[1].uid;
+        assert_eq!(h.state().design.routes.len(), 1);
+        let drag = RouteDrag {
+            uid,
+            k: 0,
+            insert: false,
+            at: P::new(0.0, 200.0),
+        };
+        let s = h.state_mut();
+        s.route_active = Some(uid);
+        s.route_drag = Some(drag);
+        // Hold the pending flag for a frame, independent of worker timing.
+        s.planner.pending = true;
+        h.run_steps(1);
+        assert!(!h.state().plan_is_current());
+        assert_eq!(h.state().route_active, Some(uid));
+        assert_eq!(h.state().route_drag, Some(drag));
         assert!(h.query_by_label("Thread route point 1").is_none());
     }
 
