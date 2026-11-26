@@ -3,6 +3,7 @@
 
 use crate::app::Studio;
 use eframe::egui;
+use crate::fonts::{FontItem, Have};
 use zigzag::document::{TextSpec, font_families};
 use zigzag::geom::P;
 use zigzag::params::Kind;
@@ -14,6 +15,8 @@ pub struct LetteringState {
     /// Edits to the selected lettering object: (uid, settings).
     pub edit: Option<(usize, TextSpec)>,
     pub fonts: Vec<String>,
+    /// How many font faces there were when `fonts` was read.
+    pub fonts_faces: usize,
     pub font_filter: String,
     /// The Type tool is typing into this object (uid), in the box over the
     /// canvas; `typed` is the text as typed so far.
@@ -33,7 +36,9 @@ pub struct Typing {
     /// bottom of where the letters were (design units), kept from the
     /// last frame that had letters, so the frame and caret stay put.
     pub empty_frame: Option<(f64, f64, f64)>,
-    /// The object still shows the placeholder "Text" (nothing typed yet).
+    /// The text is still the placeholder "Text" it was placed with,
+    /// selected (as Illustrator's is): typing replaces it, Delete takes it
+    /// away, and ending the edit untouched takes the new text away again.
     pub placeholder: bool,
     /// Placed by this edit (so ending it with nothing typed takes it away
     /// again), rather than text that was already there.
@@ -245,14 +250,19 @@ impl Typing {
 }
 
 /// What a font menu lists: a search field (the keyboard's when the menu
-/// opens, so typing narrows the list straight away) and the fonts. ↑ and
-/// ↓ step through the fonts listed, the text taking each as it's reached
-/// and the list scrolling to it; Enter closes the menu (as Escape and a
-/// click on a font do). True when the font changed.
+/// opens, so typing narrows the list straight away) and the fonts: those
+/// on this computer, and the rest of ZigZag's catalogue greyed out with a
+/// download mark (picking one downloads it). Fonts made for embroidery
+/// carry a stitch mark. ↑ and ↓ step through the fonts listed that are
+/// here (not the catalogue's, which a click picks: each stepped past would
+/// be downloaded), the text
+/// taking each as it's reached and the list scrolling to it; Enter closes
+/// the menu (as Escape and a click on a font do). True when the font
+/// changed.
 pub(crate) fn font_list(
     ui: &mut egui::Ui,
     font: &mut String,
-    fonts: &[String],
+    fonts: &[FontItem],
     filter: &mut String,
 ) -> bool {
     // (Before the search field sees them: there they'd move its caret.)
@@ -275,32 +285,78 @@ pub(crate) fn font_list(
         field.request_focus();
     }
     let f = filter.to_lowercase();
-    let listed: Vec<&String> = fonts
+    let listed: Vec<&FontItem> = fonts
         .iter()
-        .filter(|n| f.is_empty() || n.to_lowercase().contains(&f))
+        .filter(|n| f.is_empty() || n.name.to_lowercase().contains(&f))
         .collect();
     let mut changed = false;
     // The font to bring into view: the one in use as the menu opens, the
     // one stepped to.
     let mut reveal = opened;
-    if (up || down) && !listed.is_empty() {
-        let last = listed.len() - 1;
-        let k = match (listed.iter().position(|n| *n == font), down) {
+    // (Through the fonts that are here: each one stepped to is set, and a
+    // catalogue font stepped past would be downloaded on the way. Those are
+    // picked with a click.)
+    let steps: Vec<&FontItem> = listed
+        .iter()
+        .copied()
+        .filter(|n| n.have == Have::Here || n.name == *font)
+        .collect();
+    if (up || down) && !steps.is_empty() {
+        let last = steps.len() - 1;
+        let k = match (steps.iter().position(|n| n.name == *font), down) {
             (Some(k), true) => (k + 1).min(last),
             (Some(k), false) => k.saturating_sub(1),
             (None, true) => 0,
             (None, false) => last,
         };
-        if listed[k] != font {
-            *font = listed[k].clone();
+        if steps[k].name != *font {
+            *font = steps[k].name.clone();
             changed = true;
         }
         reveal = true;
     }
-    for name in listed {
-        let r = ui.selectable_value(font, name.clone(), name);
+    let p = crate::theme::pal_ui(ui);
+    for item in listed {
+        let here = item.have == Have::Here;
+        let label = if here {
+            egui::RichText::new(&item.name)
+        } else {
+            egui::RichText::new(&item.name).color(p.secondary)
+        };
+        let r = ui.selectable_value(font, item.name.clone(), label);
+        // Marks at the row's right: made for embroidery, to download.
+        let side = 12.0;
+        let mut x = r.rect.right() - ui.spacing().button_padding.x - side;
+        let mark = |x: f32| {
+            egui::Rect::from_center_size(
+                egui::pos2(x + side / 2.0, r.rect.center().y),
+                egui::vec2(side, side),
+            )
+        };
+        match item.have {
+            Have::Here => {}
+            Have::Download => {
+                crate::icons::paint(ui.painter(), mark(x), crate::icons::Icon::Download, p.secondary);
+                x -= side + 4.0;
+            }
+            Have::Getting => {
+                ui.put(mark(x), egui::Spinner::new().size(side));
+                x -= side + 4.0;
+            }
+        }
+        if item.embroidery {
+            crate::icons::paint(ui.painter(), mark(x), crate::icons::Icon::Stitch, p.secondary);
+        }
+        let r = match (here, item.embroidery) {
+            (true, false) => r,
+            (true, true) => r.on_hover_text("Made for embroidery"),
+            (false, emb) => r.on_hover_text(format!(
+                "{}Downloads from zigzag.diy when picked",
+                if emb { "Made for embroidery. " } else { "" }
+            )),
+        };
         changed |= r.changed();
-        if reveal && name == font {
+        if reveal && item.name == *font {
             // (At once: the menu opens on it, not scrolling to it.)
             r.scroll_to_me_animation(
                 Some(egui::Align::Center),
@@ -314,6 +370,18 @@ pub(crate) fn font_list(
     changed
 }
 
+/// A font was picked for `spec`: a single-line font made for embroidery
+/// is sewn as a run (its letters are lines, with nothing to fill).
+pub(crate) fn picked_font(spec: &mut TextSpec, fonts: &[FontItem]) {
+    if fonts
+        .iter()
+        .any(|f| f.embroidery && f.name.eq_ignore_ascii_case(&spec.font))
+        && matches!(spec.kind, Kind::Satin | Kind::Fill)
+    {
+        spec.kind = Kind::Run;
+    }
+}
+
 /// Where the caret and the typing frame are drawn: on the canvas, over the
 /// letters, and only there (not over the docks beside it when the letters
 /// are zoomed in past its edges, nor over a panel or menu on top of it).
@@ -323,11 +391,23 @@ fn caret_painter(ctx: &egui::Context, canvas: egui::Rect) -> egui::Painter {
 }
 
 impl Studio {
-    pub(crate) fn fonts(&mut self) -> Vec<String> {
-        if self.lettering.fonts.is_empty() {
+    /// The font families on this computer (its own, the bundled ones, and
+    /// those downloaded), read again whenever fonts were added.
+    pub(crate) fn fonts_here(&mut self) -> Vec<String> {
+        let faces = zigzag::svg::font_faces();
+        if self.lettering.fonts.is_empty() || self.lettering.fonts_faces != faces {
             self.lettering.fonts = font_families();
+            self.lettering.fonts_faces = faces;
         }
         self.lettering.fonts.clone()
+    }
+
+    /// The font menu: the fonts here, and the catalogue's others to
+    /// download.
+    pub(crate) fn fonts(&mut self) -> Vec<FontItem> {
+        let here = self.fonts_here();
+        self.font_store.want_catalogue();
+        self.font_store.menu(&here)
     }
 
     pub fn open_text_window(&mut self) {
@@ -345,7 +425,7 @@ impl Studio {
             None => {
                 let mut spec = TextSpec::default();
                 if let Some(font) = self.prefs.last_font.clone()
-                    && self.fonts().contains(&font)
+                    && self.fonts_here().contains(&font)
                 {
                     spec.font = font;
                 }
@@ -381,6 +461,7 @@ impl Studio {
             Ok(())
         })?;
         self.remember_text(spec);
+        self.lettering_font_used(&spec.font);
         self.set_selection(&[idx]);
         // (Planned on the next frame: at once for a small design, on the
         // worker for a big one, so the UI never stalls here.)
@@ -392,6 +473,7 @@ impl Studio {
         let uid = self.doc.shapes[index].uid;
         self.structural(|d| d.set_lettering(index, spec))?;
         self.remember_text(spec);
+        self.lettering_font_used(&spec.font);
         if let Some(i) = self.doc.shapes.iter().position(|s| s.uid == uid) {
             self.set_selection(&[i]);
         }
@@ -411,7 +493,7 @@ impl Studio {
     fn text_fields(
         ui: &mut egui::Ui,
         spec: &mut TextSpec,
-        fonts: &[String],
+        fonts: &[FontItem],
         filter: &mut String,
         id: &str,
     ) -> bool {
@@ -468,7 +550,10 @@ impl Studio {
                     .width(170.0)
                     .height(320.0)
                     .show_ui(ui, |ui| font_list(ui, &mut spec.font, fonts, filter));
-                committed |= r.inner == Some(true);
+                if r.inner == Some(true) {
+                    picked_font(spec, fonts);
+                    committed = true;
+                }
                 let r = r.response.labelled_by(lid);
                 committed |= r.changed();
             });
@@ -915,9 +1000,7 @@ impl Studio {
                 if let Some(i) = self.doc.shapes.iter().position(|s| s.uid == t.uid)
                     && self.text_box_hit(i, p, tol)
                 {
-                    if !t.placeholder
-                        && let Some(k) = t.carets(&self.doc, i).nearest(p)
-                    {
+                    if let Some(k) = t.carets(&self.doc, i).nearest(p) {
                         if resp.triple_clicked() {
                             t.select_all();
                         } else if resp.double_clicked() {
@@ -926,6 +1009,8 @@ impl Studio {
                             t.move_to(k, shift);
                             t.dragging = !resp.clicked();
                         }
+                        // (Its letters are anyone's to edit now.)
+                        t.placeholder = false;
                     }
                     self.lettering.typing = Some(t);
                     return;
@@ -976,7 +1061,9 @@ impl Studio {
                         }
                     }
                     let uid = self.doc.shapes[i].uid;
-                    self.lettering.typing = Some(Typing::new(uid, String::new(), 0, true));
+                    let mut t = Typing::new(uid, spec.text.clone(), 0, true);
+                    t.select_all();
+                    self.lettering.typing = Some(t);
                     self.status = "Type your text. Enter for a new line, Esc when done.".into();
                 }
                 Err(e) => self.status = format!("Couldn't add text: {e:#}"),
@@ -1333,9 +1420,7 @@ impl Studio {
             // placeholder shows.
             let cursor = t.cursor;
             let selection = t.selection();
-            let at = if t.placeholder {
-                None
-            } else {
+            let at = {
                 let layout = t.layout(&self.doc, i);
                 // The selected letters, highlighted glyph by glyph (so the
                 // highlight follows arcs and paths).
@@ -1401,7 +1486,7 @@ impl Studio {
         let Some(i) = self.doc.shapes.iter().position(|s| s.uid == t.uid) else {
             return;
         };
-        if t.text.trim().is_empty() {
+        if t.text.trim().is_empty() || (t.placeholder && t.fresh) {
             // Gone from the canvas now, not when the next plan is made
             // (till then the old plan would show its letters again).
             self.drop_planned(&[i]);
@@ -1450,6 +1535,7 @@ impl Studio {
         let mut open = true;
         let mut add = false;
         let mut cancel = false;
+        let mut picked = false;
         egui::Window::new("Add Text")
             .title_frame(crate::theme::title_frame(ctx))
             .open(&mut open)
@@ -1458,7 +1544,7 @@ impl Studio {
             .anchor(egui::Align2::CENTER_TOP, egui::Vec2::new(0.0, 90.0))
             .default_width(360.0)
             .show(ctx, |ui| {
-                Self::text_fields(ui, &mut spec, &fonts, &mut filter, "new-text");
+                picked |= Self::text_fields(ui, &mut spec, &fonts, &mut filter, "new-text");
                 ui.add_space(crate::theme::space::XS);
                 ui.add_space(crate::theme::space::S);
                 // A button row (right-aligned), only as tall as its buttons.
@@ -1482,6 +1568,11 @@ impl Studio {
             open = false;
         }
         self.lettering.font_filter = filter;
+        // A font from the catalogue starts downloading as it's picked, not
+        // once the text is added.
+        if picked {
+            self.fetch_font_if_missing(&spec.font);
+        }
         if add {
             match self.add_lettering(&spec, (0.0, 0.0)) {
                 Ok(_) => {
@@ -2044,7 +2135,7 @@ mod tests {
     fn new_text_starts_in_the_font_last_used() {
         let mut s = Studio::with_file(None, None);
         let _ = s.run_tool("add_text", &serde_json::json!({ "text": "CAMP" }));
-        let fonts = s.fonts();
+        let fonts = s.fonts_here();
         let was = s.doc.lettering(0).unwrap().font;
         let other = fonts
             .iter()
@@ -2212,6 +2303,94 @@ mod editing_tests {
             crate::app::shape_bounds(&h.state().doc.shapes[0]).center(),
         );
         (h, c)
+    }
+
+    /// The Type tool on an empty canvas: the text placed, "Text" in it.
+    fn placed() -> (Harness<'static, Studio>, egui::Pos2) {
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 1000.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, s: &mut Studio| s.frame(ui), Studio::with_file(None, None));
+        h.run_steps(3);
+        let rect = h.state().canvas_rect;
+        let at = h.state().view.to_screen(rect, P::new(0.0, 0.0));
+        h.key_press(Key::T);
+        h.run_steps(1);
+        click(&mut h, at);
+        assert_eq!(texts(&h), ["Text"]);
+        (h, at)
+    }
+
+    #[test]
+    fn picking_a_single_line_font_sews_the_letters_as_a_run() {
+        let (mut h, _) = with_hello();
+        let s = h.state_mut();
+        assert_eq!(s.doc.shapes[0].params.kind, Some(Kind::Satin));
+        let fonts = s.fonts();
+        assert!(fonts.iter().any(|f| f.name == "Hershey Sans" && f.embroidery));
+        let mut spec = s.doc.lettering(0).unwrap();
+        spec.font = "Hershey Sans".into();
+        picked_font(&mut spec, &fonts);
+        s.update_lettering(0, &spec).unwrap();
+        h.run_steps(2);
+        let s = h.state();
+        assert!(s.doc.shapes[0].is_single_line());
+        assert_eq!(s.doc.lettering(0).unwrap().kind, Kind::Run);
+        assert_eq!(s.doc.shapes[0].params.kind, Some(Kind::Run));
+    }
+
+    #[test]
+    fn new_text_starts_with_its_placeholder_selected() {
+        // Selected, as Illustrator's: Delete takes the word away...
+        let (mut h, _) = placed();
+        let t = h.state().lettering.typing.as_ref().unwrap();
+        assert_eq!(t.selected_text(), "Text");
+        h.key_press(Key::Backspace);
+        h.run_steps(2);
+        assert_eq!(h.state().lettering.typing.as_ref().unwrap().text, "");
+        type_text(&mut h, "CAMP");
+        h.run_steps(2);
+        assert_eq!(texts(&h), ["CAMP"]);
+        // ...typing replaces it...
+        let (mut h, _) = placed();
+        type_text(&mut h, "Hi");
+        h.run_steps(2);
+        assert_eq!(texts(&h), ["Hi"]);
+        // ...a click puts the caret in it, to edit it like any text...
+        let (mut h, at) = placed();
+        let c = h.state().view.to_screen(
+            h.state().canvas_rect,
+            crate::app::shape_bounds(&h.state().doc.shapes[0]).max,
+        );
+        click(&mut h, egui::pos2(c.x - 1.0, at.y));
+        type_text(&mut h, "s");
+        h.run_steps(2);
+        assert_eq!(texts(&h), ["Texts"]);
+        // ...and left untouched, the new text goes again.
+        let (mut h, _) = placed();
+        h.key_press(Key::Escape);
+        h.run_steps(2);
+        assert!(texts(&h).is_empty());
+    }
+
+    #[test]
+    fn the_panels_text_field_keeps_its_keys_while_the_canvas_is_typing() {
+        use egui_kittest::kittest::Queryable;
+        let (mut h, _) = placed();
+        assert!(h.state().lettering.typing.is_some());
+        let field = h.get_by_label("Text");
+        field.click();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::A);
+        h.run_steps(1);
+        h.get_by_label("Text").type_text("Patch");
+        h.run_steps(2);
+        // (Into the field, not the letters on the canvas.)
+        assert_eq!(h.get_by_label("Text").value().as_deref(), Some("Patch"));
+        // Set as the field is left.
+        h.key_press(Key::Tab);
+        h.run_steps(3);
+        assert_eq!(texts(&h), ["Patch"]);
     }
 
     #[test]
@@ -2424,10 +2603,46 @@ mod editing_tests {
     }
 
     #[test]
+    fn arrow_keys_step_past_fonts_that_would_have_to_be_downloaded() {
+        let item = |name: &str, have| FontItem {
+            name: name.to_string(),
+            have,
+            embroidery: false,
+        };
+        let fonts = vec![
+            item("Alpha", Have::Here),
+            item("Cloud One", Have::Download),
+            item("Cloud Two", Have::Getting),
+            item("Gamma", Have::Here),
+        ];
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(300.0, 400.0))
+            .build_ui_state(
+                move |ui, s: &mut (String, String, Vec<String>)| {
+                    if font_list(ui, &mut s.0, &fonts, &mut s.1) {
+                        s.2.push(s.0.clone());
+                    }
+                },
+                ("Alpha".to_string(), String::new(), Vec::new()),
+            );
+        h.run_steps(2);
+        h.key_press(Key::ArrowDown);
+        h.run_steps(2);
+        h.key_press(Key::ArrowUp);
+        h.run_steps(2);
+        // (Never set in a catalogue font on the way: that downloads it.)
+        assert_eq!(h.state().2, ["Gamma", "Alpha"]);
+    }
+
+    #[test]
     fn arrow_keys_step_through_a_font_list() {
-        let fonts: Vec<String> = ["Alpha", "Beta", "Bravo", "Gamma"]
+        let fonts: Vec<FontItem> = ["Alpha", "Beta", "Bravo", "Gamma"]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| FontItem {
+                name: s.to_string(),
+                have: Have::Here,
+                embroidery: false,
+            })
             .collect();
         // (font, what's typed in the search field, times it changed)
         let mut h = Harness::builder()

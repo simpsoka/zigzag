@@ -748,7 +748,11 @@ fn column_of(s: &Shape) -> Option<Vec<Vec<P>>> {
     let Geometry::Stroke { lines, .. } = &s.geometry else {
         return None;
     };
-    if s.params.kind != Some(zigzag::params::Kind::Satin) || s.outline || lines.len() < 2 {
+    if s.params.kind != Some(zigzag::params::Kind::Satin)
+        || s.outline
+        || s.is_single_line()
+        || lines.len() < 2
+    {
         return None;
     }
     let r = zigzag::stitch::satin::rails_from_subpaths(lines, s.params.satin_rails())?;

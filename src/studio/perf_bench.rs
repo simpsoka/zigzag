@@ -740,7 +740,14 @@ fn times(
 #[test]
 #[ignore]
 fn stepping_through_fonts() {
-    let fonts = zigzag::document::font_families();
+    let fonts: Vec<crate::fonts::FontItem> = zigzag::document::font_families()
+        .into_iter()
+        .map(|name| crate::fonts::FontItem {
+            name,
+            have: crate::fonts::Have::Here,
+            embroidery: false,
+        })
+        .collect();
     println!("{} font families", fonts.len());
     // The menu alone.
     {
@@ -755,7 +762,7 @@ fn stepping_through_fonts() {
                         });
                     }
                 },
-                (fonts[fonts.len() / 3].clone(), String::new()),
+                (fonts[fonts.len() / 3].name.clone(), String::new()),
             );
         h.run_steps(3);
         let idle: Vec<f64> = (0..10)
@@ -803,7 +810,7 @@ fn stepping_through_fonts() {
         h.state().design.stitch_count(),
         h.state().design.per_shape[i],
     );
-    let from = fonts.iter().position(|f| *f == spec.font).unwrap_or(0);
+    let from = fonts.iter().position(|f| f.name == spec.font).unwrap_or(0);
     let (mut switch, mut frame, mut landed, mut plans) = (vec![], vec![], vec![], vec![]);
     let mut slowest: (f64, String) = (0.0, String::new());
     let mut on_worker = 0;
@@ -812,7 +819,7 @@ fn stepping_through_fonts() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
-    for font in fonts.iter().cycle().skip(from + 1).take(n) {
+    for font in fonts.iter().map(|f| &f.name).cycle().skip(from + 1).take(n) {
         let i = h.state().sel_index().unwrap();
         let mut next = h.state().doc.lettering(i).unwrap();
         next.font = font.clone();

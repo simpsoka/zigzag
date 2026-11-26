@@ -35,6 +35,10 @@ pub struct FillParams {
     /// and the same settings line up; a shape moved with its origin is
     /// sewn as it was.
     pub origin: P,
+    /// A patterned fill (Program Split): the needle also goes down
+    /// wherever a row crosses one of this motif's lines, tiled from
+    /// `origin` (see [`crate::stitch::motif`]).
+    pub pattern: Option<crate::stitch::motif::Motif>,
 }
 
 struct Edge {
@@ -286,6 +290,39 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
     let (cb, sb) = (p.angle.cos(), p.angle.sin());
     let stagger = p.stagger.max(1) as i64;
     let min_end = (p.len * 0.25).min(5.0).max(p.min_stitch);
+    // A patterned fill's needle points, row by row (in the turned frame).
+    let crossings = p
+        .pattern
+        .as_ref()
+        .map(|m| m.crossings(rings, p.origin, p.angle, p.spacing))
+        .unwrap_or_default();
+    // Where a pattern point falls, the row's own points that near give way
+    // (a stitch that short would blur it), and pattern points that near
+    // each other count once.
+    let clear = (p.len * 0.3).max(p.min_stitch);
+    let needles = |r: &Row, off: f64| -> Vec<f64> {
+        let m0 = ((r.xa + min_end - off) / p.len).ceil() as i64;
+        let m1 = ((r.xb - min_end - off) / p.len).floor() as i64;
+        let regular = (m0..=m1).map(|m| off + m as f64 * p.len);
+        let Some(xs) = crossings.get(&r.k) else {
+            return regular.collect();
+        };
+        let mut pat: Vec<f64> = Vec::new();
+        for &x in xs {
+            if x >= r.xa + min_end
+                && x <= r.xb - min_end
+                && pat.last().is_none_or(|&l| x - l >= p.min_stitch.max(1.0))
+            {
+                pat.push(x);
+            }
+        }
+        let mut all: Vec<f64> = regular
+            .filter(|&x| pat.iter().all(|&q| (q - x).abs() >= clear))
+            .chain(pat.iter().copied())
+            .collect();
+        all.sort_unstable_by(f64::total_cmp);
+        all
+    };
     sections
         .into_iter()
         .map(|rows| {
@@ -321,8 +358,6 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
                 let r = &rows[k];
                 let forward = ri % 2 == 0;
                 let off = (r.k.rem_euclid(stagger)) as f64 * p.len / stagger as f64;
-                let m0 = ((r.xa + min_end - off) / p.len).ceil() as i64;
-                let m1 = ((r.xb - min_end - off) / p.len).floor() as i64;
                 let (xs, xe) = if forward { (r.xa, r.xb) } else { (r.xb, r.xa) };
                 let start = P::new(xs, r.y);
                 match pts.last().copied() {
@@ -400,14 +435,11 @@ pub fn tatami(rings: &[Polyline], rule: FillRule, p: &FillParams) -> Vec<Polylin
                     }
                     pts.push(q);
                 };
-                if m1 >= m0 {
-                    if forward {
-                        (m0..=m1).for_each(|m| push(P::new(off + m as f64 * p.len, r.y)));
-                    } else {
-                        (m0..=m1)
-                            .rev()
-                            .for_each(|m| push(P::new(off + m as f64 * p.len, r.y)));
-                    }
+                let xs_row = needles(r, off);
+                if forward {
+                    xs_row.iter().for_each(|&x| push(P::new(x, r.y)));
+                } else {
+                    xs_row.iter().rev().for_each(|&x| push(P::new(x, r.y)));
                 }
                 push(P::new(xe, r.y));
             }
@@ -443,6 +475,7 @@ mod tests {
             bottom_up: false,
             min_stitch: 0.0,
             origin: P::default(),
+            pattern: None,
         }
     }
 
@@ -772,6 +805,7 @@ mod circle_tests {
             bottom_up: false,
             min_stitch: 0.0,
             origin: P::default(),
+            pattern: None,
         };
         let secs = tatami(&[ring], FillRule::NonZero, &p);
         assert_eq!(secs.len(), 1);

@@ -196,6 +196,8 @@ pub struct Studio {
     /// A drag with Smooth, Path Eraser or Join.
     pub(crate) gesture: crate::path_tools::Gesture,
     pub(crate) palettes: crate::palettes::Palettes,
+    /// File › Open Recent (see `recent.rs`).
+    pub(crate) recent: crate::recent::Recent,
     /// The machines to choose from, and the one new documents start with.
     pub(crate) machines: crate::machines::Machines,
     /// Settings kept for this computer, and the Settings window.
@@ -254,6 +256,9 @@ pub struct Studio {
     /// shape is what's selected.
     pub(crate) picker_for: Option<usize>,
     pub(crate) lettering: crate::lettering::LetteringState,
+    /// Fonts beyond the computer's: the catalogue, downloads, and the
+    /// lettering waiting on them.
+    pub(crate) font_store: crate::fonts::FontStore,
     pub(crate) view_tools: crate::view_tools::ViewTools,
     pub(crate) dock: crate::dock::DockState,
     /// The panel layout as last written to disk.
@@ -329,6 +334,8 @@ pub struct Studio {
     pub(crate) focus_again: bool,
     /// File › Share… (see `share.rs`).
     pub(crate) share: crate::share::ShareUi,
+    /// Help › Contact Support… (see `support.rs`).
+    pub(crate) support: crate::support::SupportUi,
     /// Settings › Account: signed in to zigzag.diy (see `account.rs`).
     pub(crate) account: crate::account::AccountUi,
     /// Settings that follow you between computers (see `sync.rs`).
@@ -368,6 +375,14 @@ impl Studio {
         let resume = s.restore_sent() && s.session.resume_skitch;
         s.dock = crate::dock::DockState::load();
         s.palettes = crate::palettes::Palettes::load();
+        // (Read after the session's tabs came back, which aren't newly
+        // opened; the files this launch asked for are.)
+        s.recent = crate::recent::Recent::load();
+        for p in &paths {
+            if s.tab_with_path(p).is_some() {
+                s.recent.note(p);
+            }
+        }
         s.agent = crate::agent::AgentState::load();
         s.dock_saved = s.dock.clone();
         s.egui_ctx = Some(cc.egui_ctx.clone());
@@ -704,6 +719,7 @@ impl Studio {
             flyouts: Default::default(),
             gesture: Default::default(),
             palettes: Default::default(),
+            recent: Default::default(),
             machines: Default::default(),
             prefs: Default::default(),
             settings_ui: Default::default(),
@@ -727,6 +743,7 @@ impl Studio {
             bounds_memo: Default::default(),
             satin_memo: Default::default(),
             lettering: Default::default(),
+            font_store: Default::default(),
             view_tools: Default::default(),
             dock: Default::default(),
             dock_saved: Default::default(),
@@ -766,6 +783,7 @@ impl Studio {
             inbox: None,
             focus_again: false,
             share: Default::default(),
+            support: Default::default(),
             account: Default::default(),
             sync: Default::default(),
         };
@@ -792,6 +810,7 @@ impl Studio {
             && i != self.active_tab()
         {
             self.switch_tab(i);
+            self.recent.note(path);
             self.status = format!("{} is open in this tab.", path.display());
             return;
         }
@@ -805,6 +824,7 @@ impl Studio {
                     );
                     return;
                 }
+                self.recent.note(path);
                 self.status = format!("Opened {} ({n} objects).", path.display());
                 // Artwork too big for the hoop is scaled down to fit (one
                 // undo step). Stitch files keep their size.
@@ -834,6 +854,7 @@ impl Studio {
         self.layout.multi.clear();
         // Which groups are open in Layers was the last document's.
         self.layout.expanded.clear();
+        self.layout.open_runs.clear();
         self.open_lone_groups();
         self.drag = None;
         self.backing = None;
@@ -853,6 +874,8 @@ impl Studio {
         if self.agent.log.is_empty() && !self.agent.running() {
             self.agent.forget_document();
         }
+        // Lettering in fonts that aren't here: downloaded, or said so.
+        self.check_document_fonts();
     }
 
     /// The plan shown is of the document as it is now.
@@ -900,7 +923,7 @@ impl Studio {
         // supersedes any still out.
         self.planner.took(self.plan_ms);
         self.planner.superseded();
-        self.names = svg::display_names(&self.doc.shapes);
+        self.names = self.doc.object_names();
         self.dirty = false;
     }
 
@@ -1221,6 +1244,7 @@ impl Studio {
         self.cancel_point_drag();
         match self.doc.save(path) {
             Ok(p) => {
+                self.recent.note(&p);
                 self.stable = self.doc.clone();
                 self.modified = false;
                 self.status = format!(
@@ -1275,6 +1299,35 @@ impl Studio {
         };
         std::fs::write(path, bytes)?;
         Ok(())
+    }
+
+    /// File › Print Worksheet: write the worksheet where temporary files go
+    /// and open it in the browser, whose Print button (or the browser's own
+    /// print) prints it or saves it as a PDF.
+    pub(crate) fn print_worksheet(&mut self) {
+        self.plan_now();
+        let name: String = match self.doc.name.as_str() {
+            "" => "design".into(),
+            n => n
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .collect(),
+        };
+        let path = std::env::temp_dir()
+            .join("zigzag-worksheets")
+            .join(format!("{name}.html"));
+        let written = self.worksheet_html().and_then(|html| {
+            std::fs::create_dir_all(path.parent().expect("a folder"))?;
+            std::fs::write(&path, html)?;
+            Ok(())
+        });
+        self.status = match written {
+            Ok(()) => {
+                crate::sew::open_url(&path.to_string_lossy());
+                "Opened the worksheet in your browser to print".into()
+            }
+            Err(e) => format!("Couldn't make the worksheet: {e}"),
+        };
     }
 
     pub(crate) fn export_dialog(&mut self, ext: &'static str) {
@@ -1384,6 +1437,120 @@ impl Studio {
             .collect()
     }
 
+    /// The objects with `uids` moved to just before the one with uid
+    /// `before` (none: to the end) in `d`'s sewing order, keeping their own
+    /// order among themselves.
+    pub(crate) fn reorder(d: &mut Document, uids: &[usize], before: Option<usize>) {
+        let (moving, stays): (Vec<_>, Vec<_>) = std::mem::take(&mut d.shapes)
+            .into_iter()
+            .partition(|s| uids.contains(&s.uid));
+        let at = before
+            .and_then(|u| stays.iter().position(|s| s.uid == u))
+            .unwrap_or(stays.len());
+        let mut stays = stays;
+        let rest = stays.split_off(at);
+        d.shapes = stays.into_iter().chain(moving).chain(rest).collect();
+    }
+
+    /// Layers dropped in the Layers list: the objects at `moving` put into
+    /// the group `group` (None: out of every group) and sewn just before
+    /// the one at `before` (past the last: at the end). One undo step.
+    /// False when nothing came of it.
+    pub(crate) fn drop_layers(
+        &mut self,
+        moving: &[usize],
+        before: usize,
+        group: Option<&str>,
+    ) -> bool {
+        let uids: Vec<usize> = moving
+            .iter()
+            .filter_map(|&i| self.doc.shapes.get(i))
+            .map(|s| s.uid)
+            .collect();
+        // (The first that isn't moving, from there on: where they go.)
+        let before = (before..self.doc.shapes.len())
+            .find(|i| !moving.contains(i))
+            .map(|i| self.doc.shapes[i].uid);
+        let label = match moving {
+            [i] => self.names.get(*i).cloned().unwrap_or_default(),
+            many => format!("{} layers", many.len()),
+        };
+        let moving = moving.to_vec();
+        let done = self.structural(|d| {
+            d.regroup(&moving, group)?;
+            Self::reorder(d, &uids, before);
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                self.status = match group {
+                    Some(g) => format!("Moved {label} into {}.", self.group_label(g)),
+                    None => format!("Moved {label} out of its group."),
+                };
+                true
+            }
+            Err(e) => {
+                self.status = format!("Couldn't move {label}: {e}");
+                false
+            }
+        }
+    }
+
+    /// Object › Group: the selected objects made one group, sewn together
+    /// where the last of them is.
+    pub fn group_selected(&mut self) {
+        let sel = self.sel_indices();
+        if self.subjects().len() < 2 {
+            self.status = "Select two or more layers to group.".into();
+            return;
+        }
+        let uids: Vec<usize> = sel.iter().map(|&i| self.doc.shapes[i].uid).collect();
+        let last = sel.iter().copied().max().unwrap_or(0);
+        let before = self.doc.shapes.get(last + 1).map(|s| s.uid);
+        let mut made = None;
+        let done = self.structural(|d| {
+            made = Some(d.group(&sel)?);
+            Self::reorder(d, &uids, before);
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                // (Shown shut, as one thing, and selected as that.)
+                let members = made.map(|g| self.group_members(&g)).unwrap_or_default();
+                self.set_selection(&members);
+                self.status = format!("Grouped {} layers.", members.len());
+            }
+            Err(e) => self.status = format!("Couldn't group: {e}"),
+        }
+    }
+
+    /// Object › Ungroup: the selected objects taken out of the group each
+    /// is in (a group left empty is gone).
+    pub fn ungroup_selected(&mut self) {
+        let sel = self.sel_indices();
+        let uids: Vec<usize> = sel.iter().map(|&i| self.doc.shapes[i].uid).collect();
+        let mut out = 0;
+        let done = self.structural(|d| {
+            out = d.ungroup(&sel)?;
+            if out == 0 {
+                anyhow::bail!("nothing selected is in a group");
+            }
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                let now = self.uid_indices(&uids);
+                self.set_selection(&now);
+                self.status = format!(
+                    "Took {out} {} out of {} group.",
+                    if out == 1 { "layer" } else { "layers" },
+                    if out == 1 { "its" } else { "their" }
+                );
+            }
+            Err(e) => self.status = format!("Couldn't ungroup: {e}"),
+        }
+    }
+
     /// Move the objects at `moving` to just before the one at `before`
     /// (as they're numbered now; past the last: to the end) in the sewing
     /// order, keeping their own order among themselves. One undo step;
@@ -1434,13 +1601,20 @@ impl Studio {
         }
     }
 
-    /// Add an SVG file's artwork to the document (Illustrator's Place).
+    /// Add a file's artwork to the document (Illustrator's Place): an SVG,
+    /// an image to trace, or a machine file, whose stitches come in as
+    /// manual-stitch objects at the size they were digitized.
     pub fn place_svg(&mut self, path: &Path) {
-        if path
+        let ext = path
             .extension()
-            .is_some_and(|e| zigzag::trace::is_image(&e.to_string_lossy()))
-        {
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if zigzag::trace::is_image(&ext) {
             self.open_image(path, crate::trace_ui::Target::Place);
+            return;
+        }
+        if zigzag::formats::READABLE_FORMATS.contains(&ext.as_str()) {
+            self.place_stitches(path, &ext);
             return;
         }
         let text = match std::fs::read_to_string(path) {
@@ -1467,6 +1641,38 @@ impl Studio {
                 }
             }
             Err(e) => self.status = format!("Couldn't place {}: {e:#}", path.display()),
+        }
+    }
+}
+
+impl Studio {
+    /// Place a machine file: its stitches come in as manual stitches at the
+    /// size they were digitized (scaled, they'd be longer or shorter than
+    /// they were made to be), in one group named after the file, selected.
+    fn place_stitches(&mut self, path: &Path, ext: &str) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Couldn't read {}: {e}", path.display());
+                return;
+            }
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut added = Vec::new();
+        match self.structural(|d| {
+            added =
+                d.place_stitch_file(&bytes, ext, &name, zigzag::document::Placement::default())?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                self.set_selection(&added);
+                self.status = format!("Placed {} ({} objects).", path.display(), added.len());
+            }
+            // (Not a file of the kind its name says, or one with no stitches.)
+            Err(e) => self.status = format!("Couldn't read {}: {e:#}", path.display()),
         }
     }
 }
@@ -1839,9 +2045,12 @@ impl Studio {
         if let Some(h) = self.pending_history.take() {
             self.apply_history(h);
         }
+        self.tick_fonts(&ctx);
         self.take_plan();
         crate::profile::mark("input");
-        if self.dirty {
+        // (A design just opened waits a moment for fonts it's downloading,
+        // rather than being planned in a stand-in first.)
+        if self.dirty && !self.fonts_hold_plan() {
             self.plan_changes(&ctx);
         }
         crate::profile::mark("plan");
@@ -1987,6 +2196,8 @@ impl Studio {
         self.update_window(&ctx);
         self.crash_window(&ctx);
         self.about_window(&ctx);
+        self.support_window(&ctx);
+        self.font_warning_window(&ctx);
 
         // (Not on every frame of dragging a panel or a divider: when it's let go.)
         if self.dock != self.dock_saved && !ctx.input(|i| i.pointer.any_down()) {
@@ -2630,7 +2841,7 @@ impl Studio {
                             ui.add_space(crate::theme::space::XS);
                             let n = self.layout.isolated.len();
                             let crumbs: Vec<String> = std::iter::once("Document".to_string())
-                                .chain(self.layout.isolated.iter().map(|g| Self::group_label(g)))
+                                .chain(self.layout.isolated.iter().map(|g| self.group_label(g)))
                                 .collect();
                             for (k, name) in crumbs.iter().enumerate() {
                                 if k > 0 {
@@ -3062,7 +3273,7 @@ impl Studio {
             crate::view_tools::draw_grid(&painter, rect, &self.view);
         }
         let opts = DrawOptions {
-            show_jumps: self.prefs.show_jumps,
+            show_jumps: self.prefs.show_jumps && self.drag.is_none() && !self.plan_cut,
             limit: self.player.unwrap_or(usize::MAX),
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,
@@ -3112,7 +3323,7 @@ impl Studio {
             self.paint_stitches(&painter, rect, &self.design, &opts, 0, self.replans)
         };
         crate::profile::mark("c:stitches");
-        if sewing.is_none() {
+        if sewing.is_none() && self.plan_is_current() && self.drag.is_none() {
             self.draw_bridges(&painter, rect);
             self.route_handles(ui, &painter, rect);
         }
@@ -3345,6 +3556,7 @@ pub(crate) fn give_settings(shape: &mut Shape, src: &Params) {
         start: own.start,
         end: own.end,
         trim: own.trim,
+        trim_before: own.trim_before,
         stop: own.stop,
         lock: own.lock,
         hide: own.hide,
@@ -3723,6 +3935,42 @@ mod tests {
         h.drop_at(away);
         h.run_steps(2);
         assert_eq!(h.state().route_active, None);
+        assert!(h.query_by_label("Thread route point 1").is_none());
+    }
+
+    #[test]
+    fn a_pending_plan_keeps_the_route_in_hand() {
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 900.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(None, None),
+            );
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="30mm" viewBox="0 0 80 30">
+            <rect id="left" x="0" y="0" width="10" height="10" fill="#aa0000"/>
+            <rect id="right_via=0:20" x="60" y="0" width="10" height="10" fill="#aa0000"/>
+        </svg>"##;
+        h.state_mut()
+            .set_document(zigzag::document::Document::from_svg(svg, "route", None).unwrap());
+        h.state_mut().set_tool(Tool::Select);
+        h.run_steps(4);
+        let uid = h.state().doc.shapes[1].uid;
+        assert_eq!(h.state().design.routes.len(), 1);
+        let drag = RouteDrag {
+            uid,
+            k: 0,
+            insert: false,
+            at: P::new(0.0, 200.0),
+        };
+        let s = h.state_mut();
+        s.route_active = Some(uid);
+        s.route_drag = Some(drag);
+        // Hold the pending flag for a frame, independent of worker timing.
+        s.planner.pending = true;
+        h.run_steps(1);
+        assert!(!h.state().plan_is_current());
+        assert_eq!(h.state().route_active, Some(uid));
+        assert_eq!(h.state().route_drag, Some(drag));
         assert!(h.query_by_label("Thread route point 1").is_none());
     }
 
@@ -4162,6 +4410,124 @@ mod tests {
             .state()
             .group_members(&h.state().doc.shapes[line].groups[0]);
         assert_eq!(sorted_sel(&h), lines);
+    }
+
+    /// Every machine format on the Export menu also opens, and places into
+    /// another design, with every stitch where the file has it.
+    #[test]
+    fn machine_files_open_and_place_stitch_for_stitch() {
+        use std::collections::HashSet;
+        use zigzag::formats::read::read_stitch_file;
+        use zigzag::geom::Bounds;
+        let dir = std::env::temp_dir().join(format!("tl-machine-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let badge = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg"));
+        let mut source = Studio::with_file(Some(badge.clone()), None);
+        let bounds = |pts: &[P]| {
+            let mut b = Bounds::empty();
+            pts.iter().for_each(|p| b.add(*p));
+            b
+        };
+        // Every stitch of the file is in the plan, the whole design moved
+        // by one shift (a file's origin isn't the hoop's center).
+        let same_stitches = |s: &mut Studio, file: &[P], what: &str| {
+            s.plan_now();
+            let plan: Vec<P> = s
+                .design
+                .blocks
+                .iter()
+                .flat_map(|b| b.runs.iter().flat_map(|r| r.pts.iter().copied()))
+                .collect();
+            let shift = bounds(&plan).min - bounds(file).min;
+            let have: HashSet<(i64, i64)> = plan
+                .iter()
+                .map(|q| {
+                    let q = *q - shift;
+                    assert!(
+                        (q.x - q.x.round()).abs() < 0.01 && (q.y - q.y.round()).abs() < 0.01,
+                        "{what}: {q:?} is off the file's 0.1 mm grid"
+                    );
+                    (q.x.round() as i64, q.y.round() as i64)
+                })
+                .collect();
+            for p in file {
+                assert!(
+                    have.contains(&(p.x.round() as i64, p.y.round() as i64)),
+                    "{what}: the stitch at {p:?} moved or went missing"
+                );
+            }
+        };
+        for ext in ["pes", "dst", "exp", "jef", "vp3"] {
+            let path = dir.join(format!("badge.{ext}"));
+            source.export_to(ext, &path).unwrap();
+            let file = read_stitch_file(&std::fs::read(&path).unwrap(), ext).unwrap();
+            let runs: usize = file.blocks.iter().map(|b| b.runs.len()).sum();
+            let pts: Vec<P> = file
+                .blocks
+                .iter()
+                .flat_map(|b| b.runs.iter().flatten().copied())
+                .collect();
+            assert!(pts.len() > 1000, "{ext}: {} stitches read", pts.len());
+            let size = bounds(&pts);
+            let manual = |s: &Studio, idx: &[usize]| {
+                idx.iter()
+                    .all(|&i| s.doc.shapes[i].params.kind == Some(Kind::Manual))
+            };
+
+            // Open.
+            let mut s = Studio::with_file(Some(path.clone()), None);
+            assert!(s.status.starts_with("Opened"), "{ext}: {}", s.status);
+            let all: Vec<usize> = (0..s.doc.shapes.len()).collect();
+            assert_eq!(all.len(), runs, "{ext}: an object for each run");
+            assert!(manual(&s, &all), "{ext}: opened as manual stitches");
+            assert!(s.doc.path.is_none(), "{ext}: never saved over as SVG");
+            same_stitches(&mut s, &pts, &format!("open {ext}"));
+
+            // Place, into an empty design.
+            let mut s = Studio::with_file(None, None);
+            s.place_svg(&path);
+            assert!(s.status.starts_with("Placed"), "{ext}: {}", s.status);
+            let added = s.sel_indices();
+            assert_eq!(added.len(), runs, "{ext}: every run placed and selected");
+            assert!(manual(&s, &added), "{ext}: placed as manual stitches");
+            same_stitches(&mut s, &pts, &format!("place {ext}"));
+
+            // Place, beside artwork that's already there: at the size it
+            // was digitized, the artwork untouched, one undo step.
+            let mut s = Studio::with_file(Some(badge.clone()), None);
+            let before = s.doc.shapes.len();
+            s.place_svg(&path);
+            assert!(s.status.starts_with("Placed"), "{ext}: {}", s.status);
+            let added = s.sel_indices();
+            assert_eq!(s.doc.shapes.len(), before + runs, "{ext}");
+            assert!(added.iter().all(|&i| i >= before), "{ext}: {added:?}");
+            assert!(manual(&s, &added), "{ext}");
+            assert!(
+                !manual(&s, &[0]),
+                "{ext}: the artwork keeps its stitch type"
+            );
+            let b = s.art_bounds(&added);
+            // (A manual run's 0.4 mm line: 0.2 mm past its points all round.)
+            assert!(
+                (b.width() - size.width() - 4.0).abs() < 0.5
+                    && (b.height() - size.height() - 4.0).abs() < 0.5,
+                "{ext}: placed {}x{}, the file is {}x{}",
+                b.width(),
+                b.height(),
+                size.width(),
+                size.height()
+            );
+            assert_eq!(s.undo.len(), 1, "{ext}");
+        }
+        // A file that isn't what its name says: an error, nothing added.
+        let bad = dir.join("bad.vp3");
+        std::fs::write(&bad, b"not a vp3").unwrap();
+        let mut s = Studio::with_file(None, None);
+        let before = s.doc.shapes.len();
+        s.place_svg(&bad);
+        assert!(s.status.starts_with("Couldn't read"), "{}", s.status);
+        assert_eq!(s.doc.shapes.len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,168 @@
+{
+  "fonts": [
+    {
+      "family": "Bebas Neue",
+      "file": "bebas-neue.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/bebas-neue.txt",
+      "copyright": "Copyright © 2010 by Dharma Type.",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73",
+      "embroidery": false
+    },
+    {
+      "family": "Cookie",
+      "file": "cookie.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/cookie.txt",
+      "copyright": "Copyright (c) 2011 by Ania Kruk (hello@aniakruk.com), with Reserved Font Name \"Cookie\".",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "9daf3cc9e5efe1b65094cdf1f14729ef6f07a70c27ee0679bf7f544a828b080e",
+      "embroidery": false
+    },
+    {
+      "family": "Dancing Script",
+      "file": "dancing-script.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/dancing-script.txt",
+      "copyright": "Copyright 2016 The Dancing Script Project Authors (https://github.com/googlefonts/DancingScript), with Reserved Font Name 'Dancing Script'.",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "21808625578fe8d8cd10cb684be546dca077b27cd03a53a2f1ec11dc743c924c",
+      "embroidery": false
+    },
+    {
+      "family": "Fredoka",
+      "file": "fredoka.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/fredoka.txt",
+      "copyright": "Copyright 2016 The Fredoka Project Authors (https://github.com/hafontia/Fredoka-One)",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "2ba02e68b152868aef9ba28e24b3648c7d457fe6f25c761f2c2c53fb61a73fc8",
+      "embroidery": false
+    },
+    {
+      "family": "Graduate",
+      "file": "graduate.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/graduate.txt",
+      "copyright": "Copyright 2012 The Graduate Project Authors (https://github.com/etunni/graduate) with Reserved Font Name \"Graduate\"",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "971222b309851d86f2513f89b510dc52d52ef7798b5f43af2c6f58d43df568e5",
+      "embroidery": false
+    },
+    {
+      "family": "Oswald",
+      "file": "oswald.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/oswald.txt",
+      "copyright": "Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont)",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "5b38c246e255a12f5712d640d56bcced0472466fc68983d2d0410ec0457c2817",
+      "embroidery": false
+    },
+    {
+      "family": "Righteous",
+      "file": "righteous.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/righteous.txt",
+      "copyright": "Copyright (c) 2011 by Brian J. Bonislawsky DBA Astigmatic (AOETI) (astigma@astigmatic.com), with Reserved Font Names \"Righteous\"",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "2ffb3fe5c27d7e6571210b800448c4e234e651b46c6b4426c1bb567e5341348a",
+      "embroidery": false
+    },
+    {
+      "family": "Sacramento",
+      "file": "sacramento.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/sacramento.txt",
+      "copyright": "Copyright (c) 2012, Brian J. Bonislawsky DBA Astigmatic (AOETI) (astigma@astigmatic.com), with Reserved Font Names 'Sacramento'",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "9341fda10adbfeb7efc94302b34507a3e227d7e7f5c432df3f5ac8753ff73d24",
+      "embroidery": false
+    },
+    {
+      "family": "Satisfy",
+      "file": "satisfy.ttf",
+      "license": "Apache-2.0",
+      "licenseFile": "licenses/satisfy.txt",
+      "copyright": "Copyright (c) 2011 by Font Diner, Inc. All rights reserved.",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "55bb141a0a23a32278d5fa7fd2e853824faa173b94774660ebeddb106be07c80",
+      "embroidery": false
+    },
+    {
+      "family": "Staatliches",
+      "file": "staatliches.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/staatliches.txt",
+      "copyright": "Copyright 2018 The Staatliches Authors (https://github.com/googlefonts/staatliches)",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "8395212aa4c6c3534bd39a745d956305ff080c3f3ed73ba61e4fbaae951e55cc",
+      "embroidery": false
+    },
+    {
+      "family": "Yellowtail",
+      "file": "yellowtail.ttf",
+      "license": "Apache-2.0",
+      "licenseFile": "licenses/yellowtail.txt",
+      "copyright": "Copyright (c) 2011 by Brian J. Bonislawsky DBA Astigmatic (AOETI). All rights reserved. Available under the Apache 2.0 licence. http://www.apache.org/licenses/LICENSE-2.0.html",
+      "source": "Google Fonts (github.com/google/fonts), via zigzag.diy's catalogue",
+      "sha256": "3e06841b13000975f3cc38aa84e326e601a4378a4c52d50b5e9fee3598c5d236",
+      "embroidery": false
+    },
+    {
+      "family": "Hershey Sans",
+      "file": "hershey-sans.ttf",
+      "license": "Hershey",
+      "licenseFile": "licenses/hershey.txt",
+      "copyright": "Dr. A. V. Hershey, U.S. National Bureau of Standards; format by James Hurt, Cognition, Inc.",
+      "source": "Inkscape svg_fonts/HersheySans1.svg, converted by tools/fonts/single_line.py",
+      "embroidery": true
+    },
+    {
+      "family": "Hershey Script",
+      "file": "hershey-script.ttf",
+      "license": "Hershey",
+      "licenseFile": "licenses/hershey.txt",
+      "copyright": "Dr. A. V. Hershey, U.S. National Bureau of Standards; format by James Hurt, Cognition, Inc.",
+      "source": "Inkscape svg_fonts/HersheyScript1.svg, converted by tools/fonts/single_line.py",
+      "embroidery": true
+    },
+    {
+      "family": "EMS Allure",
+      "file": "ems-allure.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/ems.txt",
+      "copyright": "Sheldon B. Michaels; SVG font by Windell H. Oskay",
+      "source": "Inkscape svg_fonts/EMSAllure.svg, converted by tools/fonts/single_line.py",
+      "embroidery": true
+    },
+    {
+      "family": "EMS Readability",
+      "file": "ems-readability.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/ems.txt",
+      "copyright": "Sheldon B. Michaels; SVG font by Windell H. Oskay",
+      "source": "Inkscape svg_fonts/EMSReadability.svg, converted by tools/fonts/single_line.py",
+      "embroidery": true
+    },
+    {
+      "family": "EMS Tech",
+      "file": "ems-tech.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/ems.txt",
+      "copyright": "Sheldon B. Michaels; SVG font by Windell H. Oskay",
+      "source": "Inkscape svg_fonts/EMSTech.svg, converted by tools/fonts/single_line.py",
+      "embroidery": true
+    },
+    {
+      "family": "Relief SingleLine",
+      "file": "relief-singleline.ttf",
+      "license": "OFL-1.1",
+      "licenseFile": "licenses/relief-singleline.txt",
+      "copyright": "Copyright 2022 The Relief SingleLine Project Authors (https://github.com/isdat-type/Relief-SingleLine)",
+      "source": "github.com/isdat-type/Relief-SingleLine fonts/open_svg/ReliefSingleLineSVG-Regular.svg, converted by tools/fonts/single_line.py",
+      "embroidery": true
+    }
+  ]
+}

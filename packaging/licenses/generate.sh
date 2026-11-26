@@ -8,6 +8,8 @@ cd "$(dirname "$0")/../.."
 cargo about generate --features gui,ble --offline --fail --format json \
     --config packaging/licenses/about.toml \
     | python3 packaging/licenses/render.py > THIRD-PARTY-NOTICES.md
+# The fonts that come with the app (fonts/fonts.json and their licenses).
+python3 packaging/licenses/fonts.py >> THIRD-PARTY-NOTICES.md
 # Which dependencies these notices are for (make-app.sh checks it).
 printf '\n<!-- Cargo.lock: %s -->\n' "$(bash packaging/licenses/lock-hash.sh)" >> THIRD-PARTY-NOTICES.md
 echo "Wrote THIRD-PARTY-NOTICES.md"

@@ -29,7 +29,7 @@ pub const MACHINE_FORMATS: [(&str, &str); 7] = [
 ];
 
 /// Machine files ZigZag can open.
-pub const READABLE_FORMATS: [&str; 5] = ["pes", "pec", "dst", "exp", "jef"];
+pub const READABLE_FORMATS: [&str; 6] = ["pes", "pec", "dst", "exp", "jef", "vp3"];
 
 /// The furthest a stitch coordinate may be from the origin, in units
 /// (0.1 mm: ±1 m — far past any hoop). Clamped here so the widest a

@@ -623,6 +623,10 @@ impl Studio {
             background: self.doc.settings.cloth,
             names: self.names.clone(),
             spm: SPM,
+            chart: match self.view_tools.brand {
+                crate::threads::Brand::Brother => zigzag::formats::worksheet::Chart::Brother,
+                crate::threads::Brand::Janome => zigzag::formats::worksheet::Chart::Janome,
+            },
         };
         zigzag::formats::worksheet::html(&self.design, &info)
     }
@@ -917,10 +921,20 @@ mod tests {
         let sun = h.state().names.iter().position(|n| n == "sun").unwrap();
         h.state_mut().set_selection(&[sun]);
         h.run_steps(2);
-        h.get_by_label("Trim").click();
+        let undos = h.state().undo.len();
+        h.get_by_label("Trim Before").click();
+        h.run_steps(2);
+        assert_eq!(h.state().doc.shapes[sun].params.trim_before, Some(true));
+        assert!(h.state().undo.len() > undos);
+        h.get_by_label("Trim Before").click();
+        h.run_steps(2);
+        assert_eq!(h.state().doc.shapes[sun].params.trim_before, None);
+        h.get_by_label("Trim Before").click();
+        h.get_by_label("Trim After").click();
         h.get_by_label("Stop").click();
         h.run_steps(2);
         let p = &h.state().doc.shapes[sun].params;
+        assert_eq!(p.trim_before, Some(true));
         assert_eq!((p.trim, p.stop), (Some(true), Some(true)));
         let blocks = h.state().design.blocks.len();
         h.get_by_label("Stop").click();

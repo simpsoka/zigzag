@@ -957,6 +957,11 @@ fn clipped(ui: &mut egui::Ui, text: &str, size: f32, color: Color32, rows: usize
 /// A choice's number badge, points square.
 const BADGE: f32 = 22.0;
 
+/// Height (points) the empty chat needs for its sparkle and line saying
+/// what the agent does, and for those and the ideas to start from.
+const INTRO_ROOM: f32 = 110.0;
+const IDEAS_ROOM: f32 = 300.0;
+
 /// The turns a chat shows; earlier ones fold into a line.
 const SHOWN_TURNS: usize = 3;
 
@@ -1255,6 +1260,7 @@ impl AgentState {
         std::thread::spawn(move || {
             let run = |args: &[&str]| {
                 let mut cmd = Command::new(&program);
+                crate::no_console(&mut cmd);
                 cmd.args(args).stdin(Stdio::null()).stderr(Stdio::null());
                 if let Some(p) = &path {
                     cmd.env("PATH", p);
@@ -1621,6 +1627,7 @@ impl AgentState {
         port: u16,
     ) -> Command {
         let mut cmd = Command::new(program);
+        crate::no_console(&mut cmd);
         match self.kind {
             AgentKind::Claude => {
                 let config = serde_json::json!({
@@ -2739,6 +2746,7 @@ pub fn activity(tool: &str) -> &'static str {
         "transform_objects" | "move_object" | "align_objects" => "Placing",
         "combine_shapes" => "Combining shapes",
         "rename_object" => "Naming",
+        "group_objects" | "ungroup_objects" => "Grouping",
         "simplify" | "clean_up" => "Tidying",
         "open_file" | "new_document" | "switch_document" | "list_documents" => "Opening",
         "list_machines" | "machine_status" => "Checking the machine",
@@ -2753,6 +2761,7 @@ pub fn activity(tool: &str) -> &'static str {
         "add_outline" => "Outlining",
         "simplify_design" => "Simplifying",
         "trace_image" => "Tracing",
+        "place_file" => "Placing",
         "render_preview" => "Looking",
         "check_design" | "measure_stitching" | "get_cuts" => "Checking",
         "offer_choices" => "Offering choices",
@@ -3349,7 +3358,18 @@ impl Studio {
                             .max_rect(r)
                             .layout(egui::Layout::top_down(egui::Align::Center)),
                     );
-                    child.add_space((inner_h * 0.5 - 100.0).max(8.0));
+                    // (Within the room above the prompt, however tall a
+                    // prompt being written has made it: never over it.)
+                    child.set_clip_rect(r.intersect(child.clip_rect()));
+                    // Ideas to start from, while there's room for them and
+                    // nothing's being written yet: once there is, they'd
+                    // only be in the way.
+                    let show_ideas = inner_h >= IDEAS_ROOM && a.prompt.trim().is_empty();
+                    if inner_h < INTRO_ROOM {
+                        return;
+                    }
+                    let lead = if show_ideas { 100.0 } else { 40.0 };
+                    child.add_space((inner_h * 0.5 - lead).max(8.0));
                     let top = child.cursor().top();
                     icons::paint(
                         child.painter(),
@@ -3375,7 +3395,7 @@ impl Studio {
                     child.spacing_mut().item_spacing.y = space::S;
                     child.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
                     let seed = *a.ideas_seed.get_or_insert_with(fresh_seed);
-                    for idea in ideas(seed, has_design) {
+                    for idea in ideas(seed, has_design).into_iter().filter(|_| show_ideas) {
                         if child
                             .add(egui::Button::new(egui::RichText::new(idea).size(PANEL_PT)).corner_radius(10))
                             .clicked()
@@ -6168,6 +6188,20 @@ mod tests {
         assert!(
             an_idea_shows(&h)
         );
+        // A long prompt being written: the ideas make way, and nothing of
+        // the empty chat is drawn over the prompt box.
+        let prompt_text = "Let's try pattern fills. In a new document:\n\n1. Draw a 60 × 40 mm rectangle and set it to Fill with a motif of small diagonal chevrons.\n2. Beside it, a 40 mm circle sewn as a Motif fill: a little four-petal flower on a hex layout.\n3. Below them, a 60 × 15 mm band with a simple wave line on a grid layout.\n\nCheck motif_problems for each and fix anything it reports, then render a preview.";
+        h.state_mut().agent.prompt = prompt_text.into();
+        h.run_steps(6);
+        assert!(!an_idea_shows(&h), "no ideas while writing");
+        let prompt = h.get_by_label("Prompt").rect();
+        let intro = h.query_by_label_contains("for a design, or a change to this one");
+        if let Some(intro) = intro {
+            assert!(intro.rect().bottom() <= prompt.top(), "{:?} over {prompt:?}", intro.rect());
+        }
+        h.state_mut().agent.prompt.clear();
+        h.run_steps(6);
+        assert!(an_idea_shows(&h), "back once the prompt's empty");
         // Sharing the dock, it sits at the bottom, under the other panel.
         h.state_mut()
             .dock

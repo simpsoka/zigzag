@@ -146,8 +146,11 @@ impl Document {
                 None => out.push((s.color, w)),
             }
         }
-        // (Stable, so threads that sew the same amount keep sewing order.)
-        out.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // (Stable, so threads that sew the same amount keep sewing order:
+        // the same to a thousandth of a mm², or rounding where the shapes
+        // sit on the canvas would decide.)
+        let same = |w: f64| (w * 1000.0).round();
+        out.sort_by(|a, b| same(b.1).total_cmp(&same(a.1)));
         out
     }
 

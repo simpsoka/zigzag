@@ -2,7 +2,7 @@
 //! reported per object so the editor (and agents) can point at the problem.
 
 use crate::design::{Design, PlanOptions, satin_rails};
-use crate::geom::{Bounds, P, Polyline};
+use crate::geom::{Bounds, P, Polyline, polyline_length};
 use crate::params::Kind;
 use crate::stitch::satin;
 use crate::svg::{Geometry, Shape};
@@ -552,8 +552,10 @@ enum Facts {
         /// A hole under 1 mm across.
         narrow_gap: bool,
     },
-    /// Widest and mean width, mm.
-    Satin(Option<(f64, f64)>),
+    /// Widest and mean width, mm (the mean by length: a stem counts for
+    /// more than a serif's tip), and the share of its length narrower
+    /// than the document's narrow width.
+    Satin(Option<(f64, f64, f64)>),
 }
 
 /// `measure`'s result for a shape's geometry (and `settings`, when they
@@ -754,21 +756,38 @@ pub fn check(
                 }
             }
             (_, Kind::Satin) => {
-                let Facts::Satin(Some((max, mean))) =
-                    facts(&s.geometry, Some(&format!("{:?}", s.params)), || {
-                        let widths: Vec<f64> = satin_rails(s)
+                let Facts::Satin(Some((max, mean, share))) = facts(
+                    &s.geometry,
+                    Some(&format!("{:?} {}", s.params, opt.narrow_satin)),
+                    || {
+                        // Each width across a column with the length of
+                        // column it stands for (mm, mm): a long stem
+                        // counts for more than a serif's short tip.
+                        let widths: Vec<(f64, f64)> = satin_rails(s)
                             .iter()
                             .filter_map(|r| r.as_ref().ok())
-                            .flat_map(|r| satin::pairs(r, 10.0).into_iter().map(|(a, b)| a.dist(b)))
+                            .flat_map(|r| {
+                                let pairs = satin::pairs(r, 10.0);
+                                let len = (polyline_length(&r.a) + polyline_length(&r.b)) / 20.0;
+                                let each = len / pairs.len().max(1) as f64;
+                                pairs.into_iter().map(move |(a, b)| (a.dist(b) / 10.0, each))
+                            })
                             .collect();
-                        Facts::Satin((!widths.is_empty()).then(|| {
+                        let total: f64 = widths.iter().map(|w| w.1).sum();
+                        Facts::Satin((!widths.is_empty() && total > 0.0).then(|| {
+                            let narrow: f64 = widths
+                                .iter()
+                                .filter(|w| w.0 < opt.narrow_satin)
+                                .map(|w| w.1)
+                                .sum();
                             (
-                                widths.iter().copied().fold(0.0, f64::max) / 10.0,
-                                widths.iter().sum::<f64>() / widths.len() as f64 / 10.0,
+                                widths.iter().map(|w| w.0).fold(0.0, f64::max),
+                                widths.iter().map(|w| w.0 * w.1).sum::<f64>() / total,
+                                narrow / total,
                             )
                         }))
-                    })
-                else {
+                    },
+                ) else {
                     continue;
                 };
                 match s.params.satin_split() {
@@ -788,12 +807,29 @@ pub fn check(
                     ),
                     _ => {}
                 }
-                if mean < opt.narrow_satin {
+                if share >= NARROW_ALL {
                     add(
                         Some(i),
                         Level::Warning,
                         format!(
                             "Satin only {mean:.1} mm wide on average: too narrow to look smooth. Use Run."
+                        ),
+                    );
+                } else if share >= NARROW_PART {
+                    // Wide enough in places, the thick strokes say: Run
+                    // would lose them. What's thin is the drawing's.
+                    let what = if crate::document::has_type_tokens(&s.id) {
+                        "Make the letters taller, or pick a font with heavier strokes."
+                    } else {
+                        "Make it larger, or sew its thin parts as Run objects of their own."
+                    };
+                    add(
+                        Some(i),
+                        Level::Warning,
+                        format!(
+                            "{:.0}% of this satin is under {:.1} mm wide (thin strokes and points): it sews thin and ragged there. {what}",
+                            share * 100.0,
+                            opt.narrow_satin
                         ),
                     );
                 }
@@ -805,6 +841,12 @@ pub fn check(
     out.sort_by_key(|i| std::cmp::Reverse(i.level));
     out
 }
+
+/// Satin under the narrow width for this share of its length (or more):
+/// it's a line, and Run sews it better.
+const NARROW_ALL: f64 = 0.8;
+/// For this share: wide in places, too thin to look right in others.
+const NARROW_PART: f64 = 0.25;
 
 #[cfg(test)]
 mod tests {
@@ -879,6 +921,34 @@ mod tests {
             i.iter().any(|x| x.message.contains("small lettering")),
             "{i:?}"
         );
+    }
+
+    #[test]
+    fn a_satin_thin_only_in_places_isnt_told_to_be_a_run() {
+        // A two-rail satin widening from 0.4 to 2.4 mm: under 1 mm for its
+        // first 30%, as a serif face's hairlines are beside its stems.
+        let mut wedge = shape(
+            Geometry::Stroke {
+                lines: vec![
+                    (vec![P::new(0.0, 0.0), P::new(300.0, 0.0)], false),
+                    (vec![P::new(0.0, 4.0), P::new(300.0, 24.0)], false),
+                ],
+                width: 0.0,
+            },
+            Kind::Satin,
+        );
+        wedge.part = Part::Stroke;
+        let opt = PlanOptions::default();
+        let d = plan("t", std::slice::from_ref(&wedge), &opt);
+        let issues = check(std::slice::from_ref(&wedge), &d, &opt, None);
+        let narrow: Vec<&str> = issues
+            .iter()
+            .map(|x| x.message.as_str())
+            .filter(|m| m.contains("mm wide") && !m.contains("up to"))
+            .collect();
+        assert_eq!(narrow.len(), 1, "{narrow:?}");
+        assert!(!narrow[0].contains("Use Run"), "{}", narrow[0]);
+        assert!(narrow[0].contains("% of this satin is under 1.0 mm"), "{}", narrow[0]);
     }
 
     #[test]
@@ -1248,3 +1318,6 @@ mod tests {
         );
     }
 }
+
+
+

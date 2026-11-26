@@ -25,6 +25,9 @@ for binary in zigzag-studio zigzag zigzag-mcp; do
 done
 cp "$source_dir/LICENSE" "$source_dir/NOTICE" "$source_dir/THIRD-PARTY-NOTICES.md" "$work/$name/"
 cp "$packaging_dir/README.txt" "$work/$name/README.txt"
+# The lettering fonts that come with ZigZag, beside the programs.
+mkdir "$work/$name/fonts"
+cp "$source_dir/fonts/fonts.json" "$source_dir"/fonts/*.ttf "$work/$name/fonts/"
 tar -C "$work" -czf "$dist/$name.tar.gz" "$name"
 (
     cd "$dist"

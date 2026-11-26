@@ -29,6 +29,9 @@ mod imp {
         by_id: HashMap<MenuId, Action>,
         rx: mpsc::Receiver<MenuId>,
         state: HashMap<Action, (bool, Option<bool>)>,
+        /// File › Open Recent, and the files it lists now.
+        recent: Option<Submenu>,
+        recent_shown: Vec<std::path::PathBuf>,
     }
 
     fn code(k: Key) -> Option<Code> {
@@ -62,8 +65,15 @@ mod imp {
             Key::Equals => Code::Equal,
             Key::Minus => Code::Minus,
             Key::Num0 => Code::Digit0,
+            Key::Num1 => Code::Digit1,
             Key::Num2 => Code::Digit2,
             Key::Num3 => Code::Digit3,
+            Key::Num4 => Code::Digit4,
+            Key::Num5 => Code::Digit5,
+            Key::Num6 => Code::Digit6,
+            Key::Num7 => Code::Digit7,
+            Key::Num8 => Code::Digit8,
+            Key::Num9 => Code::Digit9,
             Key::OpenBracket => Code::BracketLeft,
             Key::CloseBracket => Code::BracketRight,
             Key::Quote => Code::Quote,
@@ -97,6 +107,12 @@ mod imp {
                         self.fill(&s, v, studio)?;
                         sub.append(&s)?;
                     }
+                    Entry::Recent => {
+                        let s = Submenu::new(crate::commands::RECENT_TITLE, true);
+                        sub.append(&s)?;
+                        self.recent = Some(s);
+                        self.fill_recent(studio);
+                    }
                     Entry::Item(a, label, sc) => {
                         let enabled = studio.action_enabled(*a);
                         let checked = studio.action_checked(*a);
@@ -122,6 +138,32 @@ mod imp {
             Ok(())
         }
 
+        /// Open Recent's items, made again from the list as it is now.
+        fn fill_recent(&mut self, studio: &Studio) {
+            let Some(sub) = &self.recent else { return };
+            while sub.remove_at(0).is_some() {}
+            let files = studio.recent.files();
+            for (i, label) in studio.recent.labels().into_iter().enumerate() {
+                let a = Action::OpenRecent(i);
+                self.by_id.insert(id(a), a);
+                // (An & in a file's name is the name's, not a mnemonic.)
+                let label = label.replace('&', "&&");
+                let _ = sub.append(&MenuItem::with_id(id(a), label, true, None));
+            }
+            if !files.is_empty() {
+                let _ = sub.append(&PredefinedMenuItem::separator());
+            }
+            let a = Action::ClearRecent;
+            self.by_id.insert(id(a), a);
+            let _ = sub.append(&MenuItem::with_id(
+                id(a),
+                crate::commands::CLEAR_RECENT,
+                !files.is_empty(),
+                None,
+            ));
+            self.recent_shown = files.to_vec();
+        }
+
         pub fn new(ctx: egui::Context, studio: &Studio) -> muda::Result<NativeMenu> {
             let (tx, rx) = mpsc::channel();
             let tx = Mutex::new(tx);
@@ -137,6 +179,8 @@ mod imp {
                 by_id: HashMap::new(),
                 rx,
                 state: HashMap::new(),
+                recent: None,
+                recent_shown: Vec::new(),
             };
             let app = Submenu::new("ZigZag", true);
             // About ZigZag: ZigZag's own window (the system's About panel
@@ -196,6 +240,9 @@ mod imp {
 
         /// Keep enabled / checked states current (only touching what changed).
         pub fn sync(&mut self, studio: &Studio, typing: bool) {
+            if self.recent_shown != studio.recent.files() {
+                self.fill_recent(studio);
+            }
             for (a, h) in &self.items {
                 let edit = matches!(
                     a,
@@ -229,6 +276,20 @@ mod imp {
                 .try_iter()
                 .filter_map(|id| self.by_id.get(&id).copied())
                 .collect()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// With the native menu, a ⌘ shortcut is the menu's to take: one
+        /// whose key it can't name would do nothing at all.
+        #[test]
+        fn every_command_shortcut_has_a_key_the_menu_knows() {
+            for (a, label, sc) in crate::commands::all_actions() {
+                if let Some(sc) = sc.filter(|s| s.cmd) {
+                    assert!(super::accel(Some(sc)).is_some(), "{label} ({a:?}): {:?}", sc.key);
+                }
+            }
         }
     }
 }

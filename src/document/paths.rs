@@ -681,6 +681,18 @@ impl Document {
         behind: Option<usize>,
         name: &str,
     ) -> Result<String> {
+        self.insert_shape_painted(path, behind, name, "fill=\"#000\" fill-rule=\"evenodd\"")
+    }
+
+    /// [`Document::insert_shape`] with `paint` (the element's paint
+    /// attributes) in place of a fill.
+    pub(super) fn insert_shape_painted(
+        &mut self,
+        path: &BezPath,
+        behind: Option<usize>,
+        name: &str,
+        paint: &str,
+    ) -> Result<String> {
         let m = self.mm_to_user()?;
         let d = bezier::to_svg_d(&bezier::transform(path, [0.1, 0.0, 0.0, 0.1, 0.0, 0.0]));
         let used: std::collections::HashSet<String> = {
@@ -697,7 +709,7 @@ impl Document {
         }
         self.next_group += 1;
         let el = format!(
-            "<g id=\"tl-drawing-{}\" transform=\"{}\"><path id=\"{}\" d=\"{d}\" fill=\"#000\" fill-rule=\"evenodd\"/></g>\n",
+            "<g id=\"tl-drawing-{}\" transform=\"{}\"><path id=\"{}\" d=\"{d}\" {paint}/></g>\n",
             self.next_group,
             super::edit::fmt_matrix(m),
             xml_escape(&id)
@@ -767,53 +779,6 @@ impl Document {
             p.width = None;
         }
         p
-    }
-
-    /// Illustrator's Pathfinder: combine objects (in sewing order, back to
-    /// front) into one filled shape that replaces them. Returns its index.
-    pub fn pathfinder(&mut self, indices: &[usize], op: PathOp) -> Result<usize> {
-        let uids: Vec<usize> = indices
-            .iter()
-            .filter_map(|&i| self.shapes.get(i))
-            .map(|s| s.uid)
-            .collect();
-        if uids.len() < 2 {
-            bail!("select two or more overlapping objects");
-        }
-        let indices = self.outlines_first(indices)?;
-        let uids: Vec<usize> = indices
-            .iter()
-            .filter_map(|&i| self.shapes.get(i))
-            .map(|s| s.uid)
-            .collect();
-        self.sync()?;
-        let idx = self.uid_indices(&uids);
-        let parts: Vec<(Vec<Polyline>, FillRule)> = idx.iter().map(|&i| self.area(i)).collect();
-        let rings = boolean::pathfinder(&parts, op);
-        let path = bezier::from_rings(&rings, RESULT_TOL);
-        if path.is_empty() {
-            bail!(match op {
-                PathOp::Intersect => "the objects don't all overlap",
-                _ => "nothing would be left",
-            });
-        }
-        let back = idx[0];
-        let look = if op == PathOp::MinusFront {
-            back
-        } else {
-            *idx.last().unwrap()
-        };
-        let (color, params, name) = (
-            self.shapes[look].color,
-            self.fill_params(look),
-            self.name_of(look),
-        );
-        let id = self.insert_shape(&path, Some(back), &name)?;
-        // (With their outlines: those were the old shapes' edges, not the
-        // new one's.)
-        let gone = self.with_outlines(&idx);
-        self.delete_many(&gone)?;
-        self.finish_new(&id, color, params)
     }
 
     /// Illustrator's Offset Path: a new filled shape `d` units outside each

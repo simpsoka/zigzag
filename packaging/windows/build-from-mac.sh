@@ -90,6 +90,9 @@ cp "$bin/zigzag-studio.exe" "$stage/ZigZag.exe"
 cp "$bin/zigzag.exe" "$stage/zigzag-cli.exe"
 cp "$bin/zigzag-mcp.exe" "$stage/"
 cp packaging/windows/README.txt "$stage/"
+# The lettering fonts that come with ZigZag, beside the programs.
+mkdir -p "$stage/fonts"
+cp fonts/fonts.json fonts/*.ttf "$stage/fonts/"
 echo "Built $stage"
 
 if [[ -n "$dest" ]]; then

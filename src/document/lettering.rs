@@ -255,9 +255,12 @@ fn font_attrs(spec: &TextSpec) -> String {
 
 /// Cap height ÷ font size for this font (measured from an "H").
 fn cap_ratio(spec: &TextSpec) -> f64 {
-    type Ratios = HashMap<(String, bool, bool), f64>;
+    type Ratios = HashMap<(String, bool, bool, usize), f64>;
     static CACHE: std::sync::Mutex<Option<Ratios>> = std::sync::Mutex::new(None);
-    let key = (spec.font.clone(), spec.bold, spec.italic);
+    // (With the number of faces there are: a font that wasn't there when
+    // it was asked for was measured in a stand-in, and is measured again
+    // once it's added.)
+    let key = (spec.font.clone(), spec.bold, spec.italic, svg::font_faces());
     if let Some(v) = CACHE
         .lock()
         .unwrap()
@@ -970,7 +973,8 @@ impl Document {
         };
         let s = &self.shapes[index];
         let Geometry::Fill { rings, .. } = &s.geometry else {
-            bail!("the lettering has no outlines");
+            // (A single-line font's letters are lines, with no outline.)
+            bail!("the lettering has no outlines: its font draws letters as single lines");
         };
         // The glyph outlines as drawn (curves come flattened finely; a
         // refit would round the sharp corners of letters like A and V).

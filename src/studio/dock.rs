@@ -36,10 +36,20 @@ enum ObjRow {
         id: String,
         depth: usize,
         members: Vec<usize>,
+        /// The ones listed under this row. All of them, unless other
+        /// objects come between the group's in the order listed: then the
+        /// group has a row for each run of its own, and this is that run.
+        part: Vec<usize>,
+        /// Its layers are listed under it.
+        open: bool,
+        /// The group it's in (none: it's at the top).
+        within: Option<String>,
     },
     Item {
         i: usize,
         depth: usize,
+        /// The group it's in (none: it's at the top).
+        within: Option<String>,
     },
 }
 
@@ -217,6 +227,29 @@ pub struct DockUi {
     offered: [bool; 2],
     /// Where the panel being drawn lives.
     pub(crate) current: Option<Place>,
+    /// The height set for the docked panel being drawn, when it's the
+    /// Layers list (which takes it as its list's height; other panels
+    /// scroll in theirs, by `body_max`).
+    pub(crate) set_h: Option<f32>,
+    /// The docked panel being drawn is held at its height (`body_max`)
+    /// whatever is in it: the Stitch panel.
+    body_fixed: bool,
+    /// How tall the docked Stitch panel's body is with all of a fill's
+    /// settings in it, as last laid out (none yet: `STITCH_H`).
+    stitch_fill_h: Option<f32>,
+    /// What the Layers panel's body has besides its list (its buttons, its
+    /// padding), as last drawn.
+    layers_overhead: f32,
+    /// How tall all the Layers list's rows are together.
+    layers_rows_h: f32,
+    /// How tall each panel's body would be with nothing holding it in
+    /// (by lead), as last drawn: the most its edge is dragged to.
+    natural: [f32; N],
+    /// A panel's bottom edge being dragged: whose, and its body's height
+    /// when the drag began.
+    height_drag: Option<(PanelId, f32)>,
+    /// The Layers rows' pictures of their objects.
+    pub(crate) thumbs: crate::thumbs::Thumbs,
     /// Height of each dock column (for sizing the Layers list).
     pub(crate) column_h: [f32; 2],
     /// The panel being drawn sits in a rounded window (floating, flyout).
@@ -237,7 +270,7 @@ pub struct DockUi {
     collapse_btn: Option<Place>,
     /// Layers being dragged to another place in the sewing order: the
     /// objects (by uid), and what the copy at the pointer says.
-    pub(crate) layer_drag: Option<(Vec<usize>, String)>,
+    pub(crate) layer_drag: Option<(Vec<usize>, String, Option<String>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -334,6 +367,10 @@ pub struct DockState {
     pub agent_share: f32,
     /// The floating Agent panel's height (its top edge drags it taller).
     pub agent_float_h: f32,
+    /// How tall each docked panel's body is (by its group's lead), once
+    /// its bottom edge has been dragged; `None`: as tall as what's in it
+    /// (a double click on the edge puts that back).
+    pub heights: [Option<f32>; N],
     /// The unit lengths are shown in (View › Units).
     pub units: crate::units::Unit,
     /// Where the layout is remembered between launches (`None`: not saved).
@@ -353,6 +390,15 @@ fn default_place(p: PanelId) -> Place {
 
 /// A floating Agent panel's height at first, and the least it's dragged to.
 pub const AGENT_FLOAT_H: f32 = 400.0;
+/// The least a docked panel's body is dragged to.
+const PANEL_MIN_H: f32 = 48.0;
+/// The docked Stitch panel's height until a fill's settings have been laid
+/// out and measured (`DockUi::stitch_fill_h`): about what they come to.
+const STITCH_H: f32 = 444.0;
+/// How much of a docked panel's bottom edge takes hold of its height.
+const PANEL_EDGE: f32 = 5.0;
+/// A panel dragged to within this of all that's in it takes all of it.
+const PANEL_SNAP: f32 = 36.0;
 const AGENT_FLOAT_MIN: f32 = 220.0;
 
 /// A floating panel's place until it's moved: its lower-left corner in the
@@ -385,6 +431,7 @@ impl Default for DockState {
             task_bar: true,
             agent_share: 0.55,
             agent_float_h: AGENT_FLOAT_H,
+            heights: [None; N],
             path: None,
         }
     }
@@ -513,6 +560,9 @@ impl DockState {
             let e = &v["panels"][id.key()];
             d.hidden[k] = e["hidden"].as_bool().unwrap_or(false);
             d.collapsed[k] = e["collapsed"].as_bool().unwrap_or(false);
+            d.heights[k] = e["height"]
+                .as_f64()
+                .map(|h| (h as f32).clamp(PANEL_MIN_H, 4000.0));
             d.place[k] = match e["place"].as_str() {
                 Some("left") => Place::Left,
                 Some("right") => Place::Right,
@@ -583,6 +633,7 @@ impl DockState {
                     serde_json::json!({
                         "hidden": self.hidden[k],
                         "collapsed": self.collapsed[k],
+                        "height": self.heights[k],
                         "place": self.place[k].key(),
                         "x": self.float_at[k].x,
                         "bottom": self.float_at[k].y,
@@ -1357,11 +1408,34 @@ impl Studio {
             };
             match scroll {
                 Some(h) => {
-                    egui::ScrollArea::vertical()
+                    // (In a dock, that tall wherever it is in the dock:
+                    // see the Layers list.)
+                    // (And no taller than what was in it last, or it
+                    // would stand open below that.)
+                    // (A panel held at one height is that tall whatever
+                    // is in it, and scrolls with the wheel for the rest.)
+                    let fixed = self.dock_ui.body_fixed;
+                    let least = if self.dock_ui.in_window {
+                        64.0
+                    } else if fixed {
+                        h
+                    } else {
+                        h.min(self.dock_ui.natural[key.index()])
+                    };
+                    let out = egui::ScrollArea::vertical()
                         .id_salt(("panel-body", key))
                         .max_height(h)
-                        .auto_shrink([false, true])
+                        .min_scrolled_height(least)
+                        // (In a dock the wheel is the dock's, wherever the
+                        // pointer is: a panel made short doesn't catch it
+                        // on the way past. Its own bar scrolls it.)
+                        .scroll_source(egui::scroll_area::ScrollSource {
+                            mouse_wheel: self.dock_ui.in_window || fixed,
+                            ..Default::default()
+                        })
+                        .auto_shrink([false, !fixed])
                         .show(ui, |ui| padded(self, ui));
+                    self.dock_ui.natural[key.index()] = out.content_size.y;
                 }
                 None => padded(self, ui),
             }
@@ -1457,6 +1531,40 @@ impl Studio {
         } else {
             shown.first().copied().unwrap_or(id)
         };
+        // In a dock (not a window, a flyout, or the Agent at the foot of
+        // one, which has its own divider), a panel is as tall as its
+        // bottom edge was dragged to: the Layers list itself that tall,
+        // any other panel scrolling within it.
+        let docked =
+            place != Place::Float && !self.dock_ui.in_window && self.dock_ui.pinned_h.is_none();
+        let set = self.dock.heights[lead.index()].filter(|_| docked);
+        let list = id == PanelId::Objects;
+        // The Stitch panel keeps one height whatever is selected: what's
+        // in it changes with the stitch type (a satin has twice a fill's
+        // settings), and a panel that grew and shrank with it would move
+        // every panel under it at each click on a layer. It scrolls for
+        // what doesn't fit, and stands open under what's shorter.
+        // (With nothing selected it has a line to say so, and is as tall
+        // as that: the panels under it are in reach, as they were.)
+        let fixed = id == PanelId::Stitch && docked && self.sel_index().is_some();
+        let set = if fixed {
+            // (Its own height if its edge was dragged; else a fill's
+            // settings exactly, as they were last laid out: no bar to
+            // scroll a fill's by a few points.)
+            Some(set.unwrap_or(self.dock_ui.stitch_fill_h.unwrap_or(STITCH_H)))
+        } else {
+            // (A height no less than what's in a panel of settings holds
+            // nothing in: it's as tall as that, as if no height were set.)
+            set.filter(|h| list || *h + 1.0 < self.dock_ui.natural[lead.index()])
+        };
+        if list {
+            self.dock_ui.set_h = set;
+        } else if let Some(h) = set {
+            // (Less the strip at its foot that's dragged for its height:
+            // what's cut off there would be under it otherwise.)
+            self.dock_ui.body_max = Some(h - PANEL_EDGE);
+            self.dock_ui.body_fixed = fixed;
+        }
         match id {
             PanelId::Stitch => {
                 let d = self.stitch_header();
@@ -1493,8 +1601,142 @@ impl Studio {
             }
         }
         self.dock_ui.tabs = None;
+        if set.is_some() && !list && !self.dock.collapsed(lead) {
+            ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), PANEL_EDGE),
+                Sense::hover(),
+            );
+        }
         let r = Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
         self.dock_ui.drawn.push((place, lead, r));
+        if docked {
+            self.dock_ui.set_h = None;
+            if set.is_some() && !list {
+                self.dock_ui.body_max = None;
+                self.dock_ui.body_fixed = false;
+            }
+            // How tall a fill's settings are, for the Stitch panel's own
+            // height: what's in it now, when it's showing one fill's. (It
+            // differs with the interface's size, and between Basic and
+            // Advanced.)
+            if fixed
+                && self.sel_indices().len() == 1
+                && self.sel_index().is_some_and(|i| {
+                    let s = &self.doc.shapes[i];
+                    s.params.kind.unwrap_or(Kind::Fill) == Kind::Fill
+                })
+                && !self.dock.collapsed(lead)
+            {
+                let all = (self.dock_ui.natural[lead.index()] + PANEL_EDGE).ceil() + 1.0;
+                if all > PANEL_MIN_H {
+                    self.dock_ui.stitch_fill_h = Some(all);
+                }
+            }
+            self.panel_edge(ui, lead, id, r, set);
+        }
+    }
+
+    /// The bottom edge of a docked panel (`lead`'s group, `front` showing,
+    /// drawn in `r`): drag it for the panel's height, double-click it to
+    /// have the panel as tall as what's in it again (the Stitch panel, as
+    /// tall as it is to begin with). (After VectorCraft's
+    /// dividers between docked panels; here the dock scrolls as a whole,
+    /// so the panels below move rather than give way.)
+    fn panel_edge(
+        &mut self,
+        ui: &mut egui::Ui,
+        lead: PanelId,
+        front: PanelId,
+        r: Rect,
+        set: Option<f32>,
+    ) {
+        let k = lead.index();
+        let open = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            body_id(lead),
+            !self.dock.collapsed(lead),
+        )
+        .openness(ui.ctx());
+        if self.dock.collapsed(lead) || open < 1.0 || self.dock_ui.drag.is_some() {
+            return;
+        }
+        let body_h = r.height() - HEADER_H;
+        // (A list is as tall as it's made; anything else, no taller than
+        // what's in it.)
+        let list = front == PanelId::Objects;
+        if set.is_none() || list {
+            self.dock_ui.natural[k] = body_h;
+        }
+        // (Within the panel's margins, as what's in it is.)
+        let bar = Rect::from_x_y_ranges(
+            r.shrink2(Vec2::new(theme::space::M, 0.0)).x_range(),
+            (r.bottom() - PANEL_EDGE)..=r.bottom(),
+        );
+        let resp = ui.interact(
+            bar,
+            ui.make_persistent_id(("panel-height", lead)),
+            Sense::click_and_drag(),
+        );
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::Role::Splitter,
+                true,
+                format!("{} panel height", front.title()),
+            )
+        });
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            ui.painter().hline(
+                r.x_range(),
+                r.bottom() - 1.0,
+                Stroke::new(2.0, pal_ui(ui).accent),
+            );
+        }
+        if resp.drag_started() {
+            self.dock_ui.height_drag = Some((lead, body_h));
+        }
+        if let Some((whose, from)) = self.dock_ui.height_drag
+            && whose == lead
+        {
+            if resp.dragged() {
+                let moved = ui.input(|i| {
+                    i.pointer
+                        .press_origin()
+                        .zip(i.pointer.interact_pos())
+                        .map_or(0.0, |(a, b)| b.y - a.y)
+                });
+                let want = from + moved;
+                // Near all of what's in it, it takes all of it, rather
+                // than scroll for the sake of a few points: a list at
+                // that height, anything else fitted again (and so
+                // growing with what's in it).
+                // (The Stitch panel, held at one height: any height, as
+                // a list has, with all of what's in it now to snap to.)
+                self.dock.heights[k] = if list || front == PanelId::Stitch {
+                    let full = if list {
+                        self.dock_ui.layers_rows_h + self.dock_ui.layers_overhead
+                    } else {
+                        self.dock_ui.natural[k] + PANEL_EDGE
+                    };
+                    let most = self.dock_ui.column_h.iter().copied().fold(0.0, f32::max);
+                    Some(if (want - full).abs() <= PANEL_SNAP {
+                        full
+                    } else {
+                        want.clamp(PANEL_MIN_H, most.max(PANEL_MIN_H))
+                    })
+                } else if want >= self.dock_ui.natural[k] - PANEL_SNAP {
+                    None
+                } else {
+                    Some(want.max(PANEL_MIN_H))
+                };
+            } else {
+                self.dock_ui.height_drag = None;
+            }
+        }
+        if resp.double_clicked() {
+            self.dock.heights[k] = None;
+        }
+        resp.on_hover_text("Drag to set this panel's height; double-click to fit what's in it");
     }
 
     /// A dock: its panels in a column, or (collapsed) a strip of icons.
@@ -2085,6 +2327,10 @@ impl Studio {
         }
         let mut rows = Vec::new();
         let mut stack: Vec<String> = Vec::new();
+        // The row of each group on the stack (None: not shown).
+        let mut open: Vec<Option<usize>> = Vec::new();
+        // Whether each is open (its layers listed under it).
+        let mut wide: Vec<bool> = Vec::new();
         let sewn = self.dock.layers_sewing_order;
         for i in (0..n).map(|k| if sewn { k } else { n - 1 - k }) {
             // A group of one (a shape and its outline are one) is shown as
@@ -2099,20 +2345,39 @@ impl Studio {
                 k += 1;
             }
             stack.truncate(k);
+            open.truncate(k);
+            wide.truncate(k);
             for g in &gs[k..] {
-                if stack.iter().all(|s| self.layout.expanded.contains(s)) {
+                // (Open or shut row by row: a group listed in runs has
+                // each of them as it was left.)
+                let is_open = self.run_open(g, i);
+                if wide.iter().all(|&w| w) {
+                    open.push(Some(rows.len()));
                     rows.push(ObjRow::Group {
                         id: (*g).clone(),
                         depth: stack.len(),
                         members: members[g.as_str()].clone(),
+                        part: Vec::new(),
+                        open: is_open,
+                        within: stack.last().cloned(),
                     });
+                } else {
+                    open.push(None);
                 }
                 stack.push((*g).clone());
+                wide.push(is_open);
             }
-            if stack.iter().all(|s| self.layout.expanded.contains(s)) {
+            // (Under each group row it's within, shown or not.)
+            for &row in open.iter().flatten() {
+                if let ObjRow::Group { part, .. } = &mut rows[row] {
+                    part.push(i);
+                }
+            }
+            if wide.iter().all(|&w| w) {
                 rows.push(ObjRow::Item {
                     i,
                     depth: stack.len(),
+                    within: stack.last().cloned(),
                 });
             }
         }
@@ -2121,12 +2386,17 @@ impl Studio {
 
     fn objects_body(&mut self, ui: &mut egui::Ui) {
         let p = pal_ui(ui);
+        let body_top = ui.cursor().top();
         let rows = self.object_rows();
         // The list fills its dock when it's alone there; sharing, it's as
         // tall as its rows, up to a third of the dock (then it scrolls).
         let list_h = match self.dock_ui.current {
             Some(Place::Float) | None => 320.0,
             Some(side) if self.dock_iconic(side) => 320.0,
+            // (As tall as its edge was dragged to, less its buttons.)
+            Some(_) if self.dock_ui.set_h.is_some() => {
+                (self.dock_ui.set_h.unwrap_or(0.0) - self.dock_ui.layers_overhead).max(26.0)
+            }
             Some(side) => {
                 let h = self.dock_ui.column_h[side.side()];
                 if self.panels_in(side).len() > 1 {
@@ -2163,6 +2433,14 @@ impl Studio {
         // Only the rows in view are laid out and painted (a traced design
         // has hundreds; each row is text, an icon and a hover check).
         const ROW: f32 = 26.0;
+        // The rows' pictures: on the cloth's color, checked again when the
+        // document or its plan changes, left alone during a drag.
+        let cloth = crate::canvas::color32(self.doc.settings.cloth);
+        let thumb_stamp = crate::thumbs::Stamp {
+            rev: self.doc.rev(),
+            plans: self.replans,
+        };
+        let thumb_hold = self.editing;
         // An eye or a lock clicked: whose, which, and with Option held
         // (then it's everything else's).
         let mut flag_click: Option<(Vec<usize>, Flag, bool)> = None;
@@ -2176,18 +2454,27 @@ impl Studio {
             .layer_drag
             .as_ref()
             .and_then(|_| ui.input(|i| i.pointer.interact_pos()));
-        let mut drop: Option<(usize, f32, f32)> = None;
-        let mut drag_start: Option<(Vec<usize>, String)> = None;
+        let mut drop: Option<LayerDrop> = None;
+        // (The layers, what they're called, and the group whose row it is
+        // when it's a group's.)
+        let mut drag_start: Option<(Vec<usize>, String, Option<String>)> = None;
         // Which way up the list is: a row up is a layer later, unless it's
         // in sewing order (then it's a layer earlier).
         let sewn = self.dock.layers_sewing_order;
+        // (A height that was set is the list's height wherever the panel is
+        // in its dock: without the least height too, a list low in a dock
+        // is cut to what's left of the dock below it.)
+        let held = self.dock_ui.set_h.is_some();
+        let list_top = ui.cursor().top();
+        self.dock_ui.layers_rows_h = rows.len() as f32 * ROW;
         egui::ScrollArea::vertical()
             .id_salt("objects")
             .max_height(list_h)
+            .min_scrolled_height(if held { list_h } else { 64.0 })
             .auto_shrink([false, false])
             .show_rows(ui, ROW, rows.len(), |ui, range| {
                 // The last layer's row laid out, for a drop below them all.
-                let mut last_row: Option<(Rect, f32)> = None;
+                let mut last_row: Option<(Rect, f32, Option<String>)> = None;
                 let list = ui.clip_rect();
                 let shown_to_the_end = range.end == rows.len();
                 if self.doc.shapes.is_empty() {
@@ -2198,9 +2485,22 @@ impl Studio {
                     );
                 }
                 for row in &rows[range] {
-                    let (i, depth) = match row {
-                        ObjRow::Group { id, depth, members } => {
-                            let indent = *depth as f32 * 14.0 + GUTTER;
+                    let (i, depth, within) = match row {
+                        ObjRow::Group {
+                            id,
+                            depth,
+                            members: whole,
+                            part,
+                            open: is_open,
+                            within,
+                        } => {
+                            // The row is of the layers under it, and so is
+                            // everything done with it (selected, hidden,
+                            // locked, dragged): a group listed in runs is,
+                            // here, a group for each, since that's what the
+                            // list shows. (`whole`: all of it, for the tip.)
+                            let members = part;
+                            let indent = *depth as f32 * NEST + GUTTER;
                             let (rect, resp) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), ROW),
                                 Sense::click_and_drag(),
@@ -2216,12 +2516,13 @@ impl Studio {
                                 if members.iter().all(|m| all_sel.contains(m)) {
                                     moving.extend(all_sel.iter().filter(|m| !members.contains(m)));
                                 }
-                                drag_start = Some((moving, Studio::group_label(id)));
+                                drag_start =
+                                    Some((moving, self.group_label(id), Some(id.clone())));
                             }
                             // Dragged over: above the group, or below it
                             // (at the top of it, while it's open).
                             if let Some(q) = over.filter(|q| rect.contains(*q)) {
-                                let open = self.layout.expanded.contains(id);
+                                let open = *is_open;
                                 let (first, last) = (
                                     members.iter().copied().min().unwrap_or(0),
                                     members.iter().copied().max().unwrap_or(0),
@@ -2231,12 +2532,30 @@ impl Studio {
                                 } else {
                                     (last + 1, first)
                                 };
-                                drop = Some(if q.y < rect.center().y {
-                                    (above, rect.top(), rect.left() + indent)
-                                } else if open {
-                                    (above, rect.bottom(), rect.left() + indent + 14.0)
+                                // Above it or below it, beside it in the
+                                // group it's in; or into it: at the top of
+                                // it while it's open, and shut, on the
+                                // middle of its row (which lights up).
+                                let line = |before, y, x, group: &Option<String>| LayerDrop {
+                                    before,
+                                    y,
+                                    x,
+                                    group: group.clone(),
+                                    onto: None,
+                                };
+                                let third = rect.height() / 3.0;
+                                let inside = Some(id.clone());
+                                drop = Some(if open && q.y >= rect.center().y {
+                                    line(above, rect.bottom(), rect.left() + indent + NEST, &inside)
+                                } else if open || q.y < rect.top() + third {
+                                    line(above, rect.top(), rect.left() + indent, within)
+                                } else if q.y > rect.bottom() - third {
+                                    line(below, rect.bottom(), rect.left() + indent, within)
                                 } else {
-                                    (below, rect.bottom(), rect.left() + indent)
+                                    LayerDrop {
+                                        onto: Some(body),
+                                        ..line(below, rect.center().y, rect.left() + indent, &inside)
+                                    }
                                 });
                             }
                             eye_and_lock(
@@ -2247,8 +2566,8 @@ impl Studio {
                                 self.flagged(members, Flag::Lock),
                                 &p,
                             );
-                            let open = self.layout.expanded.contains(id);
-                            let label = Studio::group_label(id);
+                            let open = *is_open;
+                            let label = self.group_label(id);
                             let all = members.iter().all(|m| all_sel.contains(m));
                             let some = members.iter().any(|m| all_sel.contains(m));
                             resp.widget_info(|| {
@@ -2282,25 +2601,30 @@ impl Studio {
                                 },
                                 fg2,
                             );
-                            // A folder-ish stack of two squares.
-                            let f = Rect::from_center_size(
-                                Pos2::new(rect.left() + indent + 27.0, rect.center().y + 1.0),
-                                Vec2::new(13.0, 10.0),
+                            // The objects under this row together (those
+                            // shown): the group's, or this run of them.
+                            let shown: Vec<&zigzag::svg::Shape> = part
+                                .iter()
+                                .map(|&m| &self.doc.shapes[m])
+                                .filter(|s| !s.params.hidden())
+                                .collect();
+                            self.dock_ui.thumbs.paint(
+                                painter,
+                                Rect::from_center_size(
+                                    Pos2::new(rect.left() + indent + 29.0, rect.center().y),
+                                    Vec2::splat(THUMB),
+                                ),
+                                // (A row of its own for each run.)
+                                crate::thumbs::Key::Group(
+                                    id.clone(),
+                                    part.first().map_or(0, |&m| self.doc.shapes[m].uid),
+                                ),
+                                &shown,
+                                cloth,
+                                thumb_stamp,
+                                thumb_hold,
                             );
-                            painter.rect_stroke(
-                                f,
-                                2.0,
-                                Stroke::new(1.2, fg2),
-                                egui::StrokeKind::Middle,
-                            );
-                            painter.line_segment(
-                                [
-                                    f.left_top() + Vec2::new(2.0, -3.0),
-                                    f.right_top() + Vec2::new(-2.0, -3.0),
-                                ],
-                                Stroke::new(1.2, fg2),
-                            );
-                            let stitches: usize = members
+                            let stitches: usize = part
                                 .iter()
                                 .map(|&m| self.design.per_shape.get(m).copied().unwrap_or(0))
                                 .sum();
@@ -2317,13 +2641,17 @@ impl Studio {
                                 fg2,
                             );
                             let name_rect = Rect::from_min_max(
-                                Pos2::new(rect.left() + indent + 40.0, rect.top()),
+                                Pos2::new(rect.left() + indent + 44.0, rect.top()),
                                 Pos2::new(right - cw - 6.0, rect.bottom()),
                             );
                             painter.with_clip_rect(name_rect).text(
                                 Pos2::new(name_rect.left(), rect.center().y),
                                 egui::Align2::LEFT_CENTER,
-                                format!("{label}  ·  {}", members.len()),
+                                // (Its name, or "Group" for one nobody
+                                // named, as Illustrator has "<Group>". How
+                                // many layers, and how many of them are under
+                                // this row, is in its tooltip.)
+                                &label,
                                 egui::FontId::proportional(13.0),
                                 fg,
                             );
@@ -2335,30 +2663,37 @@ impl Studio {
                                     flag_click = Some((members.clone(), flag, others));
                                 }
                             } else if (resp.clicked() && on_chevron) || resp.double_clicked() {
-                                if open {
-                                    self.layout.expanded.remove(id);
-                                } else {
-                                    self.layout.expanded.insert(id.clone());
+                                // (This row: not the group's other runs.)
+                                if let Some(&m) = members.first() {
+                                    self.toggle_run(id, m);
                                 }
                             } else if resp.clicked() || (resp.secondary_clicked() && !all) {
                                 group_click = Some(members.clone());
                             }
-                            resp.on_hover_text(format!(
-                                "{label}: {} layers, {} stitches. Click to select the group.",
-                                members.len(),
-                                fmt_int(stitches)
-                            ))
+                            resp.on_hover_text(if part.len() < whole.len() {
+                                format!(
+                                    "{label}: {} layers, {} stitches. Click to select them. (In the file they're grouped with {} more, listed apart: other layers are sewn between.)",
+                                    part.len(),
+                                    fmt_int(stitches),
+                                    whole.len() - part.len()
+                                )
+                            } else {
+                                format!(
+                                    "{label}: {} layers, {} stitches. Click to select the group.",
+                                    members.len(),
+                                    fmt_int(stitches)
+                                )
+                            })
                             .context_menu(|ui| self.object_menu_items(ui));
                             continue;
                         }
-                        ObjRow::Item { i, depth } => (*i, *depth),
+                        ObjRow::Item { i, depth, within } => (*i, *depth, within),
                     };
-                    let indent = depth as f32 * 14.0 + GUTTER;
-                    let (kind, color, hidden, locked) = {
+                    let indent = depth as f32 * NEST + GUTTER;
+                    let (kind, hidden, locked) = {
                         let s = &self.doc.shapes[i];
                         (
                             s.params.kind.unwrap_or(Kind::Fill),
-                            s.color,
                             s.params.hidden(),
                             s.params.locked(),
                         )
@@ -2373,13 +2708,21 @@ impl Studio {
                     // Dragged over: above this layer, or below it.
                     if let Some(q) = over.filter(|q| rect.contains(*q)) {
                         let (above, below) = if sewn { (i, i + 1) } else { (i + 1, i) };
-                        drop = Some(if q.y < rect.center().y {
-                            (above, rect.top(), rect.left() + indent)
+                        // (Beside it: in the group it's in.)
+                        let (before, y) = if q.y < rect.center().y {
+                            (above, rect.top())
                         } else {
-                            (below, rect.bottom(), rect.left() + indent)
+                            (below, rect.bottom())
+                        };
+                        drop = Some(LayerDrop {
+                            before,
+                            y,
+                            x: rect.left() + indent,
+                            group: within.clone(),
+                            onto: None,
                         });
                     }
-                    last_row = Some((rect, indent));
+                    last_row = Some((rect, indent, within.clone()));
                     resp.widget_info(|| {
                         egui::WidgetInfo::selected(egui::Role::ListItem, true, selected, &label)
                     });
@@ -2403,15 +2746,23 @@ impl Studio {
                     } else {
                         p.secondary
                     };
-                    let dot = Pos2::new(rect.left() + indent + 12.0, rect.center().y);
-                    painter.circle_filled(dot, 5.5, crate::canvas::color32(color));
-                    painter.circle_stroke(
-                        dot,
-                        5.5,
-                        Stroke::new(1.0, Color32::from_black_alpha(50)),
+                    // Its outline in its thread color (in a column with the
+                    // groups' pictures, their arrows to the left of it),
+                    // then its stitch type.
+                    self.dock_ui.thumbs.paint(
+                        painter,
+                        Rect::from_center_size(
+                            Pos2::new(rect.left() + indent + 29.0, rect.center().y),
+                            Vec2::splat(THUMB),
+                        ),
+                        crate::thumbs::Key::Shape(self.doc.shapes[i].uid),
+                        &[&self.doc.shapes[i]],
+                        cloth,
+                        thumb_stamp,
+                        thumb_hold,
                     );
                     let icon = Rect::from_center_size(
-                        Pos2::new(rect.left() + indent + 30.0, rect.center().y),
+                        Pos2::new(rect.left() + indent + 50.0, rect.center().y),
                         Vec2::splat(13.0),
                     );
                     draw_kind_icon(painter, icon, kind, fg2);
@@ -2453,7 +2804,7 @@ impl Studio {
                         name_right -= 16.0;
                     }
                     let name_rect = Rect::from_min_max(
-                        Pos2::new(rect.left() + indent + 42.0, rect.top()),
+                        Pos2::new(rect.left() + indent + 62.0, rect.top()),
                         Pos2::new(name_right, rect.bottom()),
                     );
                     let uid = self.doc.shapes[i].uid;
@@ -2530,9 +2881,10 @@ impl Studio {
                             (
                                 all_sel.iter().copied().collect(),
                                 format!("{} layers", all_sel.len()),
+                                None,
                             )
                         } else {
-                            (vec![i], label.clone())
+                            (vec![i], label.clone(), None)
                         });
                     }
                     if let Some(flag) = gutter {
@@ -2558,16 +2910,39 @@ impl Studio {
                     // in sewing order last).
                     if drop.is_none()
                         && shown_to_the_end
-                        && let Some((rect, indent)) = last_row.filter(|(r, _)| q.y >= r.bottom())
+                        && let Some((rect, indent, within)) =
+                            last_row.clone().filter(|(r, ..)| q.y >= r.bottom())
                     {
                         let end = if sewn { self.doc.shapes.len() } else { 0 };
-                        drop = Some((end, rect.bottom(), rect.left() + indent));
+                        // Under them all, as the last row is: in its
+                        // group, if it's in one. Left of where that row
+                        // starts: out of every group, at the top.
+                        let out = within.is_some() && q.x < rect.left() + indent;
+                        drop = Some(LayerDrop {
+                            before: end,
+                            y: rect.bottom(),
+                            x: rect.left() + if out { GUTTER } else { indent },
+                            group: if out { None } else { within },
+                            onto: None,
+                        });
                     }
-                    if let Some((_, y, x)) = drop {
-                        ui.painter().line_segment(
-                            [Pos2::new(x, y), Pos2::new(list.right() - 4.0, y)],
-                            Stroke::new(2.0, p.accent),
-                        );
+                    match &drop {
+                        // Into a group: its row, outlined.
+                        Some(LayerDrop { onto: Some(r), .. }) => {
+                            ui.painter().rect_stroke(
+                                *r,
+                                5.0,
+                                Stroke::new(2.0, p.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        Some(d) => {
+                            ui.painter().line_segment(
+                                [Pos2::new(d.x, d.y), Pos2::new(list.right() - 4.0, d.y)],
+                                Stroke::new(2.0, p.accent),
+                            );
+                        }
+                        None => {}
                     }
                     // Near the top or bottom of the list, it scrolls.
                     let edge = 22.0;
@@ -2584,6 +2959,7 @@ impl Studio {
                     }
                 }
             });
+        let list_drawn = ui.cursor().top() - list_top;
         self.layer_drag(ui, drag_start, drop);
         if let Some(i) = clicked {
             if toggle {
@@ -2669,6 +3045,9 @@ impl Studio {
                 );
             });
         });
+        // (Less the list as it was drawn, not as it was asked for.)
+        self.dock_ui.layers_overhead =
+            (ui.cursor().top() - body_top - list_drawn + theme::pad().sum().y).max(0.0);
     }
 
     /// Layers dragged in the Layers list (after VectorCraft's): `start`
@@ -2681,18 +3060,18 @@ impl Studio {
     fn layer_drag(
         &mut self,
         ui: &egui::Ui,
-        start: Option<(Vec<usize>, String)>,
-        drop: Option<(usize, f32, f32)>,
+        start: Option<(Vec<usize>, String, Option<String>)>,
+        drop: Option<LayerDrop>,
     ) {
-        if let Some((moving, label)) = start {
+        if let Some((moving, label, group)) = start {
             let uids = moving
                 .iter()
                 .filter_map(|&i| self.doc.shapes.get(i))
                 .map(|s| s.uid)
                 .collect();
-            self.dock_ui.layer_drag = Some((uids, label));
+            self.dock_ui.layer_drag = Some((uids, label, group));
         }
-        let Some((uids, label)) = self.dock_ui.layer_drag.clone() else {
+        let Some((uids, label, dragged_group)) = self.dock_ui.layer_drag.clone() else {
             return;
         };
         let (down, released, escape, at) = ui.input(|i| {
@@ -2709,9 +3088,37 @@ impl Studio {
         }
         if released {
             self.dock_ui.layer_drag = None;
-            if let Some((before, ..)) = drop {
+            if let Some(d) = drop {
                 let moving = self.uid_indices(&uids);
-                self.move_layers(&moving, before);
+                // Into another group than they're in (or out of theirs):
+                // that, and where they're sewn; else only where.
+                let regroup = match &dragged_group {
+                    // A group's row: its layers join another group it's
+                    // dropped in or on (the two are merged). Dropped
+                    // anywhere else it's moved as it is, still a group.
+                    Some(g) => d.group.as_ref().is_some_and(|to| {
+                        to != g
+                            && !moving
+                                .iter()
+                                .any(|&i| self.doc.shapes[i].groups.contains(to))
+                    }),
+                    None => moving.iter().any(|&i| self.shown_group(i) != d.group),
+                };
+                if regroup {
+                    if self.drop_layers(&moving, d.before, d.group.as_deref()) {
+                        // (Dropped among a group's layers, they show there.)
+                        if let (Some(g), Some(&i), None) = (
+                            d.group.as_deref(),
+                            self.uid_indices(&uids).first(),
+                            d.onto,
+                        ) && !self.run_open(g, i)
+                        {
+                            self.toggle_run(g, i);
+                        }
+                    }
+                } else {
+                    self.move_layers(&moving, d.before);
+                }
             }
             return;
         }
@@ -2753,7 +3160,7 @@ impl Studio {
                 if let Some(at) = self.doc.shapes.iter().position(|s| s.uid == uid) {
                     self.set_selection(&[at]);
                 }
-                self.names = zigzag::svg::display_names(&self.doc.shapes);
+                self.names = self.doc.object_names();
                 self.status = format!("Renamed to {name}.");
             }
             Err(e) => self.status = format!("Couldn't rename it: {e}."),
@@ -2787,6 +3194,9 @@ impl Studio {
         );
         self.action_row(ui, A::Copy, "Copy", RowIcon::None);
         self.action_row(ui, A::Paste, "Paste", RowIcon::None);
+        menu_separator(ui);
+        self.action_row(ui, A::Group, "Group", RowIcon::None);
+        self.action_row(ui, A::Ungroup, "Ungroup", RowIcon::None);
         menu_separator(ui);
         self.action_row(ui, A::FlipH, "Flip Horizontal", RowIcon::Icon(Icon::FlipH));
         self.action_row(ui, A::FlipV, "Flip Vertical", RowIcon::Icon(Icon::FlipV));
@@ -2941,9 +3351,10 @@ impl Studio {
             match self.doc.shapes[i]
                 .groups
                 .iter()
-                .find(|g| self.group_members(g) == sel)
+                // (The group, or the run of it that Layers lists as one.)
+                .find(|g| self.group_members(g) == sel || self.group_run(g, i) == sel)
             {
-                Some(g) => format!("{} · {count} objects", Studio::group_label(g)),
+                Some(g) => format!("{} · {count} objects", self.group_label(g)),
                 None => format!("{count} objects"),
             }
         } else {
@@ -3109,6 +3520,22 @@ impl Studio {
                             },
                         )
                     });
+                }
+                motif_rows(fm, pr, true);
+            }
+            Kind::Motif => {
+                motif_rows(fm, pr, false);
+                if fm.advanced(pr.len.is_some()) {
+                    value_row(
+                        fm,
+                        "Length",
+                        &mut pr.len,
+                        f.run_len,
+                        1.0..=5.0,
+                        " mm",
+                        0.1,
+                        "Longest stitch along the motif",
+                    );
                 }
             }
             Kind::Satin => {
@@ -3683,13 +4110,18 @@ impl Studio {
         use crate::view_tools::Marker;
         let advanced = self.prefs.advanced;
         let pr = &mut self.doc.shapes[i].params;
-        let set = pr.start.is_some() || pr.end.is_some() || pr.trim.is_some() || pr.stop.is_some();
+        let set = pr.start.is_some()
+            || pr.end.is_some()
+            || pr.trim.is_some()
+            || pr.trim_before.is_some()
+            || pr.stop.is_some();
         if !advanced && !set {
             return 1;
         }
         theme::section_break(ui);
         let p = pal_ui(ui);
         let picking = self.view_tools.marker_pick;
+        let mut trim_before = None;
         let mut pick: Option<Option<Marker>> = None;
         let mut clear: Option<Marker> = None;
         form_for(ui, "sewing-form", advanced, |fm| {
@@ -3733,9 +4165,16 @@ impl Studio {
                     pick = Some(None);
                 }
                 ui.add_space(theme::space::S);
+                let mut before = pr.trim_before == Some(true);
+                if ui.checkbox(&mut before, "Trim Before")
+                    .on_hover_text("Cut before this object if a thread is running; turn off to let the planner decide")
+                    .changed()
+                {
+                    trim_before = Some(before);
+                }
                 let mut trim = pr.trim == Some(true);
                 if ui
-                    .checkbox(&mut trim, "Trim")
+                    .checkbox(&mut trim, "Trim After")
                     .on_hover_text("Cut the thread after this object, even if the next one is close")
                     .changed()
                 {
@@ -3756,6 +4195,10 @@ impl Studio {
                 Marker::Start => pr.start = None,
                 Marker::End => pr.end = None,
             }
+        }
+        if let Some(on) = trim_before {
+            let shape = &mut self.doc.shapes[i];
+            shape.params.trim_before = shape.trim_before_setting(on);
         }
         if let Some(m) = pick {
             self.view_tools.marker_pick = m;
@@ -4134,6 +4577,26 @@ pub(crate) fn connect_note(connect_mm: f64, cuts: usize, bridged: usize) -> Stri
     }
 }
 
+/// Where layers dragged in the Layers list would go.
+#[derive(Clone, Debug)]
+struct LayerDrop {
+    /// Sewn before the object numbered so (past the last: at the end).
+    before: usize,
+    /// The line that shows it: its height and its left end.
+    y: f32,
+    x: f32,
+    /// The group they'd be in there (none: at the top, in no group).
+    group: Option<String>,
+    /// Dropped on a group's row, to go into it: the row, lit instead of
+    /// a line.
+    onto: Option<Rect>,
+}
+
+/// A Layers row's picture of its object, square.
+const THUMB: f32 = 18.0;
+/// How far a group's layers are set in from it: their pictures clear of
+/// its own, their arrows under it (as Illustrator lists them).
+const NEST: f32 = THUMB + 10.0;
 /// The Layers list's eye and lock columns, at the left of every row (as
 /// in Illustrator's Layers, and VectorCraft's): how wide each is, and
 /// the two together.
@@ -4306,6 +4769,31 @@ mod tests {
         h.run_steps(3);
         assert_eq!(h.state().doc.shapes[0].params.overlap, None);
         assert!(h.query_by_label("Overlapping").is_none());
+    }
+
+    #[test]
+    fn a_motif_shows_in_the_stitch_panel_and_comes_off_again() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
+              <rect id="tile_fill_motif=0:2+2:0+4:2+2:4+0:2" x="10" y="10" width="30" height="30" fill="#2a6ab0"/>
+            </svg>"##;
+        let doc = zigzag::document::Document::from_svg(svg, "t", None).unwrap();
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 1000.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(None, None),
+            );
+        h.state_mut().set_document(doc);
+        h.run_steps(3);
+        h.state_mut().set_selection(&[0]);
+        h.run_steps(3);
+        for row in ["Pattern", "Tile", "Layout"] {
+            assert!(h.query_by_label(row).is_some(), "{row}");
+        }
+        h.get_by_label("Remove").click();
+        h.run_steps(3);
+        assert!(h.state().doc.shapes[0].params.motif.is_none());
+        assert!(h.query_by_label("Layout").is_none());
     }
 
     #[test]
@@ -4620,6 +5108,230 @@ mod tests {
     }
 
     #[test]
+    fn a_group_with_other_layers_between_its_own_is_listed_in_runs_each_its_own_part() {
+        let rect = |id: &str, x: u32| {
+            format!(r##"<rect id="{id}" x="{x}" y="5" width="10" height="10" fill="#c00000"/>"##)
+        };
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="40mm" viewBox="0 0 100 40"><g id="set">{}{}{}{}</g>{}</svg>"##,
+            rect("a", 5),
+            rect("b", 20),
+            rect("c", 35),
+            rect("d", 50),
+            rect("e", 65),
+        );
+        let mut s = Studio::with_file(None, None);
+        s.set_document(zigzag::document::Document::from_svg(&svg, "t", None).unwrap());
+        s.layout.expanded.clear();
+        let rows = |s: &Studio| -> Vec<(usize, usize)> {
+            s.object_rows()
+                .iter()
+                .map(|r| match r {
+                    ObjRow::Group { members, part, .. } => (part.len(), members.len()),
+                    ObjRow::Item { .. } => (0, 0),
+                })
+                .collect()
+        };
+        // Together: one row, all of it. (The layer beside it is on top.)
+        assert_eq!(rows(&s), [(0, 0), (4, 4)]);
+        // The other layer sewn between its second and third: a row for
+        // each run, saying how much of the group it is.
+        s.doc.shapes[2..].rotate_right(1);
+        assert_eq!(rows(&s), [(2, 4), (0, 0), (2, 4)]);
+        let listed: Vec<Vec<usize>> = s
+            .object_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                ObjRow::Group { part, .. } => Some(part),
+                ObjRow::Item { .. } => None,
+            })
+            .collect();
+        assert_eq!(listed, [vec![4, 3], vec![1, 0]]);
+        // A click on the canvas selects the run its object is in, as the
+        // list shows it (⌘-click, the one object).
+        let mut clicked = |i: usize, direct: bool| {
+            s.click_select(i, false, direct);
+            let mut sel = s.sel_indices();
+            sel.sort();
+            sel
+        };
+        assert_eq!(clicked(0, false), [0, 1]);
+        assert_eq!(clicked(4, false), [3, 4]);
+        assert_eq!(clicked(4, true), [4]);
+        assert_eq!(clicked(2, false), [2], "the layer between, alone");
+        s.set_selection(&[]);
+        // And the rows say so.
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(300.0, 400.0))
+            .build_ui_state(|ui, s: &mut Studio| s.objects_body(ui), s);
+        h.run_steps(3);
+        assert_eq!(h.state().dock_ui.thumbs.len(), 3, "a picture for each row");
+        // A click on a run's row selects that run, not the rest of the
+        // group listed elsewhere.
+        h.query_all_by_label("set").next().unwrap().click();
+        h.run_steps(3);
+        let mut picked = h.state().sel_indices();
+        picked.sort();
+        assert_eq!(picked, [3, 4]);
+        // And a run opens and shuts on its own: the other stays as it was.
+        let open = |h: &Harness<'_, Studio>| -> Vec<bool> {
+            h.state()
+                .object_rows()
+                .iter()
+                .filter_map(|r| match r {
+                    ObjRow::Group { open, .. } => Some(*open),
+                    ObjRow::Item { .. } => None,
+                })
+                .collect()
+        };
+        assert_eq!(open(&h), [false, false]);
+        h.state_mut().toggle_run("set", 4);
+        assert_eq!(open(&h), [true, false]);
+        assert_eq!(h.state().object_rows().len(), 5, "two rows more");
+        // And stays open as its layers are sewn in another order (it's the
+        // run that's open, whichever of them is first).
+        h.state_mut().doc.shapes.swap(3, 4);
+        assert_eq!(open(&h), [true, false]);
+        h.state_mut().doc.shapes.swap(3, 4);
+        // (Open as a whole, as an entered group is: shutting one run
+        // leaves the other open.)
+        h.state_mut().layout.expanded.clear();
+        h.state_mut().layout.expanded.insert("set".into());
+        assert_eq!(open(&h), [true, true]);
+        h.state_mut().toggle_run("set", 0);
+        assert_eq!(open(&h), [true, false]);
+    }
+
+    #[test]
+    fn layers_go_into_groups_and_out_of_them_and_groups_are_made_and_merged() {
+        use crate::commands::Action;
+        let rect = |id: &str, x: u32| {
+            format!(r##"<rect id="{id}" x="{x}" y="5" width="10" height="10" fill="#c00000"/>"##)
+        };
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="40mm" viewBox="0 0 100 40"><g id="set">{}{}</g><g id="pair" transform="translate(0 12)">{}{}</g>{}</svg>"##,
+            rect("a", 5),
+            rect("b", 20),
+            rect("c", 35),
+            rect("d", 50),
+            rect("e", 65),
+        );
+        let mut s = Studio::with_file(None, None);
+        s.set_document(zigzag::document::Document::from_svg(&svg, "t", None).unwrap());
+        // (By the first word of its id: the rest is its place in the order.)
+        let word = |x: &zigzag::svg::Shape| x.id.split('_').next().unwrap_or("").to_string();
+        let at = |s: &Studio, id: &str| s.doc.shapes.iter().position(|x| word(x) == id).unwrap();
+        let group = |s: &Studio, id: &str| s.shown_group(at(s, id));
+        let order = |s: &Studio| -> String { s.doc.shapes.iter().map(word).collect() };
+        let place = |s: &Studio, id: &str| {
+            let b = crate::app::shape_bounds(&s.doc.shapes[at(s, id)]);
+            ((b.min.x * 10.0).round(), (b.min.y * 10.0).round())
+        };
+        let places = |s: &Studio| ["a", "b", "c", "d", "e"].map(|id| place(s, id));
+        let was = places(&s);
+        assert_eq!(order(&s), "abcde");
+        // A layer dropped among a group's: in the group, sewn there.
+        let undo = s.undo.len();
+        assert!(s.drop_layers(&[at(&s, "e")], at(&s, "b"), Some("set")));
+        assert_eq!(group(&s, "e").as_deref(), Some("set"));
+        assert_eq!((order(&s).as_str(), s.undo.len()), ("aebcd", undo + 1));
+        assert_eq!(places(&s), was, "where it was on the cloth");
+        // And dropped out at the end: in no group.
+        assert!(s.drop_layers(&[at(&s, "e")], 5, None));
+        assert_eq!((group(&s, "e"), order(&s).as_str()), (None, "abcde"));
+        // A group's layers dropped into another: the two are one, and the
+        // one they left is gone (they were turned in it: here as before).
+        let pair = [at(&s, "c"), at(&s, "d")];
+        assert!(s.drop_layers(&pair, at(&s, "b") + 1, Some("set")));
+        for id in ["a", "b", "c", "d"] {
+            assert_eq!(group(&s, id).as_deref(), Some("set"), "{id}");
+        }
+        assert!(!s.doc.to_svg().unwrap().contains("id=\"pair\""));
+        assert_eq!(places(&s), was);
+        // Ungroup: the selected ones, out.
+        s.set_selection(&[at(&s, "c"), at(&s, "d")]);
+        assert!(s.action_enabled(Action::Ungroup));
+        s.run_action(Action::Ungroup);
+        assert_eq!((group(&s, "c"), group(&s, "d")), (None, None));
+        assert_eq!(group(&s, "a").as_deref(), Some("set"));
+        assert!(!s.action_enabled(Action::Ungroup), "they're in none now");
+        // Group: a new one of the selection, sewn together where the last is.
+        s.set_selection(&[at(&s, "a"), at(&s, "d")]);
+        assert!(s.action_enabled(Action::Group));
+        s.run_action(Action::Group);
+        let made = group(&s, "d").expect("a group");
+        // (At the top, as one of them was: the other leaves its group.)
+        assert_eq!(s.doc.shapes[at(&s, "a")].groups, [made.clone()]);
+        assert_eq!(order(&s), "bcade");
+        assert_eq!(places(&s), was);
+        let mut picked = s.sel_indices();
+        picked.sort();
+        assert_eq!(picked, [at(&s, "a"), at(&s, "d")], "the group, selected");
+        // Each of those was one step, undone one at a time.
+        s.apply_history(crate::app::History::Undo);
+        assert_eq!(group(&s, "d"), None);
+        s.apply_history(crate::app::History::Undo);
+        assert_eq!(group(&s, "d").as_deref(), Some("set"));
+        // And it comes back from the file as it is.
+        let again =
+            zigzag::document::Document::from_svg(&s.doc.to_svg().unwrap(), "t", None).unwrap();
+        assert_eq!(
+            again.shapes.iter().map(|x| x.groups.clone()).collect::<Vec<_>>(),
+            s.doc.shapes.iter().map(|x| x.groups.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_layer_dragged_onto_a_groups_row_goes_into_it_and_beside_one_in_no_group_comes_out() {
+        let rect = |id: &str, x: u32| {
+            format!(r##"<rect id="{id}" x="{x}" y="5" width="10" height="10" fill="#c00000"/>"##)
+        };
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="40mm" viewBox="0 0 100 40"><g id="set">{}{}</g>{}{}</svg>"##,
+            rect("a", 5),
+            rect("b", 20),
+            rect("e", 65),
+            rect("f", 80),
+        );
+        let mut s = Studio::with_file(None, None);
+        s.set_document(zigzag::document::Document::from_svg(&svg, "t", None).unwrap());
+        s.layout.expanded.clear();
+        // (The rows' names, kept as the frame would keep them.)
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(300.0, 400.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| {
+                    s.names = s.doc.object_names();
+                    s.objects_body(ui)
+                },
+                s,
+            );
+        h.run_steps(3);
+        let at = |h: &Harness<'_, Studio>, id: &str| {
+            h.state()
+                .doc
+                .shapes
+                .iter()
+                .position(|x| x.id.split('_').next() == Some(id))
+                .unwrap()
+        };
+        // Onto the middle of the shut group's row: into it.
+        let (from, onto) = (h.get_by_label("e").rect(), h.get_by_label("set").rect());
+        drag(&mut h, from.center(), onto.center());
+        assert_eq!(h.state().shown_group(at(&h, "e")).as_deref(), Some("set"));
+        assert_eq!(h.state().group_members("set").len(), 3);
+        assert!(h.query_by_label("e").is_none(), "in the group, which is shut");
+        // Open, and one of its layers dragged up beside the layer above
+        // it, which is in no group: out of it.
+        h.state_mut().toggle_run("set", 0);
+        h.run_steps(3);
+        let (from, beside) = (h.get_by_label("b").rect(), h.get_by_label("f").rect());
+        drag(&mut h, from.center(), beside.center() - Vec2::new(0.0, 8.0));
+        assert_eq!(h.state().shown_group(at(&h, "b")), None);
+        assert_eq!(h.state().group_members("set").len(), 2);
+    }
+
+    #[test]
     fn a_documents_only_group_starts_open() {
         let open = |body: &str| {
             let svg = format!(
@@ -4780,7 +5492,7 @@ mod tests {
         let row = |h: &Harness<'_, Studio>, name: &str| h.get_by_label(name).rect();
         // (Past the eye and lock columns at the row's left.)
         let on_name = |r: Rect| Pos2::new(r.left() + GUTTER + 70.0, r.center().y);
-        let on_dot = |r: Rect| Pos2::new(r.left() + GUTTER + 12.0, r.center().y);
+        let on_dot = |r: Rect| Pos2::new(r.left() + GUTTER + 29.0, r.center().y);
         let click = |h: &mut Harness<'_, Studio>, at: Pos2, times: usize| {
             h.hover_at(at);
             h.run_steps(1);
@@ -4920,7 +5632,8 @@ mod tests {
             "Corners",
             "Short stitches",
             "Auto split",
-            "Trim",
+            "Trim Before",
+            "Trim After",
             "Remove overlaps",
             "Connect gaps",
         ];
@@ -5324,6 +6037,191 @@ mod tests {
     }
 
     #[test]
+    fn a_docked_panels_bottom_edge_sets_its_height_and_a_double_click_fits_it_again() {
+        let path =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg"));
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 1000.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(Some(path), None),
+            );
+        h.state_mut().select_index(Some(0));
+        h.run_steps(8);
+        // (Each panel's edge is at its foot: where one is says how tall
+        // the panels above it are.)
+        let edge = |h: &Harness<'_, Studio>, panel: &str| {
+            let r = h.get_by_label(&format!("{panel} panel height")).rect();
+            Pos2::new(r.center().x, r.bottom() - 2.0)
+        };
+        let (layers, stitch) = (edge(&h, "Layers"), edge(&h, "Stitch"));
+        assert_eq!(h.state().dock.heights, [None; N], "as tall as what's in them");
+        // The Layers list, dragged taller: the panels below move down.
+        drag(&mut h, layers, layers + Vec2::new(0.0, 80.0));
+        assert!((edge(&h, "Layers").y - layers.y - 80.0).abs() < 1.5);
+        assert!((edge(&h, "Stitch").y - stitch.y - 80.0).abs() < 1.5);
+        assert!(h.state().dock.heights[PanelId::Objects.index()].is_some());
+        // And shorter than its rows: it scrolls, down to a least height.
+        let at = edge(&h, "Layers");
+        drag(&mut h, at, at - Vec2::new(0.0, 2000.0));
+        assert_eq!(
+            h.state().dock.heights[PanelId::Objects.index()],
+            Some(PANEL_MIN_H)
+        );
+        // A panel of settings, dragged shorter, scrolls in what it's given…
+        let (top, at) = (edge(&h, "Stitch").y, edge(&h, "Transform"));
+        let whole = at.y - top;
+        drag(&mut h, at, at - Vec2::new(0.0, 60.0));
+        assert!((edge(&h, "Transform").y - top - (whole - 60.0)).abs() < 1.5);
+        // …and dragged longer, is no taller than what's in it.
+        let at = edge(&h, "Transform");
+        drag(&mut h, at, at + Vec2::new(0.0, 600.0));
+        assert!((edge(&h, "Transform").y - top - whole).abs() < 1.5);
+        // The Stitch panel is held at one height, and takes any: shorter,
+        // and taller than what's in it.
+        let (top, at) = (edge(&h, "Layers").y, edge(&h, "Stitch"));
+        let whole = at.y - top;
+        drag(&mut h, at, at - Vec2::new(0.0, 120.0));
+        assert!((edge(&h, "Stitch").y - top - (whole - 120.0)).abs() < 1.5);
+        let at = edge(&h, "Stitch");
+        drag(&mut h, at, at + Vec2::new(0.0, 300.0));
+        assert!((edge(&h, "Stitch").y - top - (whole + 180.0)).abs() < 1.5);
+        // A double click on an edge: as tall as what's in it again.
+        let at = edge(&h, "Layers");
+        h.hover_at(at);
+        h.run_steps(1);
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.run_steps(1);
+            }
+        }
+        h.run_steps(3);
+        assert_eq!(h.state().dock.heights[PanelId::Objects.index()], None);
+        assert!((edge(&h, "Layers").y - layers.y).abs() < 1.5);
+    }
+
+    #[test]
+    fn a_set_height_holds_low_in_a_dock_and_near_all_of_a_panel_takes_all_of_it() {
+        let path =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg"));
+        let mut s = Studio::with_file(Some(path), Some(0));
+        // The Layers list under the other panels, past the foot of the
+        // window (the dock scrolls to it), and set taller than its rows.
+        s.dock.move_panel(PanelId::Objects, Place::Right, None);
+        s.dock.heights[PanelId::Objects.index()] = Some(243.0);
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 900.0))
+            .build_ui_state(|ui, s: &mut Studio| s.frame(ui), s);
+        h.run_steps(8);
+        let foot = |h: &Harness<'_, Studio>, panel: &str| {
+            h.get_by_label(&format!("{panel} panel height"))
+                .rect()
+                .bottom()
+        };
+        let above = *h
+            .state()
+            .panels_in(Place::Right)
+            .iter()
+            .rev()
+            .nth(1)
+            .unwrap();
+        let top = foot(&h, above.title());
+        assert!(top > 500.0, "low in the dock: {top}");
+        assert!(
+            (foot(&h, "Layers") - top - HEADER_H - 243.0).abs() < 1.5,
+            "{} under {top}",
+            foot(&h, "Layers")
+        );
+        // A panel of settings dragged a little short of all of it: all of
+        // it, fitted to what's in it (it doesn't scroll for a few points).
+        let panel = h.get_by_label("Transform panel height").rect();
+        let at = Pos2::new(panel.center().x, panel.bottom() - 2.0);
+        drag(&mut h, at, at - Vec2::new(0.0, 8.0));
+        assert_eq!(h.state().dock.heights[PanelId::Transform.index()], None);
+        assert!((foot(&h, "Transform") - panel.bottom()).abs() < 1.5);
+        // And well short of it: that height, scrolling.
+        drag(&mut h, at, at - Vec2::new(0.0, 60.0));
+        assert!(h.state().dock.heights[PanelId::Transform.index()].is_some());
+        assert!((foot(&h, "Transform") - (panel.bottom() - 60.0)).abs() < 1.5);
+        // A height from when there was more in the panel (another
+        // selection, another design): no taller than what's in it now.
+        h.state_mut().dock.heights[PanelId::Transform.index()] = Some(2000.0);
+        h.run_steps(4);
+        assert!((foot(&h, "Transform") - panel.bottom()).abs() < 1.5);
+    }
+
+    #[test]
+    fn the_stitch_panel_is_one_height_whichever_layer_is_selected() {
+        // The badge: a run, a satin and two fills, each with its own
+        // settings (a satin's twice as many as a fill's).
+        let path =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/badge.svg"));
+        let mut h = Harness::builder()
+            .with_size(Vec2::new(1400.0, 1200.0))
+            .build_ui_state(
+                |ui, s: &mut Studio| s.frame(ui),
+                Studio::with_file(Some(path), Some(0)),
+            );
+        h.run_steps(6);
+        let foot = |h: &Harness<'_, Studio>, panel: &str| {
+            h.get_by_label(&format!("{panel} panel height"))
+                .rect()
+                .bottom()
+        };
+        let kinds: std::collections::HashSet<Kind> = h
+            .state()
+            .doc
+            .shapes
+            .iter()
+            .filter_map(|s| s.params.kind)
+            .collect();
+        assert!(kinds.len() >= 2, "{kinds:?}");
+        // (A fill first: the panel is as tall as a fill's settings, once
+        // it has laid one's out.)
+        let fill = (0..h.state().doc.shapes.len())
+            .find(|&i| h.state().doc.shapes[i].params.kind.unwrap_or(Kind::Fill) == Kind::Fill)
+            .expect("a fill");
+        h.state_mut().select_index(Some(fill));
+        h.run_steps(6);
+        // All of a fill's settings are in it: nothing to scroll.
+        let k = PanelId::Stitch.index();
+        let all = h.state().dock_ui.natural[k];
+        let held = h.state().dock_ui.stitch_fill_h.expect("measured");
+        assert!(all + PANEL_EDGE <= held && held < all + PANEL_EDGE + 2.5, "{all} in {held}");
+        let (stitch, under) = (foot(&h, "Stitch"), foot(&h, "Transform"));
+        for i in 0..h.state().doc.shapes.len() {
+            h.state_mut().select_index(Some(i));
+            h.run_steps(4);
+            assert!((foot(&h, "Stitch") - stitch).abs() < 0.5, "layer {i}: {} was {stitch}", foot(&h, "Stitch"));
+            assert!((foot(&h, "Transform") - under).abs() < 0.5, "layer {i}: {} was {under}", foot(&h, "Transform"));
+        }
+        // The height it's given is the one it keeps, for every layer.
+        // (Given here, not dragged: a drag near all of what's in it for
+        // the layer selected takes that, which is another test's.)
+        h.state_mut().dock.heights[PanelId::Stitch.index()] = Some(held - 100.0);
+        for i in 0..h.state().doc.shapes.len() {
+            h.state_mut().select_index(Some(i));
+            h.run_steps(4);
+            assert!((foot(&h, "Stitch") - (stitch - 100.0)).abs() < 0.5, "layer {i}");
+        }
+        // A double click on its edge: the height it began with.
+        h.state_mut().dock.heights[PanelId::Stitch.index()] = None;
+        h.run_steps(4);
+        assert!((foot(&h, "Stitch") - stitch).abs() < 0.5);
+        // With nothing selected it's only as tall as its one line.
+        h.state_mut().select_index(None);
+        h.run_steps(6);
+        assert!(foot(&h, "Stitch") < stitch - 200.0);
+    }
+
+    #[test]
     fn panel_layout_is_remembered() {
         let file = std::env::temp_dir().join(format!("zigzag-panels-{}.json", std::process::id()));
         let mut d = DockState::load_from(Some(file.clone()));
@@ -5339,9 +6237,12 @@ mod tests {
         d.join_tab(PanelId::Transform, PanelId::Stitch);
         assert!(!d.layers_sewing_order);
         d.layers_sewing_order = true;
+        d.heights[PanelId::Objects.index()] = Some(240.0);
         d.save();
         let e = DockState::load_from(Some(file.clone()));
         assert!(e.layers_sewing_order);
+        assert_eq!(e.heights[PanelId::Objects.index()], Some(240.0));
+        assert_eq!(e.heights[PanelId::Stitch.index()], None, "and the rest fit");
         assert_eq!(e.place_of(PanelId::Threads), Place::Float);
         assert_eq!(
             e.float_at[PanelId::Threads.index()],
@@ -5513,7 +6414,13 @@ mod tests {
                     let Some(b) = node.bounding_box() else {
                         continue;
                     };
-                    if (b.x0 as f32) < dock || b.y0 < 60.0 || b.y0 > 780.0 {
+                    // (A panel's scroll bar is in the margin, where it's meant
+                    // to be.)
+                    if (b.x0 as f32) < dock
+                        || b.y0 < 60.0
+                        || b.y0 > 780.0
+                        || node.role() == egui::accesskit::Role::ScrollBar
+                    {
                         continue;
                     }
                     assert!(
@@ -5799,5 +6706,147 @@ mod tests {
         unsafe { std::env::remove_var("ZIGZAG_CLAUDE") };
         assert!(h.state().agent_showing(), "the conversation in view");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The motif's rows in the Stitch panel (see `zigzag::stitch::motif`): a
+/// picture of it tiled, its size, the distance between copies, the layout,
+/// and what won't sew as drawn. `pattern`: on a fill (a patterned fill),
+/// else a motif fill.
+fn motif_rows(fm: &mut Form, pr: &mut Params, pattern: bool) {
+    let label = if pattern { "Pattern" } else { "Motif" };
+    // (A plain fill says nothing of patterns unless asked: Advanced.)
+    if pattern && !fm.advanced(pr.motif.is_some()) {
+        return;
+    }
+    let Some(m) = design::shape_motif(pr) else {
+        fm.row(label, |ui, _| {
+            caption(
+                ui,
+                "None. Draw a small line, select it with this shape, and choose Object › Use as Motif.",
+            );
+        });
+        return;
+    };
+    let mut remove = false;
+    fm.row(label, |ui, _| {
+        // The motif tiled in a little window: what it'll look like.
+        let (r, _) = ui.allocate_exact_size(Vec2::new(120.0, 48.0), Sense::hover());
+        let p = ui.painter_at(r);
+        let pal = pal_ui(ui);
+        p.rect_stroke(r, 3.0, Stroke::new(1.0, pal.separator), egui::StrokeKind::Inside);
+        let k = r.height() as f64 / (m.h.max(m.w) * 2.0);
+        let s = Stroke::new(1.2, pal.text);
+        for j in -1..4 {
+            for i in -1..8 {
+                let o = m.layout.offset(m.w, m.h, i, j);
+                for l in &m.lines {
+                    let pts: Vec<Pos2> = l
+                        .iter()
+                        .map(|q| {
+                            r.left_top()
+                                + Vec2::new(((q.x + o.x) * k) as f32, ((q.y + o.y) * k) as f32)
+                                + Vec2::splat(4.0)
+                        })
+                        .collect();
+                    p.add(egui::Shape::line(pts, s));
+                }
+            }
+        }
+        if ui
+            .add(egui::Button::new("Remove").small())
+            .on_hover_text(if pattern {
+                "Back to a plain fill"
+            } else {
+                "Take the motif off (it stops sewing)"
+            })
+            .clicked()
+        {
+            remove = true;
+        }
+    });
+    if remove {
+        pr.motif = None;
+        pr.tile = None;
+        pr.layout = None;
+        return;
+    }
+    // Size: the motif's longer side, scaled with its tile.
+    let lines = pr.motif.clone().unwrap_or_default();
+    let (mut lo, mut hi) = ((f64::INFINITY, f64::INFINITY), (f64::NEG_INFINITY, f64::NEG_INFINITY));
+    for &(x, y) in lines.iter().flatten() {
+        lo = (lo.0.min(x), lo.1.min(y));
+        hi = (hi.0.max(x), hi.1.max(y));
+    }
+    let width = (hi.0 - lo.0).max(hi.1 - lo.1);
+    let mut size = Some(width);
+    let r = value_row(
+        fm,
+        "Size",
+        &mut size,
+        width,
+        1.0..=30.0,
+        " mm",
+        0.1,
+        "How big the motif is (its longer side)",
+    );
+    if r.changed()
+        && let Some(v) = size
+        && width > 1e-6
+        && (v - width).abs() > 1e-6
+    {
+        let k = v.max(0.5) / width;
+        let round = |v: f64| (v * 100.0).round() / 100.0;
+        pr.motif = Some(
+            lines
+                .iter()
+                .map(|l| {
+                    l.iter()
+                        .map(|&(x, y)| (round((x - lo.0) * k), round((y - lo.1) * k)))
+                        .collect()
+                })
+                .collect(),
+        );
+        pr.tile = pr.tile.map(|(w, h)| (round(w * k), round(h * k)));
+    }
+    fm.row("Tile", |ui, lid| {
+        let (mut w, mut h) = pr.tile.unwrap_or((m.w / 10.0, m.h / 10.0));
+        let a = ui
+            .add(crate::units::drag_mm(&mut w, 1.0..=50.0, 0.1))
+            .labelled_by(lid)
+            .on_hover_text("How far apart the copies are, across");
+        ui.label("×");
+        let b = ui
+            .add(crate::units::drag_mm(&mut h, 1.0..=50.0, 0.1))
+            .on_hover_text("How far apart the rows of copies are");
+        if a.changed() || b.changed() {
+            pr.tile = Some((w, h));
+        }
+        if pr.tile.is_some()
+            && ui
+                .add(egui::Button::new("Fit").small())
+                .on_hover_text("Copies touching: the tile the motif's own size")
+                .clicked()
+        {
+            pr.tile = None;
+        }
+    });
+    fm.row("Layout", |ui, _| {
+        let now = pr.layout.unwrap_or_default();
+        egui::ComboBox::from_id_salt("motif-layout")
+            .selected_text(now.label())
+            .show_ui(ui, |ui| {
+                for l in zigzag::stitch::motif::Layout::ALL {
+                    if ui.selectable_label(l == now, l.label()).clicked() {
+                        pr.layout = (l != Default::default()).then_some(l);
+                    }
+                }
+            });
+    });
+    for problem in zigzag::stitch::motif::problems(&m, pattern, pr.fill_angle().to_radians()) {
+        fm.row("", |ui, _| {
+            let warn = pal_ui(ui).warning;
+            callout(ui, warn, Icon::Warning, &problem)
+        });
     }
 }

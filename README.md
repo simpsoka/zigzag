@@ -56,12 +56,16 @@ installs it when you say (ZigZag › Check for Updates…).
 ## Download for Windows
 
 **[Download ZigZag for Windows](https://github.com/simpsoka/zigzag/releases/latest)**
-— the `ZigZag-<version>-x86_64-windows.zip` asset on the latest release.
+— the `ZigZag-<version>-x86_64-windows-setup.exe` asset on the latest release.
 
-For 64-bit Windows 10 (version 1709 or later) and Windows 11. Unzip it and
-double-click **ZigZag.exe**. Windows SmartScreen warns on apps without a
-Microsoft-trusted signature the first time they run; click *More info* →
-*Run anyway*. No Rust installation is needed.
+For 64-bit Windows 10 (version 1709 or later) and Windows 11. Run the
+installer: it needs no administrator rights, adds ZigZag to the Start menu
+and to *Open with* for SVG and stitch files, and can put `zigzag-cli` on the
+PATH. Uninstall it from Settings › Apps. The
+`ZigZag-<version>-x86_64-windows.zip` asset holds the same files without an
+installer: unzip it and double-click **ZigZag.exe**. Windows SmartScreen may
+warn the first time a download runs; click *More info* → *Run anyway*. No
+Rust installation is needed.
 
 ## Download for Linux
 
@@ -77,6 +81,28 @@ inside the extracted folder. It also includes the `zigzag` CLI and
 [Release notes and checksums](https://github.com/simpsoka/zigzag/releases/latest)
 · [Changelog](CHANGELOG.md)
 · [Publishing a release](RELEASE.md)
+
+## Privacy
+
+ZigZag works without an account, sends no usage statistics or crash reports,
+and keeps your designs on your computer unless you share them. It asks GitHub
+whether there's a newer release (Settings › General turns that off) and talks
+to zigzag.diy only when you sign in, sync or share a design. The details are
+in the [privacy policy](https://zigzag.diy/privacy/).
+
+## Code signing policy
+
+- **Mac:** releases are signed with the maintainer's Apple Developer ID and
+  notarized by Apple.
+- **Windows:** the installer and the three executables are signed in the
+  maintainer's name, verified by Microsoft
+  ([Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/)).
+  Releases up to 0.1.11 were unsigned.
+
+Windows releases are built and signed on GitHub Actions from the tagged
+source ([windows-release.yml](.github/workflows/windows-release.yml)), and
+the run fails if any of those files comes out without a valid signature.
+Nothing built anywhere else is signed.
 
 ## Build
 
@@ -107,7 +133,7 @@ zigzag/
   src/checks.rs           digitizing checks (sizes, widths, lettering, hoop, travel in sight)
   src/machine/profile.rs  machine profiles: hoops and file format, built in (profiles.json) or your own
   src/formats/            PES (+PEC), DST, EXP, JEF, VP3, Skitch PEN writers;
-                          PES/PEC/DST/EXP/JEF readers; preview; worksheet;
+                          PES/PEC/DST/EXP/JEF/VP3 readers; preview; worksheet;
                           ZigZag's stitch-plan file (plan.rs)
   src/machine/            Skitch Bluetooth protocol (+ btleplug client, `ble` feature)
   src/studio/             editor (egui on OpenGL via glow) + MCP server (`gui` feature)
@@ -243,7 +269,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Pen** (P): draw filled shapes or lines with corners and curves, or place manual stitches one by one. Snaps to the grid when it's showing, else to smart guides.
 - **Shapes** (M, L, \\): rectangles (with rounded corners), ellipses, polygons, stars and lines.
 - **Measure**, **mm grid**, **needle points**, **First/Last**, **Group colors**.
-- **Open machine files** (PES, PEC, DST, EXP, JEF) to view, resize and re-export them, and **images** to trace.
+- **Open machine files** (PES, PEC, DST, EXP, JEF, VP3) to view, resize and re-export them, or **Place** them into a design that's already open: a placed file keeps the size it was digitized at and comes in as one group named after the file (the whole name, even words that are also stitch types, like "Red Cross Logo"); **images** open to trace.
 - **Settings per type:** fill angle (with a drag-to-set **angle tool**, `A`), spacing, length, pull, underlay. Satin options: column vs border, stitch (satin, S-stitch, zig-zag), threads across the column, width, underlay passes, short stitches. Contour and ripple: rings or spiral. Cross-stitch: cell size. Tartan: the stripes (color and width each, mirrored), angle, row spacing. Run options: single or triple.
 - **Lean** in the Stitch panel, for satins: how far the stitches lean from square across the column (a few degrees keeps them from sinking between a knit's rows; more shows a slant, like a leaf's veins).
 - **Zigzag: Even** in the Stitch panel, for satins: each step along the column is shared between the stitch over and the stitch back, so both slant the same and a narrow stem's edges are clean. Off, one stitch goes straight across and the next takes the whole step.
@@ -257,7 +283,7 @@ Laid out like Illustrator, styled like a Mac app:
 - **Fabric preset, hoop, Remove overlaps and Cap order** in the Document panel. The hoop menu has the standard sizes from 1×2.5 in (20 × 60 mm) to 9.5×14 in (240 × 360 mm), the Skitch's two and Janome's A and B; Custom takes any width and height, for magnetic and other frames. Preview on your hat's color.
 - **Issues list** (status bar): problems link to the object. Satins show their rails on the canvas. Besides sizes and satin widths it checks the stitches themselves, as a shop's pre-flight check does before a file goes on the machine: stitches shorter than the document's shortest (a machine drops them), stitches over 12.1 mm, pieces between cuts too short for a trimmer to catch, and (as notes) needle points piled in one spot and thread piled too thick.
 - **Sewing order:** Earlier/Later. **Stitch player** (Space). Undo/redo everything.
-- **Save** (Ctrl/⌘ S) writes settings into the SVG; **Export** PES/DST/EXP/JEF/VP3/PEC/PEN or a **worksheet** (HTML: picture, size, time, every color stop with the nearest Brother and Janome thread); **Send to Skitch**.
+- **Save** (Ctrl/⌘ S) writes settings into the SVG; **Export** PES/DST/EXP/JEF/VP3/PEC/PEN or a **worksheet** (HTML: picture, size, time, and every color stop with a picture of what it sews, its thread from the chosen chart, stitches, trims and time); **Print Worksheet** (⌘ P) opens it in the browser to print or save as a PDF, with speed and change/trim times set on the page and an optional client proof page; **Send to Skitch**.
 - **Measuring and units.** Measure (I) works like VectorCraft's: drag between two points to read the distance, angle, width and height. The ends snap to points, edges and the hoop (or to the grid when it's on), Shift keeps the line to 45°, and the reading stays until the next drag (Escape clears it). View › Units, or the unit menu in the status bar, shows sizes, positions, distances and the grid in millimeters, centimeters, inches, points or pixels (SVG pixels, 1/96 in, as files are read); it's remembered between launches. Any length field also takes a typed unit or a sum (`1/4 in`, `25.4mm`, `10+5`). The grid (⌘') follows the unit, inches in halves down to 1/32, and labels its major lines along the canvas's top and left edges from the hoop's center. Stitch settings (spacing, density, pull compensation) stay in millimeters.
 - **Picks up where you left off.** Quit (or crash) and reopen: the same files come back, every tab with any unsaved changes, the zoom and the selection, and the same tab in front. Changes are kept as you work (`session.json` and one recovery file per tab, `recovery.svg`, `recovery-2.svg`…, in ZigZag's settings folder (`~/Library/Application Support/ZigZag` on a Mac, `%APPDATA%\ZigZag` on Windows, `~/.config/zigzag` on Linux), each written whole or not at all), never written into your file until you save. Opening the app with a file (from the command line, or with Open With on Windows and Linux) opens it in a tab on top of the ones that come back, or brings its tab forward if it was open already. With ZigZag running already, the file opens in a tab of the window that's there, which comes to the front, rather than in a second window that would bring the same session back and write over the first one's (`instance.lock` and `instance.json` in the same folder say which window is running and where it takes files). For a second window on purpose (a development build next to the installed app, say), start it with `--new-window` or with `ZIGZAG_NEW_WINDOW=1` set; it keeps its session in the same folder, so the window that writes last decides what comes back. If the app went down while bringing a document back, the next launch keeps it aside as `recovery-crashed.svg` instead of trying again (and an unreadable one as `recovery-unreadable.svg`), and says so in the status bar. A job on the Skitch comes back too: the design last sent is kept (`sent.json`), the Skitch window reopens if it was open and reconnects, and once the machine reports that design its progress shows on it again (the machine keeps the design and where the needle is; Stop ends the job on both).
 
@@ -296,6 +322,7 @@ Tools:
 - `render_preview` (returns a PNG of the stitches), `check_design`, `get_svg`, `select`
 - `review_design` (the design as an embroiderer would look it over before sewing: underlay, spacing, fill directions, empty outlines, the border, lettering size, what it costs to sew and which settings would save trims), `get_cuts` (where the thread is cut, and why), `offer_choices` (a card of choices for the person, each made with one click)
 - `export` with `objects: true` also writes `FILE.objects.json`: which object each stitch, jump and trim in the machine file is for, so a checker can name the shape behind a fault
+- `place_file` (a machine file into the open design at its digitized size, as one group named after the file; or an SVG or image)
 - `open_file` (SVG, machine file or image, in a tab of its own), `list_documents`, `switch_document`, `new_document`, `undo`, `redo`, `save`, `export` (machine formats or `html` worksheet; without a format, the one the path ends in, or else the one the document's machine reads), `send_to_skitch`, `machine_status`
 - Any tool that changes the design takes `terse: true` for a short answer (ok, the names of objects added, and the design problems that are new) instead of the whole object; on `batch` it covers every step.
 - `trace_image` (PNG, JPEG, WebP, GIF, BMP or TIFF logo → shapes, colors snapped to a thread chart), `add_outline` (a satin or running-stitch outline on a filled shape, as an object of its own), `round_corners`, `simplify` (VectorCraft's 0–100 levels, or Auto), `clean_up`, `simplify_design` (fewer threads, small details and trims for the whole design; `dry_run` to see what it comes to)
@@ -322,6 +349,7 @@ zigzag convert logo.svg -o logo.dst --min-stitch 0.4 --lock triangle:0.5:3
 zigzag convert logo.svg -o logo.exp --set "pc=0.3 ul=center"   # stitch settings (here pull compensation and satin underlay) for every object that doesn't set its own
 zigzag machines                          # list machines
 zigzag convert logo.svg -o logo.exp --objects   # and logo.exp.objects.json: which object each stitch is for
+zigzag convert frame.pes --place name.dst@0,25 --place heart.vp3 -o combined.pes   # place other files in it: machine files at their size, centered or at X,Y mm
 zigzag skitch info | status              # needs --features ble
 zigzag skitch send logo.svg --trace
 ```
@@ -465,7 +493,7 @@ Checked against Wilcom Hatch's core feature set:
 | Digitize shapes and manual stitches by hand | ✓ (pen tool) |
 | Remove overlaps, color sequencing, re-order objects | ✓ |
 | Stitch player, show needle points, grid, measure | ✓ |
-| Open and save PES, DST, EXP, JEF, VP3 | ✓ (VP3 write only) |
+| Open and save PES, DST, EXP, JEF, VP3 | ✓ |
 | Production worksheet | ✓ (HTML) |
 | Auto-digitize bitmaps | ✓ (Image Trace: flat logos, posterized photos, centre lines) |
 | Built-in embroidery fonts, monogramming, multi-hooping, motif/pattern fills, 3D foam | not yet |

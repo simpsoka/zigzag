@@ -1,0 +1,29 @@
+Hershey Sans and Hershey Script: the Hershey Fonts, from the SVG fonts
+prepared by Windell H. Oskay (www.evilmadscientist.com) as shipped with
+Inkscape (https://gitlab.com/inkscape/extensions, svg_fonts/), adapted
+from emergent.unpythonic.net/software/hershey by way of "Hershey Fonts in
+SVG" by Marty McGuire. Converted to TrueType for ZigZag (each stroke
+written out and back along itself) by tools/fonts/single_line.py.
+
+The Hershey Fonts are a set of vector fonts with a liberal license.
+
+USE RESTRICTION:
+    This distribution of the Hershey Fonts may be used by anyone for
+    any purpose, commercial or otherwise, providing that:
+        1. The following acknowledgements must be distributed with
+            the font data:
+            - The Hershey Fonts were originally created by Dr.
+                A. V. Hershey while working at the U. S.
+                National Bureau of Standards.
+            - The format of the Font data in this distribution
+                was originally created by
+                    James Hurt
+                    Cognition, Inc.
+                    900 Technology Park Drive
+                    Billerica, MA 01821
+                    (mit-eddie!ci-dandelion!hurt)
+        2. The font data in this distribution may be converted into
+            any other format *EXCEPT* the format distributed by
+            the U.S. NTIS where each point is described
+            in eight bytes as "xxx yyy:", where xxx and yyy are
+            the coordinate values as ASCII numbers.

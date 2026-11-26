@@ -269,7 +269,7 @@ pub fn drawn_column(s: &Shape) -> Option<Rails> {
     let Geometry::Stroke { lines, .. } = &s.geometry else {
         return None;
     };
-    (s.params.kind == Some(Kind::Satin) && !s.outline && lines.len() >= 2)
+    (s.params.kind == Some(Kind::Satin) && !s.outline && !s.is_single_line() && lines.len() >= 2)
         .then(|| satin::rails_from_subpaths(lines, s.params.satin_rails()))
         .flatten()
 }

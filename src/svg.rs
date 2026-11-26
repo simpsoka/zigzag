@@ -72,6 +72,42 @@ pub struct Shape {
     pub joined: Vec<usize>,
 }
 
+impl Shape {
+    /// Lettering in a single-line font (see `retraced`): lines that are a
+    /// fill's. Each line is a stroke of a letter, sewn along itself; never
+    /// two of them the rails of one column.
+    pub fn is_single_line(&self) -> bool {
+        self.part == Part::Fill && matches!(self.geometry, Geometry::Stroke { .. })
+    }
+
+    /// Only keep an explicit off setting when a group would turn it on.
+    pub fn trim_before_setting(&self, on: bool) -> Option<bool> {
+        if on {
+            return Some(true);
+        }
+        let base = || {
+            self.groups
+                .iter()
+                .rev()
+                .find_map(|id| Params::parse(id).trim_before)
+        };
+        let inherited = if self.part == Part::Stroke {
+            self.inherited_stroke_trim_before().or_else(base)
+        } else {
+            base()
+        };
+        (inherited == Some(true)).then_some(false)
+    }
+
+    /// A stroke-specific group setting takes precedence over plain tokens.
+    pub(crate) fn inherited_stroke_trim_before(&self) -> Option<bool> {
+        self.groups
+            .iter()
+            .rev()
+            .find_map(|id| stroke_only(id).trim_before)
+    }
+}
+
 /// ZigZag's own wrapper groups (placed artwork, pastes, lettering, pen
 /// drawings) aren't groups the user made.
 pub fn is_wrapper_group(id: &str) -> bool {
@@ -155,9 +191,120 @@ pub fn fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
         // Loading system fonts is slow; do it once per process.
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
+        // (And the ones that come with ZigZag, and the app's own named
+        // before there was a database.)
+        let bundled = bundled_font_dir().map(|d| font_files(&d)).unwrap_or_default();
+        for f in bundled.into_iter().chain(std::mem::take(&mut *waiting_fonts())) {
+            let _ = db.load_font_file(f);
+        }
         std::sync::Arc::new(db)
     })
     .clone()
+}
+
+/// The fonts that come with ZigZag: a `fonts` folder (with its list,
+/// `fonts.json`) in the Mac app's Resources, or beside the program
+/// elsewhere; in a debug build, the source tree's. `ZIGZAG_FONT_DIR` names
+/// another folder of font files instead (the letter census uses it to try
+/// fonts that aren't installed).
+pub fn bundled_font_dir() -> Option<std::path::PathBuf> {
+    if let Some(d) = std::env::var_os("ZIGZAG_FONT_DIR") {
+        return Some(d.into());
+    }
+    let exe = std::env::current_exe().ok()?;
+    let by_exe = exe.parent()?;
+    #[allow(unused_mut)]
+    let mut places = vec![by_exe.join("../Resources/fonts"), by_exe.join("fonts")];
+    // (Not in a release build: that would name the folder it was built in.)
+    #[cfg(debug_assertions)]
+    places.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts"));
+    places.into_iter().find(|p| p.join("fonts.json").is_file())
+}
+
+/// Every font file (TTF, OTF, TTC) in `dir` and the folders in it, sorted.
+pub fn font_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut entries: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            out.extend(font_files(&p));
+        } else if p
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
+        {
+            out.push(p);
+        }
+    }
+    out
+}
+
+fn waiting_fonts() -> std::sync::MutexGuard<'static, Vec<std::path::PathBuf>> {
+    static FILES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    FILES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Font files lettering should always have: the fonts an app ships with,
+/// or keeps from earlier downloads. Named at launch, before anything is
+/// parsed, and cheap: if the system's fonts haven't been read yet, these
+/// are read along with them (so nothing parsed can miss them); if they
+/// have, they're added now ([`add_fonts`]).
+pub fn use_fonts(files: Vec<std::path::PathBuf>) {
+    {
+        let cell = fonts_cell().write().unwrap_or_else(|e| e.into_inner());
+        if cell.is_none() {
+            waiting_fonts().extend(files);
+            return;
+        }
+    }
+    add_fonts(&files);
+}
+
+/// How many font faces lettering can use: it changes when fonts are added,
+/// so what was measured in a font that wasn't there yet can be measured
+/// again.
+pub fn font_faces() -> usize {
+    fontdb().len()
+}
+
+/// The characters of `text` that font `family` has no glyph for, each
+/// once, in order (none if the family itself isn't there: that's another
+/// matter). Such a character is drawn as the font's missing-character box
+/// (see `parse_tree`).
+pub fn font_lacks(family: &str, text: &str) -> Vec<char> {
+    let db = fontdb();
+    let query = usvg::fontdb::Query {
+        families: &[usvg::fontdb::Family::Name(family)],
+        ..Default::default()
+    };
+    let Some(id) = db.query(&query) else {
+        return Vec::new();
+    };
+    db.with_face_data(id, |data, idx| {
+        let Ok(face) = ttf_parser::Face::parse(data, idx) else {
+            return Vec::new();
+        };
+        let mut out: Vec<char> = Vec::new();
+        for c in text.chars() {
+            // (Not what's never drawn anyway: joiners, soft hyphens,
+            // variation selectors.)
+            let unseen = matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{2060}' | '\u{fe00}'..='\u{fe0f}');
+            if !c.is_whitespace()
+                && !c.is_control()
+                && !unseen
+                && face.glyph_index(c).is_none()
+                && !out.contains(&c)
+            {
+                out.push(c);
+            }
+        }
+        out
+    })
+    .unwrap_or_default()
 }
 
 fn fonts_cell() -> &'static std::sync::RwLock<Option<std::sync::Arc<usvg::fontdb::Database>>> {
@@ -211,11 +358,97 @@ fn bytes_may_have_text(data: &[u8]) -> bool {
 }
 
 pub fn parse_tree(data: &[u8]) -> Result<usvg::Tree> {
-    let opt = usvg::Options {
-        fontdb: fontdb_if(bytes_may_have_text(data)),
+    let may_have_text = bytes_may_have_text(data);
+    let doc = may_have_text
+        .then(|| std::str::from_utf8(data).ok())
+        .flatten()
+        .and_then(|t| roxmltree::Document::parse(t).ok());
+    let opt = text_options(doc.as_ref(), may_have_text);
+    usvg::Tree::from_data(data, &opt).context("parsing SVG")
+}
+
+/// How an SVG's text is read: with the fonts there are (if it may have
+/// any text), and a character the text's font hasn't got left as the
+/// font's own missing-character box, the letters round it staying in the
+/// font. (Left to itself, usvg sets the whole text in another font that
+/// has the character: one curly apostrophe, and a single-line font's
+/// letters come back as some other font's outlines.) Text its font has
+/// none of, Japanese in a Latin font say, is still set in one that does.
+/// `doc`: the SVG, where it could be read here.
+fn text_options(doc: Option<&roxmltree::Document>, may_have_text: bool) -> usvg::Options<'static> {
+    let mut opt = usvg::Options {
+        fontdb: fontdb_if(may_have_text),
         ..usvg::Options::default()
     };
-    usvg::Tree::from_data(data, &opt).context("parsing SVG")
+    if may_have_text && let Some(keep) = doc.map(stand_in_chars) {
+        let usual = usvg::FontResolver::default_fallback_selector();
+        opt.font_resolver.select_fallback = Box::new(move |c, used, db| {
+            if keep.contains(&c) {
+                usual(c, used, db)
+            } else {
+                None
+            }
+        });
+    }
+    opt
+}
+
+/// The font each text of an SVG names (the first of its list, not `serif`
+/// and the like) with the text it's named on: all that's inside the
+/// `text`, `tspan` or `textPath` naming it.
+pub fn named_fonts(doc: &roxmltree::Document) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for n in doc.descendants().filter(|n| {
+        n.is_element() && matches!(n.tag_name().name(), "text" | "tspan" | "textPath")
+    }) {
+        let from_style = n.attribute("style").and_then(|st| {
+            st.split(';').find_map(|d| {
+                let (k, v) = d.split_once(':')?;
+                (k.trim() == "font-family").then_some(v)
+            })
+        });
+        let Some(list) = from_style.or(n.attribute("font-family")) else {
+            continue;
+        };
+        let first = list.split(',').next().unwrap_or("").trim();
+        let name = first.trim_matches(|c| c == '"' || c == '\'').trim();
+        let generic = [
+            "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
+        ];
+        if name.is_empty() || generic.iter().any(|g| g.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let text: String = n
+            .descendants()
+            .filter(|t| t.is_text())
+            .filter_map(|t| t.text())
+            .collect();
+        out.push((name.to_string(), text));
+    }
+    out
+}
+
+/// The characters that may still be drawn in a stand-in font: those of
+/// text whose own font has none of its characters (or isn't here at all,
+/// and is a stand-in already).
+fn stand_in_chars(doc: &roxmltree::Document) -> std::collections::HashSet<char> {
+    let db = fontdb();
+    let mut keep = std::collections::HashSet::new();
+    for (font, text) in named_fonts(doc) {
+        let seen = |c: &char| !c.is_whitespace() && !c.is_control();
+        let here = db
+            .query(&usvg::fontdb::Query {
+                families: &[usvg::fontdb::Family::Name(&font)],
+                ..Default::default()
+            })
+            .is_some();
+        let lacks = font_lacks(&font, &text);
+        let all: std::collections::HashSet<char> = text.chars().filter(seen).collect();
+        if !here || lacks.len() == all.len() {
+            keep.extend(all);
+        }
+    }
+    keep
 }
 
 pub fn load(data: &[u8]) -> Result<Vec<Shape>> {
@@ -249,10 +482,7 @@ pub fn load_with_tree_and<T>(
             let may_have_text = doc
                 .descendants()
                 .any(|n| matches!(n.tag_name().name(), "text" | "image"));
-            let opt = usvg::Options {
-                fontdb: fontdb_if(may_have_text),
-                ..usvg::Options::default()
-            };
+            let opt = text_options(Some(doc), may_have_text);
             (
                 usvg::Tree::from_xmltree(doc, &opt).context("parsing SVG")?,
                 layer_ids_in(doc),
@@ -420,7 +650,14 @@ fn import_path(path: &usvg::Path, inherited: &Inherit, out: &mut Vec<Shape>) {
         } else {
             ctx.base.clone()
         };
-        let params = base.merged(&ctx.stroke);
+        let params = Params {
+            // A route belongs to the element's own sewn part, not its group.
+            // For a stroke-only element its unprefixed route is the stroke's.
+            via: ctx.stroke.via.clone().or_else(|| {
+                if filled { None } else { ctx.base.via.clone() }
+            }),
+            ..base.merged(&ctx.stroke)
+        };
         let width = params
             .width
             .map(|w| w * 10.0)
@@ -469,13 +706,37 @@ fn import_text(text: &usvg::Text, inherited: &Inherit, out: &mut Vec<Shape>) {
     // included: usvg 0.50 made it absolute.)
     collect_glyphs(text.flattened(), &mut rings, &mut color);
     if !rings.is_empty() {
-        let params = Params {
+        let mut params = Params {
             kind: Some(ctx.base.kind.unwrap_or(Kind::Fill)),
             ..ctx.base.clone()
         };
-        let geometry = Geometry::Fill {
-            rings,
-            rule: FillRule::NonZero,
+        // A single-line font (for running stitch: Hershey, the EMS fonts)
+        // draws each stroke out and back along itself, as a font's
+        // outlines have to be closed: its letters are lines, not areas.
+        let lines: Option<Vec<(Polyline, bool)>> = rings
+            .iter()
+            .map(|r| retraced(r).map(|l| (l, false)))
+            .collect();
+        let geometry = match lines {
+            Some(lines) => {
+                // (Sewn along the line: a run, unless a stitch that follows
+                // a line was asked for, satin say, a narrow column.)
+                if matches!(
+                    params.kind,
+                    Some(Kind::Fill | Kind::Contour | Kind::Applique | Kind::Meander | Kind::Ripple | Kind::Cross | Kind::Tartan)
+                ) {
+                    params.kind = Some(Kind::Run);
+                }
+                Geometry::Stroke {
+                    lines,
+                    width: params.width.map(|w| w * 10.0).unwrap_or(SINGLE_LINE_SATIN),
+                }
+            }
+            None => Geometry::Fill {
+                // (A stray line among outlines has no area to sew.)
+                rings: rings.into_iter().filter(|r| r.len() >= 3).collect(),
+                rule: FillRule::NonZero,
+            },
         };
         if let Some(made) = push(
             out,
@@ -491,6 +752,22 @@ fn import_text(text: &usvg::Text, inherited: &Inherit, out: &mut Vec<Shape>) {
     }
 }
 
+/// How wide a single-line font's strokes are sewn as satin, units.
+const SINGLE_LINE_SATIN: f64 = 8.0;
+
+/// The line a glyph contour traces out and back along (a single-line
+/// font's stroke), or None for an outline around an area. A contour whose
+/// points come back the way they went: `a b c b` is the line `a b c`.
+fn retraced(ring: &[P]) -> Option<Polyline> {
+    let n = ring.len();
+    if n < 2 {
+        return None;
+    }
+    // (Within 0.05 mm: the way back is flattened from the same curves.)
+    let ok = (1..n).all(|i| ring[i].dist(ring[n - i]) < 0.5);
+    ok.then(|| ring[..=n / 2].to_vec())
+}
+
 fn collect_glyphs(g: &usvg::Group, rings: &mut Vec<Polyline>, color: &mut Option<[u8; 3]>) {
     for node in g.children() {
         match node {
@@ -503,7 +780,7 @@ fn collect_glyphs(g: &usvg::Group, rings: &mut Vec<Polyline>, color: &mut Option
                         flatten_path(p.data(), ts)
                             .into_iter()
                             .map(|(r, _)| r)
-                            .filter(|r| r.len() >= 3),
+                            .filter(|r| r.len() >= 2),
                     );
                 }
             }
@@ -757,5 +1034,165 @@ mod added_fonts_tests {
                 .any(|f| matches!(&f.source, usvg::fontdb::Source::File(p) if p == &copy))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fonts that come with ZigZag are there with nothing installed
+    /// (from the source tree's `fonts` in a debug build).
+    #[test]
+    fn the_bundled_fonts_are_there() {
+        if std::env::var_os("ZIGZAG_FONT_DIR").is_some() {
+            return;
+        }
+        let fams = crate::document::font_families();
+        for f in ["Bebas Neue", "Sacramento", "Hershey Sans", "Relief SingleLine"] {
+            assert!(fams.iter().any(|n| n == f), "{f} isn't there");
+        }
+    }
+
+    fn text_in(font: &str, id: &str, text: &str) -> Vec<Shape> {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="40mm" viewBox="0 0 80 40"><text id="{id}" x="4" y="28" font-family="{font}" font-size="21" fill="#000000">{text}</text></svg>"##
+        );
+        load(svg.as_bytes()).unwrap()
+    }
+
+    /// A single-line font's letters are lines (each stroke drawn out and
+    /// back, as a font has to), sewn as a run; an ordinary font's are
+    /// areas.
+    #[test]
+    fn single_line_lettering_is_lines() {
+        if std::env::var_os("ZIGZAG_FONT_DIR").is_some() {
+            return;
+        }
+        let s = text_in("Hershey Sans", "fill", "HAx");
+        assert_eq!(s.len(), 1);
+        let Geometry::Stroke { lines, .. } = &s[0].geometry else {
+            panic!("not lines: {:?}", s[0].geometry);
+        };
+        // H 3 strokes, A 3, x 2.
+        assert_eq!(lines.len(), 8);
+        assert_eq!(s[0].params.kind, Some(Kind::Run));
+        // (Satin asked for: a narrow column along each stroke.)
+        assert_eq!(text_in("Hershey Sans", "satin", "H")[0].params.kind, Some(Kind::Satin));
+        let b = text_in("Bebas Neue", "fill", "H");
+        assert!(matches!(b[0].geometry, Geometry::Fill { .. }));
+        // A plain outline is never taken for a line.
+        assert!(retraced(&[P::new(0.0, 0.0), P::new(10.0, 0.0), P::new(10.0, 10.0)]).is_none());
+        assert_eq!(
+            retraced(&[P::new(0.0, 0.0), P::new(10.0, 0.0), P::new(10.0, 10.0), P::new(10.0, 0.0)]),
+            Some(vec![P::new(0.0, 0.0), P::new(10.0, 0.0), P::new(10.0, 10.0)])
+        );
+    }
+
+    /// A character the font hasn't got is found, and is left as the font's
+    /// missing-character box with the letters round it still the font's
+    /// (not the whole text set in another font that has it); and a full
+    /// stop or the dot of an i, short as its stroke is, is sewn.
+    #[test]
+    fn a_missing_character_is_found_and_dots_are_sewn() {
+        if std::env::var_os("ZIGZAG_FONT_DIR").is_some() {
+            return;
+        }
+        assert_eq!(font_lacks("Hershey Sans", "H\u{2019}s H\u{2019}"), ['\u{2019}']);
+        assert!(font_lacks("Hershey Sans", "Mom's Caf\u{e9}").is_empty());
+        assert!(font_lacks("No Such Font Anywhere", "\u{2605}").is_empty());
+        // Still a single-line font's lines, the H and the s as they are
+        // without the apostrophe between them.
+        let with = text_in("Hershey Sans", "fill", "H\u{2019}s");
+        let Geometry::Stroke { lines, .. } = &with[0].geometry else {
+            panic!("set in another font: {:?}", with[0].geometry);
+        };
+        let Geometry::Stroke { lines: plain, .. } = &text_in("Hershey Sans", "fill", "Hs")[0].geometry
+        else {
+            unreachable!()
+        };
+        assert!(lines.len() >= plain.len(), "{} vs {}", lines.len(), plain.len());
+        assert_eq!(lines[..3], plain[..3], "the H is Hershey's");
+        // An ordinary font keeps its own letters too.
+        let star = text_in("Bebas Neue", "fill", "H\u{2605}");
+        let h = text_in("Bebas Neue", "fill", "H");
+        let (Geometry::Fill { rings: a, .. }, Geometry::Fill { rings: b, .. }) =
+            (&star[0].geometry, &h[0].geometry)
+        else {
+            panic!("not outlines");
+        };
+        assert_eq!(a[0], b[0], "the H is Bebas Neue's");
+        for font in ["EMS Tech", "EMS Allure", "Hershey Sans"] {
+            for (text, size) in [(".", 21), (":", 11), ("i", 11)] {
+                let svg = format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="40mm" viewBox="0 0 80 40"><text id="fill" x="4" y="28" font-family="{font}" font-size="{size}" fill="#000000">{text}</text></svg>"##
+                );
+                let shapes = load(svg.as_bytes()).unwrap();
+                let Geometry::Stroke { lines, .. } = &shapes[0].geometry else {
+                    panic!("{font}: not lines");
+                };
+                let plain: Vec<Polyline> = lines.iter().map(|(l, _)| l.clone()).collect();
+                let sewn = crate::stitch::stroke::joined(&plain, 5.0);
+                assert_eq!(sewn.len(), lines.len(), "{font} {text:?}: a stroke was dropped");
+                let d = crate::design::plan("t", &shapes, &crate::design::PlanOptions::default());
+                assert!(d.stitch_count() >= 2 * lines.len(), "{font} {text:?}: {}", d.stitch_count());
+            }
+        }
+    }
+
+    /// Each letter of a single-line font in one piece of thread: its
+    /// strokes touch or cross, and it goes back along one where they
+    /// branch rather than cutting the thread.
+    #[test]
+    fn single_line_satin_lettering_is_a_narrow_column_along_each_stroke() {
+        if std::env::var_os("ZIGZAG_FONT_DIR").is_some() {
+            return;
+        }
+        for font in ["Hershey Sans", "EMS Readability", "Relief SingleLine"] {
+            let shapes = text_in(font, "satin", "Text");
+            assert!(shapes[0].is_single_line(), "{font}");
+            let Geometry::Stroke { lines, .. } = &shapes[0].geometry else {
+                unreachable!()
+            };
+            let d = crate::design::plan("t", &shapes, &crate::design::PlanOptions::default());
+            assert!(d.stitch_count() > 20, "{font}");
+            // Every needle point lies by a stroke: within the column's
+            // half-width (0.4 mm) and the pull, never across from one
+            // stroke to another (two strokes read as one satin's rails).
+            let near = |p: P| {
+                lines.iter().flat_map(|(l, _)| l.windows(2)).any(|w| {
+                    let (a, b) = (w[0], w[1]);
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    let len = dx * dx + dy * dy;
+                    let t = if len > 0.0 {
+                        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    p.dist(P::new(a.x + t * dx, a.y + t * dy)) < 8.0
+                })
+            };
+            for b in &d.blocks {
+                for r in &b.runs {
+                    // (A jump's ends are on strokes; what's between is travel.)
+                    let far = r.pts.iter().filter(|&&p| !near(p)).count();
+                    assert!(far == 0, "{font}: {far} needle points off the strokes");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_line_letters_sew_without_trims() {
+        if std::env::var_os("ZIGZAG_FONT_DIR").is_some() {
+            return;
+        }
+        for (font, letters) in [
+            ("Hershey Sans", "HAEKkxt4"),
+            ("EMS Readability", "HAEkxt4"),
+            ("Relief SingleLine", "HAExt4"),
+        ] {
+            for ch in letters.chars() {
+                let shapes = text_in(font, "fill", &ch.to_string());
+                let d = crate::design::plan("t", &shapes, &crate::design::PlanOptions::default());
+                assert_eq!(d.trim_count(), 0, "{font} {ch}");
+                assert!(d.stitch_count() > 5, "{font} {ch}");
+            }
+        }
     }
 }

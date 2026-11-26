@@ -13,7 +13,7 @@ use crate::route::Zone;
 use crate::stitch::fill::{FillParams, tatami};
 use crate::stitch::satin::{self, Rails, SatinParams};
 use crate::stitch::stroke::running;
-use crate::svg::{Geometry, Shape};
+use crate::svg::{Geometry, Part, Shape};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1196,6 +1196,7 @@ fn satin_rails_sewn(shape: &Shape) -> Vec<Result<Sewn, (Vec<Polyline>, String)>>
             // (A shape's outline is sewn along each of its edges: a shape
             // in two parts, or with a hole, isn't a column between them.)
             if !shape.outline
+                && !shape.is_single_line()
                 && let Some(r) = satin::rails_from_subpaths(lines, p.satin_rails())
             {
                 return vec![alone(r)];
@@ -1693,6 +1694,78 @@ fn mean_width(r: &Rails) -> f64 {
     ps.iter().map(|(a, b)| a.dist(*b)).sum::<f64>() / ps.len().max(1) as f64
 }
 
+/// The shape's motif in design units (see [`crate::stitch::motif`]): its
+/// lines moved so their top-left corner is the tile's, the tile their size
+/// unless it's set.
+pub fn shape_motif(p: &Params) -> Option<crate::stitch::motif::Motif> {
+    let lines = p.motif.as_ref()?;
+    let pts = lines.iter().flatten();
+    let lo = (pts.clone()).fold((f64::INFINITY, f64::INFINITY), |a, q| {
+        (a.0.min(q.0), a.1.min(q.1))
+    });
+    let hi = pts.fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |a, q| {
+        (a.0.max(q.0), a.1.max(q.1))
+    });
+    let (w, h) = p.tile.unwrap_or((hi.0 - lo.0, hi.1 - lo.1));
+    let m = crate::stitch::motif::Motif {
+        lines: lines
+            .iter()
+            .map(|l| l.iter().map(|&(x, y)| P::new(mm(x - lo.0), mm(y - lo.1))).collect())
+            .collect(),
+        w: mm(w),
+        h: mm(h),
+        layout: p.layout.unwrap_or_default(),
+    };
+    m.usable().then_some(m)
+}
+
+/// A drawing as a motif's lines (mm, to a hundredth, from its top-left
+/// corner): a line's points, a closed ring back to its first. What Use as
+/// Motif keeps of the object it's given.
+pub fn motif_lines(g: &Geometry) -> Vec<Vec<(f64, f64)>> {
+    let lines: Vec<Polyline> = match g {
+        Geometry::Stroke { lines, .. } => lines
+            .iter()
+            .map(|(l, closed)| {
+                let mut l = l.clone();
+                if *closed && l.len() > 2 {
+                    l.push(l[0]);
+                }
+                l
+            })
+            .collect(),
+        Geometry::Fill { rings, .. } => rings
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                if r.len() > 2 {
+                    r.push(r[0]);
+                }
+                r
+            })
+            .collect(),
+    };
+    let pts = lines.iter().flatten();
+    let lo = pts.fold(P::new(f64::INFINITY, f64::INFINITY), |a, q| {
+        P::new(a.x.min(q.x), a.y.min(q.y))
+    });
+    let round = |v: f64| (v / 10.0 * 100.0).round() / 100.0;
+    lines
+        .iter()
+        .map(|l| {
+            let mut out: Vec<(f64, f64)> = Vec::new();
+            for q in l {
+                let p = (round(q.x - lo.x), round(q.y - lo.y));
+                if out.last() != Some(&p) {
+                    out.push(p);
+                }
+            }
+            out
+        })
+        .filter(|l| l.len() >= 2)
+        .collect()
+}
+
 fn fill_runs(
     rings: &[Polyline],
     rule: FillRule,
@@ -1725,6 +1798,7 @@ fn fill_runs(
             bottom_up: opt.hat_order,
             min_stitch: opt.min_stitch,
             origin: shape.origin,
+            pattern: None,
         };
         let u: Vec<Piece> = tatami(rings, rule, &under)
             .into_iter()
@@ -1734,6 +1808,7 @@ fn fill_runs(
             groups.push(u);
         }
     }
+    let top_pattern = shape_motif(p);
     let top = FillParams {
         angle,
         spacing: mm(p.fill_spacing(f)),
@@ -1744,6 +1819,7 @@ fn fill_runs(
         bottom_up: opt.hat_order,
         min_stitch: opt.min_stitch,
         origin: shape.origin,
+        pattern: top_pattern,
     };
     groups.push(
         tatami(rings, rule, &top)
@@ -2320,6 +2396,11 @@ fn shape_runs_guarded(
     }
 }
 
+/// How near a single-line font's strokes must come to be one (units:
+/// 0.5 mm, a gap a stitch hides): where one ends on another, or they
+/// cross.
+const SINGLE_LINE_MEET: f64 = 5.0;
+
 fn shape_runs(
     shape: &Shape,
     geometry: &Geometry,
@@ -2333,10 +2414,47 @@ fn shape_runs(
         (_, Kind::Skip) => ShapeRuns::new(Vec::new(), None),
         (_, Kind::Manual) => ShapeRuns::new(manual_pieces(geometry), None),
         (_, Kind::Blanket) => ShapeRuns::new(vec![blanket_pieces(shape, geometry)], None),
-        (Geometry::Fill { rings, rule }, Kind::Fill) => ShapeRuns::new(
-            fill_runs(rings, *rule, shape, opt),
-            Some((rings.clone(), *rule)),
-        ),
+        (Geometry::Fill { rings, rule }, Kind::Fill) => {
+            if let Some(m) = shape_motif(p) {
+                notes.extend(crate::stitch::motif::problems(
+                    &m,
+                    true,
+                    p.fill_angle().to_radians(),
+                ));
+            }
+            ShapeRuns::new(
+                fill_runs(rings, *rule, shape, opt),
+                Some((rings.clone(), *rule)),
+            )
+        }
+        (Geometry::Fill { rings, rule }, Kind::Motif) => {
+            let Some(m) = shape_motif(p) else {
+                // (Filled as usual: an artwork's group called "motif" is
+                // read as asking for one, and should still sew.)
+                notes.push(
+                    "A motif fill with no motif is filled instead: draw one and \
+                     use Use as Motif."
+                        .to_string(),
+                );
+                return ShapeRuns::new(
+                    fill_runs(rings, *rule, shape, opt),
+                    Some((rings.clone(), *rule)),
+                );
+            };
+            notes.extend(crate::stitch::motif::problems(&m, false, 0.0));
+            let rows = crate::stitch::motif::motif_fill(
+                rings,
+                *rule,
+                &m,
+                shape.origin,
+                mm(p.run_len(f)),
+                mm(1.0),
+            );
+            ShapeRuns::new(
+                vec![rows.into_iter().map(Piece::reversible).collect()],
+                Some((rings.clone(), *rule)),
+            )
+        }
         (Geometry::Fill { rings, rule }, Kind::Contour) => ShapeRuns::new(
             if p.spiral == Some(true) {
                 spiral_runs(rings, *rule, shape, opt)
@@ -2395,6 +2513,17 @@ fn shape_runs(
                         Piece::reversible(run)
                     }
                 })
+                .collect();
+            ShapeRuns::new(vec![pieces], None)
+        }
+        (Geometry::Stroke { lines, .. }, _) if shape.part == Part::Fill => {
+            // Lettering in a single-line font (the only lines that are a
+            // fill's: see `svg::retraced`): each letter's strokes in one
+            // piece of thread, going back along a stroke where they branch.
+            let plain: Vec<Polyline> = lines.iter().map(|(l, _)| l.clone()).collect();
+            let pieces = crate::stitch::stroke::joined(&plain, SINGLE_LINE_MEET)
+                .iter()
+                .map(|l| Piece::reversible(running(l, false, mm(p.run_len(f)), p.run_repeats())))
                 .collect();
             ShapeRuns::new(vec![pieces], None)
         }
@@ -2741,6 +2870,7 @@ fn satin_column(s: &Shape) -> Option<(&Vec<(Polyline, bool)>, f64)> {
         Geometry::Stroke { lines, width }
             if p.kind == Some(Kind::Satin)
                 && !s.outline
+                && !s.is_single_line()
                 && !s.groups.is_empty()
                 && p.start.is_none()
                 && p.end.is_none()
@@ -2760,7 +2890,7 @@ fn joined_satin(shapes: &[Shape], order: &[usize], pos: usize) -> Option<(Vec<us
     // (Settings but for what happens after: that's the last one's to say.)
     let settings_of = |s: &Shape| {
         let mut p = s.params.clone();
-        (p.trim, p.stop) = (None, None);
+        (p.trim, p.stop, p.trim_before) = (None, None, None);
         format!("{p:?}")
     };
     let ends = |s: &Shape| s.params.trim == Some(true) || s.params.stop == Some(true);
@@ -2769,6 +2899,7 @@ fn joined_satin(shapes: &[Shape], order: &[usize], pos: usize) -> Option<(Vec<us
     for &j in &order[pos..] {
         let s = &shapes[j];
         if column(s).is_none()
+            || (!members.is_empty() && s.params.trim_before == Some(true))
             || s.groups != first.groups
             || s.color != first.color
             || settings_of(s) != settings
@@ -2984,6 +3115,7 @@ fn shorten_travel(shapes: &[Shape], order: &mut [usize]) {
             && p.start.is_none()
             && p.end.is_none()
             && p.trim != Some(true)
+            && p.trim_before != Some(true)
             && p.stop != Some(true)
             && p.colors.as_ref().is_none_or(|c| c.len() < 2)
             && satin_column(s).is_none()
@@ -3522,6 +3654,8 @@ fn plan_shown(name: &str, shapes: &[Shape], opt: &PlanOptions, cache: &mut PlanC
             design.block_shapes.push(Vec::new());
             design.stitch_shapes.push(Vec::new());
         }
+        // Consume this request only at the first sewn piece, alongside any prior cut.
+        force_trim |= shape.params.trim_before == Some(true);
         let last_group = sr.groups.iter().rposition(|g| !g.is_empty()).unwrap_or(0);
         let tops = sr.tops.clone();
         // The object sewn next in the same thread, if nothing says to cut
@@ -3535,6 +3669,7 @@ fn plan_shown(name: &str, shapes: &[Shape], opt: &PlanOptions, cache: &mut PlanC
                 shapes[j].color == shape.color
                     && sr.colors.is_empty()
                     && sr.stops.is_empty()
+                    && shapes[j].params.trim_before != Some(true)
                     && shape.params.trim != Some(true)
                     && shape.params.stop != Some(true)
             })
@@ -6047,6 +6182,62 @@ impl Design {
             .sum()
     }
 
+    /// Remove inter-object travel from a temporary transform preview when
+    /// exactly one endpoint moves. The real plan is regenerated on release.
+    /// Do this before splitting blocks, while travel indices still refer to
+    /// the original runs. Keep the endpoints and every object's own stitches.
+    pub fn hide_crossing_travel(&mut self, picked: &[usize]) -> bool {
+        use std::collections::BTreeMap;
+        let mut gaps = BTreeMap::<(usize, usize), Vec<std::ops::Range<usize>>>::new();
+        let picked: std::collections::HashSet<_> = picked.iter().copied().collect();
+        for t in &self.travels {
+            let Some(spans) = self.stitch_shapes.get(t.block).and_then(|b| b.get(t.run)) else {
+                continue;
+            };
+            let Some(run) = self.blocks.get(t.block).and_then(|b| b.runs.get(t.run)) else {
+                continue;
+            };
+            if t.to >= run.pts.len() || t.from.saturating_add(1) >= t.to {
+                continue;
+            }
+            let owner = |at| {
+                spans
+                    .partition_point(|&(start, _)| start <= at)
+                    .checked_sub(1)
+                    .map(|i| spans[i].1)
+            };
+            if let (Some(a), Some(b)) = (owner(t.from), owner(t.to))
+                && picked.contains(&a) != picked.contains(&b)
+            {
+                gaps.entry((t.block, t.run))
+                    .or_default()
+                    .push(t.from + 1..t.to);
+            }
+        }
+        let any = !gaps.is_empty();
+        for ((b, r), ranges) in gaps {
+            let run = &mut self.blocks[b].runs[r];
+            let mut remove = vec![false; run.pts.len()];
+            for range in ranges {
+                remove[range].fill(true);
+            }
+            let mut kept = vec![0; remove.len() + 1];
+            for (i, &gone) in remove.iter().enumerate() {
+                kept[i + 1] = kept[i] + usize::from(!gone);
+            }
+            for (at, _) in &mut self.stitch_shapes[b][r] {
+                *at = kept[(*at).min(remove.len())];
+            }
+            let mut i = 0;
+            run.pts.retain(|_| {
+                let keep = !remove[i];
+                i += 1;
+                keep
+            });
+        }
+        any
+    }
+
     /// Put the stitches of the input shapes `picked` (see
     /// [`Design::stitch_shapes`]) in blocks of their own: a block with
     /// their stitches and others' becomes two in the same thread, the
@@ -6206,7 +6397,13 @@ mod tests {
     fn shape(geometry: Geometry, kind: Kind, color: [u8; 3]) -> Shape {
         Shape {
             id: String::new(),
-            part: Part::Fill,
+            // (As read from a drawing: a path's lines are its stroke. Lines
+            // that are a fill's are single-line lettering.)
+            part: if matches!(geometry, Geometry::Stroke { .. }) {
+                Part::Stroke
+            } else {
+                Part::Fill
+            },
             label: String::new(),
             color,
             paint: color,
@@ -6572,6 +6769,75 @@ mod tests {
         // Inside a square, the spiral is clipped at the corners into a few
         // pieces joined by travel, not cuts.
         assert_eq!(d.trim_count(), 0);
+    }
+
+    fn all_points(d: &Design) -> Vec<P> {
+        d.blocks
+            .iter()
+            .flat_map(|b| &b.runs)
+            .flat_map(|r| r.pts.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn a_patterned_fill_puts_needles_on_its_motif_lines() {
+        // Vertical lines 4 mm apart: every row goes down on each.
+        let on_lines = |d: &Design| {
+            all_points(d)
+                .iter()
+                .filter(|p| (p.x - (p.x / 40.0).round() * 40.0).abs() < 0.3)
+                .count()
+        };
+        let plain = plan(
+            "t",
+            &[shape(fill(sq(0.0, 0.0, 300.0)), Kind::Fill, [0, 0, 0])],
+            &PlanOptions::default(),
+        );
+        let mut s = shape(fill(sq(0.0, 0.0, 300.0)), Kind::Fill, [0, 0, 0]);
+        s.params.motif = Some(vec![vec![(0.0, 0.0), (0.0, 4.0)]]);
+        s.params.tile = Some((4.0, 4.0));
+        s.params.layout = Some(crate::stitch::motif::Layout::Grid);
+        let d = plan("t", &[s.clone()], &PlanOptions::default());
+        assert!(
+            on_lines(&d) > 3 * on_lines(&plain).max(1),
+            "{} vs {}",
+            on_lines(&d),
+            on_lines(&plain)
+        );
+        assert!(all_points(&d).iter().all(|p| p.x >= -5.0 && p.x <= 305.0));
+        // Still a solid fill: about as many stitches, not an open one.
+        let (a, b) = (d.stitch_count() as f64, plain.stitch_count() as f64);
+        assert!(a > b * 0.9 && a < b * 1.6, "{a} vs {b}");
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+        // Rows along the motif's lines: said, and nothing breaks.
+        s.params.angle = Some(90.0);
+        let d = plan("t", &[s], &PlanOptions::default());
+        assert!(d.notes.iter().any(|(_, n)| n.contains("along the fill's rows")), "{:?}", d.notes);
+    }
+
+    #[test]
+    fn a_motif_fill_sews_open_rows_and_falls_back_without_a_motif() {
+        let mut s = shape(fill(sq(0.0, 0.0, 300.0)), Kind::Motif, [0, 0, 0]);
+        s.params.motif = Some(vec![vec![(0.0, 0.0), (2.0, 3.0), (4.0, 0.0)]]);
+        let d = plan("t", &[s], &PlanOptions::default());
+        let pts = all_points(&d);
+        assert!(pts.len() > 100, "{}", pts.len());
+        assert!(pts.iter().all(|p| p.x >= -0.5 && p.x <= 300.5 && p.y >= -0.5 && p.y <= 300.5));
+        let t = plan(
+            "t",
+            &[shape(fill(sq(0.0, 0.0, 300.0)), Kind::Fill, [0, 0, 0])],
+            &PlanOptions::default(),
+        );
+        assert!(d.stitch_count() * 3 < t.stitch_count(), "open, not solid");
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+        // No motif (a group called "motif"): filled as usual, and said.
+        let bare = plan(
+            "t",
+            &[shape(fill(sq(0.0, 0.0, 300.0)), Kind::Motif, [0, 0, 0])],
+            &PlanOptions::default(),
+        );
+        assert_eq!(bare.stitch_count(), t.stitch_count());
+        assert_eq!(bare.notes.len(), 1);
     }
 
     #[test]
@@ -7092,6 +7358,167 @@ mod tests {
         assert_eq!(
             plan("p", &[cut, b.clone()], &PlanOptions::default()).trim_count(),
             1
+        );
+    }
+
+    #[test]
+    fn transform_preview_omits_travel_only_between_moving_and_fixed_objects() {
+        let a = shape(fill(sq(0.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let mut b = shape(fill(sq(400.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        b.params.via = Some(Vec::new());
+        let whole = plan("preview", &[a, b], &PlanOptions::default());
+        let travel = whole
+            .travels
+            .iter()
+            .find(|t| t.how == TravelHow::Routed)
+            .unwrap();
+        let n = travel.to - travel.from - 1;
+        assert!(n > 0);
+        let mut together = whole.clone();
+        assert!(!together.hide_crossing_travel(&[0, 1]));
+        assert_eq!(together.stitch_count(), whole.stitch_count());
+        for i in [0, 1] {
+            let mut preview = whole.clone();
+            assert!(preview.hide_crossing_travel(&[i]));
+            assert!(preview.split_shapes(&[i]));
+            assert_eq!(preview.stitch_count(), whole.stitch_count() - n);
+            let original = &whole.blocks[travel.block].runs[travel.run].pts;
+            let preview_points: Vec<_> = preview
+                .blocks
+                .iter()
+                .flat_map(|b| &b.runs)
+                .flat_map(|r| &r.pts)
+                .collect();
+            for p in &original[travel.from + 1..travel.to] {
+                assert!(!preview_points.contains(&p), "stale travel point: {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn trim_before_joined_satin_only_cuts_at_entry() {
+        let column = |x| {
+            let mut s = shape(
+                Geometry::Stroke {
+                    lines: vec![
+                        (vec![P::new(x, 0.0), P::new(x, 100.0)], false),
+                        (vec![P::new(x + 20.0, 0.0), P::new(x + 20.0, 100.0)], false),
+                    ],
+                    width: 20.0,
+                },
+                Kind::Satin,
+                [0; 3],
+            );
+            s.groups = vec!["columns".into()];
+            s.params.rails = Some((1, 2));
+            s
+        };
+        let mut a = column(0.0);
+        let mut b = column(20.0);
+        a.params.trim_before = Some(true);
+        let (_, joined) = joined_satin(&[a.clone(), b.clone()], &[0, 1], 0).unwrap();
+        assert_eq!(joined.params.trim_before, Some(true));
+        assert_eq!(
+            plan("p", &[a.clone(), b.clone()], &PlanOptions::default()).trim_count(),
+            0
+        );
+        let prior = shape(fill(sq(-100.0, 0.0, 50.0)), Kind::Fill, [0; 3]);
+        assert_eq!(
+            plan("p", &[prior, a.clone(), b.clone()], &PlanOptions::default()).trim_count(),
+            1
+        );
+        b.params.trim_before = Some(true);
+        assert!(
+            joined_satin(&[a, b], &[0, 1], 0).is_none(),
+            "an explicit boundary splits the join"
+        );
+    }
+
+    #[test]
+    fn trim_before_overrides_a_short_same_color_hop() {
+        let line = |x| {
+            shape(
+                Geometry::Stroke {
+                    lines: vec![(vec![P::new(x, 0.0), P::new(x + 50.0, 0.0)], false)],
+                    width: 1.0,
+                },
+                Kind::Run,
+                [0; 3],
+            )
+        };
+        let a = line(0.0);
+        let mut b = line(55.0);
+        let opt = PlanOptions::default();
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        b.params.trim_before = Some(true);
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 1);
+        b.params.trim_before = None;
+        assert_eq!(plan("p", &[a, b], &opt).trim_count(), 0);
+    }
+
+    #[test]
+    fn trim_before_is_one_object_boundary_cut() {
+        let mut a = shape(fill(sq(0.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let mut b = shape(fill(sq(130.0, 0.0, 100.0)), Kind::Fill, [0; 3]);
+        let opt = PlanOptions {
+            connect: 150.0,
+            ..PlanOptions::default()
+        };
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        a.params.trim_before = Some(true);
+        assert_eq!(plan("p", &[a.clone()], &opt).trim_count(), 0);
+        b.params.trim_before = Some(true);
+        let d = plan("p", &[a.clone(), b.clone()], &opt);
+        assert_eq!(d.trim_count(), 1);
+        assert!(!d.blocks[0].runs[0].trim_before);
+        assert!(d.blocks[0].runs[1].trim_before);
+        assert!(
+            crate::formats::dst::stream(&d)
+                .iter()
+                .any(|c| c.op == crate::formats::Op::Trim)
+        );
+        a.params.trim = Some(true);
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 1);
+        let mut empty = shape(fill(Vec::new()), Kind::Fill, [0; 3]);
+        empty.params.trim_before = Some(true);
+        let mut skip = b.clone();
+        skip.params.kind = Some(Kind::Skip);
+        assert_eq!(
+            plan(
+                "p",
+                &[a.clone(), empty.clone(), skip.clone(), b.clone()],
+                &opt
+            )
+            .trim_count(),
+            1
+        );
+        let mut automatic = b.clone();
+        automatic.params.trim_before = None;
+        assert_eq!(
+            plan(
+                "p",
+                &[a.clone(), empty.clone(), skip.clone(), automatic.clone()],
+                &opt
+            )
+            .trim_count(),
+            1
+        );
+        assert_eq!(plan("p", &[empty, skip, automatic], &opt).trim_count(), 0);
+        a.params.trim = None;
+        b.params.via = Some(vec![(20.0, 30.0)]);
+        let d = plan("p", &[a.clone(), b.clone()], &opt);
+        assert_eq!(d.trim_count(), 1);
+        assert!(d.routes.is_empty());
+        b.params.trim_before = None;
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        b.params.trim_before = Some(false);
+        assert_eq!(plan("p", &[a.clone(), b.clone()], &opt).trim_count(), 0);
+        b.color = [255; 3];
+        b.params.trim_before = Some(true);
+        assert_eq!(
+            plan("p", &[a, b], &opt).trim_count(),
+            0,
+            "no prior run in a new thread block"
         );
     }
 
@@ -8385,7 +8812,9 @@ mod tests {
     /// now as the measure.) With `ZIGZAG_OVERLAP` set, the faces' letters
     /// are sewn with the `overlap` setting; `ZIGZAG_FONT_SIZE` sets how
     /// big they're set, in mm (21, letters about 15 mm tall, unless it
-    /// says; 11 is about the 8 mm new text starts at).
+    /// says; 11 is about the 8 mm new text starts at). Fonts that aren't
+    /// installed can be tried from a folder: `ZIGZAG_FONT_DIR` (see
+    /// [`crate::svg::bundled_font_dir`]).
     /// `cargo test --lib -- --ignored letters_in_faces_of_your_own --nocapture`
     #[test]
     #[ignore]

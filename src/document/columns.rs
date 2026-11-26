@@ -237,6 +237,7 @@ fn pieces_of(shape: &crate::svg::Shape, order: &[(usize, bool)]) -> Pieces {
     satin_params.start = None;
     satin_params.end = None;
     satin_params.trim = None;
+    satin_params.trim_before = None;
     satin_params.stop = None;
     satin_params.order = None;
     let mut paths: Vec<(BezPath, Params, &'static str)> = Vec::new();
@@ -263,6 +264,7 @@ fn pieces_of(shape: &crate::svg::Shape, order: &[(usize, bool)]) -> Pieces {
         start: None,
         end: None,
         trim: None,
+        trim_before: None,
         stop: None,
         order: None,
         ..shape.params.clone()
@@ -279,6 +281,9 @@ fn pieces_of(shape: &crate::svg::Shape, order: &[(usize, bool)]) -> Pieces {
         if !path.is_empty() {
             paths.push((path, fill_params.clone(), "fill"));
         }
+    }
+    if let Some(first) = paths.first_mut() {
+        first.1.trim_before = shape.params.trim_before;
     }
     // What the shape said happens after it (a cut, a stop) is after the
     // last of its pieces.
@@ -434,7 +439,7 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
           <g id="set" transform="translate(5 5) scale(1.5)">
             <path id="before_fill" fill="#aa0000" d="M0 0 H6 V6 H0 Z"/>
-            <path id="H_satin_trim" fill="#123456" d="M10 10 L13 10 L13 19 L27 19 L27 10 L30 10 L30 30 L27 30 L27 21 L13 21 L13 30 L10 30 Z"/>
+            <path id="H_satin_trim_trimbefore=1" fill="#123456" d="M10 10 L13 10 L13 19 L27 19 L27 10 L30 10 L30 30 L27 30 L27 21 L13 21 L13 30 L10 30 Z"/>
             <path id="after_fill" fill="#00aa00" d="M40 0 H46 V6 H40 Z"/>
           </g>
         </svg>"##;
@@ -456,6 +461,12 @@ mod tests {
         assert!(
             trims[..trims.len() - 1].iter().all(|t| t.is_none()),
             "{trims:?}"
+        );
+        assert_eq!(d.shapes[made[0]].params.trim_before, Some(true));
+        assert!(
+            made.iter()
+                .skip(1)
+                .all(|&i| d.shapes[i].params.trim_before.is_none())
         );
         // Still one satin up to the cut: as many cuts as before.
         assert_eq!(d.plan().trim_count(), cuts);

@@ -219,7 +219,7 @@ fn me_from(v: &Value) -> Me {
 }
 
 /// A session for this computer's account.
-fn session(base: &str, device: &str) -> Result<Api, String> {
+pub(crate) fn session(base: &str, device: &str) -> Result<Api, String> {
     let mut api = Api::new(base);
     api.sign_in(&Cred::Device(device.to_string()), &|_| {})
         .map_err(|e| e.say())?;

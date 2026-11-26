@@ -211,9 +211,12 @@ fn kind_of(bytes: &[u8], named: &str) -> Result<&'static str, String> {
     if head.starts_with(b"#PES") {
         return Ok("pes");
     }
+    if head.starts_with(b"%vsm%") {
+        return Ok("vp3");
+    }
     if let Some(f) = zigzag::formats::READABLE_FORMATS
         .iter()
-        .find(|f| **f == named && named != "pes")
+        .find(|f| **f == named && !matches!(named.as_str(), "pes" | "vp3"))
     {
         // (Formats without a signature: the reader checks them.)
         return Ok(f);
@@ -825,6 +828,8 @@ mod tests {
         assert_eq!(kind_of(b"\xef\xbb\xbf <svg></svg>", "").unwrap(), "svg");
         assert_eq!(kind_of(b"#PES0001....", "svg").unwrap(), "pes");
         assert_eq!(kind_of(b"LA:design", "dst").unwrap(), "dst");
+        assert_eq!(kind_of(b"%vsm%\0...", "svg").unwrap(), "vp3");
+        assert!(kind_of(b"not a vp3", "vp3").is_err());
         assert!(kind_of(b"MZ\x90\x00", "exe").is_err());
         assert!(kind_of(b"MZ\x90\x00", "svg").is_err());
         assert!(kind_of(b"not a pes", "pes").is_err());

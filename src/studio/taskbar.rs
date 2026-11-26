@@ -15,7 +15,7 @@ use crate::commands::Action;
 use crate::icons::Icon;
 use crate::theme::{icon_button, pal_ui, space};
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Vec2};
-use zigzag::boolean::PathOp;
+use zigzag::document::Pathfinder;
 
 /// Height of the bar's buttons.
 const BUTTON: f32 = 28.0;
@@ -286,6 +286,9 @@ impl Studio {
                                     })
                                     .response
                                     .on_hover_text("Font");
+                                if changed {
+                                    crate::lettering::picked_font(&mut spec, &fonts);
+                                }
                                 self.lettering.font_filter = filter;
                                 // (Typed, the height is taken when it's entered:
                                 // `spec` is read from the document every frame,
@@ -385,7 +388,7 @@ impl Studio {
                                     .on_hover_text("Unite into one shape (Pathfinder)")
                                     .clicked()
                             {
-                                act = Some(Action::Pathfinder(PathOp::Unite));
+                                act = Some(Action::Pathfinder(Pathfinder::Unite));
                             }
                             if icon_button(ui, Icon::Duplicate, "Duplicate", false, BUTTON)
                                 .clicked()
@@ -947,7 +950,7 @@ mod tests {
         // Duplicate from the bar.
         let n = h.state().doc.shapes.len();
         h.get_all_by_label("Duplicate")
-            .find(|n| n.rect().top() >= bar.top() - 2.0)
+            .find(|n| (n.rect().top() - bar.top()).abs() <= 2.0)
             .expect("the bar's Duplicate")
             .click();
         h.run_steps(3);
@@ -1015,7 +1018,7 @@ mod tests {
         let was = h.state().doc.shapes[shape].params.kind;
         let at = h
             .get_all_by_label("Satin")
-            .find(|n| n.rect().top() > main.bottom())
+            .find(|n| (n.rect().center().y - thread.center().y).abs() <= 4.0)
             .expect("the outline bar's Satin")
             .rect()
             .center();
@@ -1285,7 +1288,7 @@ mod tests {
         let n = h.state().doc.shapes.len();
         h.state_mut().set_selection(&[a, oa, b, ob]);
         h.state_mut()
-            .run_action(crate::commands::Action::Pathfinder(PathOp::Unite));
+            .run_action(crate::commands::Action::Pathfinder(Pathfinder::Unite));
         h.run_steps(3);
         assert_eq!(h.state().doc.shapes.len(), n - 3, "{}", h.state().status);
         let new = h.state().sel_index().unwrap();

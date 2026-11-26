@@ -18,6 +18,7 @@ pub fn kind_name(k: Kind) -> &'static str {
         Kind::Ripple => "Ripple",
         Kind::Cross => "Cross-stitch",
         Kind::Tartan => "Tartan",
+        Kind::Motif => "Motif",
     }
 }
 
@@ -58,11 +59,14 @@ pub fn kind_help(k: Kind, on_filled_shape: bool) -> &'static str {
         (Kind::Tartan, _) => {
             "Tartan: woven stripes in several threads. Set the stripes below; each thread sews as its own color."
         }
+        (Kind::Motif, _) => {
+            "Motif fill: your own small drawing repeated over the shape in rows of running stitch. Draw a line, select it with the shape, and choose Use as Motif."
+        }
     }
 }
 
 /// Every stitch type, in the order the Stitch panel shows them.
-pub const ALL_KINDS: [Kind; 12] = [
+pub const ALL_KINDS: [Kind; 13] = [
     Kind::Fill,
     Kind::Satin,
     Kind::Run,
@@ -73,6 +77,7 @@ pub const ALL_KINDS: [Kind; 12] = [
     Kind::Ripple,
     Kind::Cross,
     Kind::Tartan,
+    Kind::Motif,
     Kind::Manual,
     Kind::Skip,
 ];
@@ -394,6 +399,19 @@ pub fn draw_kind_icon(p: &egui::Painter, r: Rect, k: Kind, c: Color32) {
                 p.line_segment([at(0.05, v), at(0.95, v)], thin);
             }
         }
+        Kind::Motif => {
+            // A little zigzag motif, repeated in rows.
+            for (row, y) in [0.3f32, 0.75].into_iter().enumerate() {
+                let shift = row as f32 * 0.17;
+                let mut pts = Vec::new();
+                for i in 0..4 {
+                    let x = shift + i as f32 * 0.33 - 0.17;
+                    pts.push(at(x.clamp(0.0, 1.0), y + 0.12));
+                    pts.push(at((x + 0.17).clamp(0.0, 1.0), y - 0.12));
+                }
+                p.add(egui::Shape::line(pts, s));
+            }
+        }
         Kind::Manual => {
             let pts = [
                 at(0.05, 0.75),
@@ -427,6 +445,7 @@ pub fn kind_blurb(k: Kind) -> &'static str {
         Kind::Ripple => "Open rows following the outline, or one spiral.",
         Kind::Cross => "A grid of X's, like hand cross-stitch.",
         Kind::Tartan => "Woven stripes in several threads.",
+        Kind::Motif => "Your own motif repeated in rows of running stitch.",
         Kind::Skip => "Not stitched.",
     }
 }
@@ -445,6 +464,7 @@ pub fn stitch_type_guide(ui: &mut egui::Ui) {
         Kind::Ripple,
         Kind::Cross,
         Kind::Tartan,
+        Kind::Motif,
     ];
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(crate::theme::space::XS);

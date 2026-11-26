@@ -173,6 +173,9 @@ cp packaging/macos/AppIcon-dark.icns "$APP/Contents/Resources/AppIcon-dark.icns"
 # The license, the credits for the code ZigZag ports, and the notices of the
 # libraries it's built from go with every copy.
 cp LICENSE NOTICE THIRD-PARTY-NOTICES.md "$APP/Contents/Resources/"
+# The lettering fonts that come with the app (src/svg.rs finds them here).
+mkdir -p "$APP/Contents/Resources/fonts"
+cp fonts/fonts.json fonts/*.ttf "$APP/Contents/Resources/fonts/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 if [[ $sign == 1 ]]; then

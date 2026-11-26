@@ -1,6 +1,10 @@
 //! ZigZag studio: visual stitch editor (egui, OpenGL via glow) with an
 //! MCP server so agents can work on the same canvas.
 
+// A window app on Windows, so opening ZigZag.exe doesn't also open a console
+// window. `attach_console` gives a launch from a terminal its output back.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod about;
 mod account;
 mod agent;
@@ -26,6 +30,7 @@ mod dock;
 mod eyedropper;
 mod file_dialog;
 mod flyout;
+mod fonts;
 mod gpu;
 mod history;
 mod icons;
@@ -50,13 +55,16 @@ mod perf_bench;
 mod plan_keep;
 mod planner;
 mod profile;
+mod recent;
 mod review;
 mod rotate;
 mod session;
 mod settings;
 mod sew;
 mod shapes;
+mod thumbs;
 mod share;
+mod support;
 mod simplify;
 mod slash;
 mod snap;
@@ -74,12 +82,49 @@ mod update;
 mod view_tools;
 mod widgets;
 
+/// Runs `cmd` without a console window of its own. ZigZag is a window app
+/// on Windows (above), so a console program it starts (curl, claude, codex)
+/// would otherwise open a console window for as long as it runs. Elsewhere
+/// it does nothing.
+pub(crate) fn no_console(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Windows starts a window app without a console, so `--help`, crash
+/// messages and logs printed from a terminal would go nowhere. Use the
+/// console of the terminal that started ZigZag, if any (as Alacritty and
+/// WezTerm do). Output that is already piped somewhere (an agent's
+/// `--mcp-stdio`, a script reading `--help`) stays where it goes.
+#[cfg(windows)]
+fn attach_console() {
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(pid: u32) -> i32;
+    }
+    // SAFETY: takes a constant and touches no memory of ours; fails
+    // harmlessly when there is no parent console.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 const USAGE: &str = "usage: zigzag-studio [design.svg | zigzag://open?url=… ...] [--select N] [--new-window] [--mcp-port PORT | --no-mcp | --mcp-stdio]\n\n  --mcp-stdio   no window: serve the MCP tools over stdin/stdout (headless, for agents)
   --new-window  a window of its own, even with ZigZag running already (also ZIGZAG_NEW_WINDOW=1)
 
 With ZigZag running already, the files open as tabs in its window instead.";
 
 fn main() -> eframe::Result {
+    attach_console();
     // A failure that stops ZigZag leaves a log to report (see `crash`).
     crash::install();
     // (To see the crash log and the report offer work: this fails on
@@ -150,6 +195,8 @@ fn main() -> eframe::Result {
             instance::Start::Alone => {}
         }
     }
+    // The fonts downloaded before, for lettering from the start.
+    fonts::use_kept_fonts();
     // Scan the system fonts in the background: a design without text opens
     // without waiting on them, and they're ready by the first lettering.
     std::thread::spawn(|| {

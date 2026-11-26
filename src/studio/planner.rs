@@ -178,7 +178,7 @@ impl Studio {
             return;
         }
         // Names are cheap, and the lists show them straight away.
-        self.names = zigzag::svg::display_names(&self.doc.shapes);
+        self.names = self.doc.object_names();
         self.planner.pending = true;
         self.dirty = false;
     }

@@ -30,6 +30,8 @@ pub enum Icon {
     Minus,
     ArrowUp,
     ArrowDown,
+    /// An arrow down onto a tray: to download (a font from the catalogue).
+    Download,
     Warning,
     Info,
     ChevronDown,
@@ -75,6 +77,15 @@ pub enum Icon {
     PathMinusFront,
     PathIntersect,
     PathExclude,
+    /// The Pathfinders row: the parts cut apart, the back one trimmed,
+    /// trimmed and joined, cropped to the front one, the edges, the front
+    /// one less the back.
+    PathDivide,
+    PathTrim,
+    PathMerge,
+    PathCrop,
+    PathOutline,
+    PathMinusBack,
     /// A paintbrush.
     Brush,
     /// Illustrator's Anchor Point tool: a caret over a point.
@@ -854,6 +865,11 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             line(&[(0.5, 0.12), (0.5, 0.85)]);
             line(&[(0.22, 0.58), (0.5, 0.86), (0.78, 0.58)]);
         }
+        Icon::Download => {
+            line(&[(0.5, 0.1), (0.5, 0.66)]);
+            line(&[(0.28, 0.44), (0.5, 0.66), (0.72, 0.44)]);
+            line(&[(0.16, 0.7), (0.16, 0.88), (0.84, 0.88), (0.84, 0.7)]);
+        }
         Icon::Warning => {
             closed(&[(0.5, 0.06), (0.96, 0.9), (0.04, 0.9)], Some(c));
             let ink = if c.r() as u32 + c.g() as u32 + c.b() as u32 > 380 {
@@ -952,7 +968,16 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
                 line(&[a, b, c2]);
             }
         }
-        Icon::PathUnite | Icon::PathMinusFront | Icon::PathIntersect | Icon::PathExclude => {
+        Icon::PathUnite
+        | Icon::PathMinusFront
+        | Icon::PathIntersect
+        | Icon::PathExclude
+        | Icon::PathDivide
+        | Icon::PathTrim
+        | Icon::PathMerge
+        | Icon::PathCrop
+        | Icon::PathOutline
+        | Icon::PathMinusBack => {
             let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
                 p.rect_filled(Rect::from_min_max(at(x0, y0), at(x1, y1)), 0.0, c);
             };
@@ -988,9 +1013,60 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
                     outline(0.38, 0.38, 0.9, 0.9);
                     rect(0.38, 0.38, 0.62, 0.62);
                 }
-                _ => {
+                Icon::PathExclude => {
                     back(&rect);
                     front(&rect);
+                }
+                _ => {
+                    // The back one's part apart from the rest, by a gap.
+                    const G: f32 = 0.05;
+                    let back_apart = |rect: &dyn Fn(f32, f32, f32, f32)| {
+                        rect(0.1, 0.1, 0.62, 0.38 - G);
+                        rect(0.1, 0.38 - G, 0.38 - G, 0.62);
+                    };
+                    let dim = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                        p.rect_filled(
+                            Rect::from_min_max(at(x0, y0), at(x1, y1)),
+                            0.0,
+                            c.gamma_multiply(0.55),
+                        );
+                    };
+                    match icon {
+                        Icon::PathDivide => {
+                            back_apart(&rect);
+                            rect(0.38, 0.38, 0.62, 0.62);
+                            rect(0.62 + G, 0.38, 0.9, 0.9);
+                            rect(0.38, 0.62 + G, 0.62 + G, 0.9);
+                        }
+                        Icon::PathTrim => {
+                            back_apart(&rect);
+                            rect(0.38, 0.38, 0.9, 0.9);
+                        }
+                        Icon::PathMerge => {
+                            back(&dim);
+                            rect(0.38, 0.38, 0.9, 0.9);
+                        }
+                        Icon::PathCrop => {
+                            outline(0.38, 0.38, 0.9, 0.9);
+                            rect(0.38, 0.38, 0.62, 0.62);
+                        }
+                        Icon::PathOutline => {
+                            let edge = Stroke::new(1.2, c);
+                            for (x0, y0, x1, y1) in [(0.1, 0.1, 0.62, 0.62), (0.38, 0.38, 0.9, 0.9)]
+                            {
+                                p.rect_stroke(
+                                    Rect::from_min_max(at(x0, y0), at(x1, y1)),
+                                    0.0,
+                                    edge,
+                                    eframe::egui::StrokeKind::Middle,
+                                );
+                            }
+                        }
+                        _ => {
+                            outline(0.1, 0.1, 0.62, 0.62);
+                            front(&rect);
+                        }
+                    }
                 }
             }
         }

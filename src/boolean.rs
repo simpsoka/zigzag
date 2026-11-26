@@ -180,6 +180,8 @@ pub enum PathOp {
     Intersect,
     /// Where an odd number of shapes overlap.
     Exclude,
+    /// The frontmost shape, minus everything behind it.
+    MinusBack,
 }
 
 /// Combine shape areas (back to front). Result rings use even-odd.
@@ -213,6 +215,17 @@ pub fn pathfinder(parts: &[(Vec<Polyline>, FillRule)], op: PathOp) -> Vec<Polyli
         PathOp::Exclude => rest
             .iter()
             .fold(first.clone(), |acc, b| combine(&acc, b, OverlayRule::Xor)),
+        PathOp::MinusBack => {
+            let (front, behind) = norm.split_last().expect("not empty");
+            let behind = behind.iter().fold(Vec::new(), |acc: Vec<Polyline>, b| {
+                if acc.is_empty() {
+                    b.clone()
+                } else {
+                    combine(&acc, b, OverlayRule::Union)
+                }
+            });
+            combine(front, &behind, OverlayRule::Difference)
+        }
     }
 }
 
@@ -421,6 +434,10 @@ mod tests {
         assert!(!point_inside(&x, FillRule::EvenOdd, P::new(75.0, 75.0)));
         assert!(point_inside(&x, FillRule::EvenOdd, P::new(25.0, 25.0)));
         assert!(point_inside(&x, FillRule::EvenOdd, P::new(125.0, 125.0)));
+        let back = pathfinder(&parts, PathOp::MinusBack);
+        assert!((area(&back) - 7500.0).abs() < 1.0);
+        assert!(point_inside(&back, FillRule::EvenOdd, P::new(125.0, 125.0)));
+        assert!(!point_inside(&back, FillRule::EvenOdd, P::new(25.0, 25.0)));
     }
 
     #[test]
