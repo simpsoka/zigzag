@@ -3262,6 +3262,7 @@ impl Studio {
         }
         let opts = DrawOptions {
             show_jumps: self.prefs.show_jumps && self.drag.is_none() && !self.plan_cut,
+            show_cut_jumps: self.prefs.show_cut_jumps && self.drag.is_none() && !self.plan_cut,
             limit: self.player.unwrap_or(usize::MAX),
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,

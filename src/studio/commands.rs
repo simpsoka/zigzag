@@ -123,6 +123,7 @@ pub enum Action {
     ToggleStitchLines,
     TogglePoints,
     ToggleJumps,
+    ToggleCutJumps,
     /// Tint where stitches pile up (View › Density Map).
     ToggleDensity,
     /// Number the objects in sewing order on the canvas.
@@ -476,7 +477,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Entry>)> {
                 ),
                 Item(Action::ToggleTaskBar, "Contextual Task Bar", None),
                 Item(Action::TogglePoints, "Needle Points", None),
-                Item(Action::ToggleJumps, "Jump Stitches", None),
+                Item(Action::ToggleJumps, "Uncut Jumps", None),
+                Item(Action::ToggleCutJumps, "Cut Travel", None),
                 Item(Action::ToggleDensity, "Density Map", None),
                 Item(Action::ToggleOrder, "Sewing Order", None),
                 Sep,
@@ -761,6 +763,7 @@ impl Studio {
             }
             Action::TogglePoints => self.view_tools.points,
             Action::ToggleJumps => self.prefs.show_jumps,
+            Action::ToggleCutJumps => self.prefs.show_cut_jumps,
             Action::ToggleDensity => self.view_tools.density,
             Action::ToggleOrder => self.view_tools.order_labels,
             Action::Panel(p) => self.dock.visible(p),
@@ -962,6 +965,10 @@ impl Studio {
             Action::TogglePoints => self.view_tools.points = !self.view_tools.points,
             Action::ToggleJumps => {
                 self.prefs.show_jumps = !self.prefs.show_jumps;
+                self.prefs.save();
+            }
+            Action::ToggleCutJumps => {
+                self.prefs.show_cut_jumps = !self.prefs.show_cut_jumps;
                 self.prefs.save();
             }
             Action::Settings => self.open_settings(self.settings_ui.section),

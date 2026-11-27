@@ -589,6 +589,7 @@ impl Studio {
         }
         let opts = DrawOptions {
             show_jumps: false,
+            show_cut_jumps: false,
             limit: usize::MAX,
             thread_mm: 0.4,
             view: self.view_tools.stitch_view,
