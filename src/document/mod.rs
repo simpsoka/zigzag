@@ -558,7 +558,17 @@ impl Document {
             return Ok(());
         }
         let uids = self.uid_map(&renames);
+        // A canvas that changed size (it follows the hoop) moves the px
+        // origin, which is where shapes are measured from: move the offset
+        // with it, so nothing moves on the hoop.
+        let before = self.root_transform()?;
         self.xml = xml;
+        let after = self.root_transform()?;
+        self.offset = self.offset
+            + P::new(
+                ((after[4] - before[4]) * PX_TO_UNITS).round(),
+                ((after[5] - before[5]) * PX_TO_UNITS).round(),
+            );
         self.removed_parts = self
             .removed_parts
             .iter()
@@ -1164,6 +1174,31 @@ impl Document {
                 }
             },
         }
+        // ZigZag's own canvas is the hoop: it follows the hoop's size. (A
+        // drawing's own canvas, Illustrator's or Inkscape's, stays as it is.)
+        let (hw, hh) = self.settings.hoop;
+        if let Some((w, h)) = hoop_canvas(root)
+            && ((w - hw).abs() > 1e-6 || (h - hh).abs() > 1e-6)
+        {
+            for (name, value) in [
+                ("width", format!("{}mm", mm_text(hw))),
+                ("height", format!("{}mm", mm_text(hh))),
+                (
+                    "viewBox",
+                    format!(
+                        "{} {} {} {}",
+                        mm_text(-hw / 2.0),
+                        mm_text(-hh / 2.0),
+                        mm_text(hw),
+                        mm_text(hh)
+                    ),
+                ),
+            ] {
+                if let Some(a) = root.attributes().find(|a| a.name() == name) {
+                    edits.push((a.range_value(), value));
+                }
+            }
+        }
         let mut xml = self.xml.clone();
         edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
         for (range, text) in edits {
@@ -1351,6 +1386,40 @@ fn root_tag(xml: &str) -> Option<&str> {
 }
 
 /// Length of a namespace prefix on the root tag (`<svg:svg` → 4).
+/// The size (mm) of ZigZag's own canvas: a root `width`/`height` in mm
+/// whose `viewBox` is the same size, centered on (0, 0), as a new document
+/// has. None for any other canvas (a drawing's own).
+fn hoop_canvas(root: roxmltree::Node) -> Option<(f64, f64)> {
+    let mm = |name: &str| -> Option<f64> {
+        root.attribute(name)?
+            .trim()
+            .strip_suffix("mm")?
+            .parse()
+            .ok()
+    };
+    let (w, h) = (mm("width")?, mm("height")?);
+    let vb: Vec<f64> = root
+        .attribute("viewBox")?
+        .split([' ', ','])
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().ok())
+        .collect::<Option<_>>()?;
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    (vb.len() == 4
+        && close(vb[2], w)
+        && close(vb[3], h)
+        && close(vb[0], -w / 2.0)
+        && close(vb[1], -h / 2.0))
+    .then_some((w, h))
+}
+
+/// A length in mm as the canvas writes it: no more decimals than it needs.
+fn mm_text(v: f64) -> String {
+    let s = format!("{:.3}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
 fn root_prefix_len(xml: &str, start: usize) -> usize {
     let tag = &xml[start + 1..];
     let end = tag
@@ -2431,6 +2500,96 @@ mod tests {
         let again = Document::from_svg(&saved, "t", None).unwrap();
         let b2 = svg::shapes_bounds(&again.shapes);
         assert!((b2.width() - b.width()).abs() < 0.5);
+    }
+
+    /// Where a saved drawing's shapes are, as other apps draw it: its
+    /// middle relative to the canvas's middle (px), and the canvas's size.
+    fn as_drawn(saved: &str) -> ((f32, f32), (f32, f32)) {
+        let tree = svg::parse_tree(saved.as_bytes()).unwrap();
+        let px = tree.root().abs_bounding_box().unwrap();
+        let (w, h) = (tree.size().width(), tree.size().height());
+        (
+            (
+                (px.left() + px.right()) / 2.0 - w / 2.0,
+                (px.top() + px.bottom()) / 2.0 - h / 2.0,
+            ),
+            (w, h),
+        )
+    }
+
+    #[test]
+    fn the_canvas_follows_the_hoop_and_nothing_moves_on_it() {
+        let mut d = Document::empty();
+        let sq = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10"><rect id="sq" width="10" height="10" fill="#f00"/></svg>"##;
+        let place = Placement {
+            center_mm: Some((20.0, -30.0)),
+            ..Placement::default()
+        };
+        let new = d.add_svg(sq, place).unwrap();
+        let on_hoop = svg::shapes_bounds(&d.shapes[new[0]..=new[0]]);
+        d.settings.hoop = (130.0, 180.0);
+        d.sync().unwrap();
+        let saved = d.to_svg().unwrap();
+        assert!(
+            saved.contains(r#"width="130mm" height="180mm" viewBox="-65 -90 130 180""#),
+            "{saved}"
+        );
+        // Still 20 mm right of and 30 mm above the hoop's middle: in ZigZag,
+        // and as other apps draw the canvas (3.78 px a mm).
+        let b = svg::shapes_bounds(&d.shapes[new[0]..=new[0]]);
+        assert!(
+            (b.center() - on_hoop.center()).len() < 0.5,
+            "{:?} → {:?}",
+            on_hoop.center(),
+            b.center()
+        );
+        let ((dx, dy), (w, h)) = as_drawn(&saved);
+        let px_mm = 96.0 / 25.4;
+        assert!(
+            (w - 130.0 * px_mm).abs() < 0.5 && (h - 180.0 * px_mm).abs() < 0.5,
+            "{w}x{h}"
+        );
+        assert!(
+            (dx - 20.0 * px_mm).abs() < 0.5 && (dy + 30.0 * px_mm).abs() < 0.5,
+            "({dx}, {dy}) px from the middle"
+        );
+        // A smaller hoop, and back: the same.
+        d.settings.hoop = (70.0, 70.0);
+        d.sync().unwrap();
+        assert!(d.to_svg().unwrap().contains(r#"viewBox="-35 -35 70 70""#));
+        assert!(
+            (svg::shapes_bounds(&d.shapes[new[0]..=new[0]]).center() - on_hoop.center()).len()
+                < 0.5
+        );
+        // And it opens with its canvas the hoop it was saved for.
+        let again = Document::from_svg(&d.to_svg().unwrap(), "t", None).unwrap();
+        assert_eq!(again.settings.hoop, (70.0, 70.0));
+    }
+
+    #[test]
+    fn a_drawings_own_canvas_stays_as_it_is() {
+        // Illustrator's artboard (or Inkscape's page) isn't the hoop.
+        let mut d = Document::from_svg(ILLUSTRATOR, "t", None).unwrap();
+        let root = |x: &str| {
+            let at = x.find("<svg").unwrap();
+            x[at..at + x[at..].find('>').unwrap()].to_string()
+        };
+        let before = root(&d.xml);
+        d.settings.hoop = (130.0, 180.0);
+        d.sync().unwrap();
+        let after = root(&d.to_svg().unwrap());
+        for attr in ["width=\"50.8mm\"", "viewBox=\"0 0 144 144\""] {
+            assert!(before.contains(attr) && after.contains(attr), "{after}");
+        }
+    }
+
+    #[test]
+    fn a_canvas_that_is_already_the_hoop_is_written_as_it_was() {
+        let mut d = Document::empty();
+        let before = d.to_svg().unwrap();
+        d.sync().unwrap();
+        assert_eq!(d.to_svg().unwrap(), before);
+        assert!(before.contains(r#"width="100mm" height="100mm" viewBox="-50 -50 100 100""#));
     }
 
     #[test]
