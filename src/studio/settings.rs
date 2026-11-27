@@ -699,6 +699,35 @@ impl Studio {
                 value(ui, &format_name(p.format)).labelled_by(lid);
             }
         });
+        // Beside an EXP, what some machines read too: Bernina's (and
+        // bernette's) thread colors and preview, Melco EXP+'s colors.
+        if p.format == Some("exp") {
+            row(ui, "With the EXP", |ui, lid| {
+                if mine {
+                    ui.vertical(|ui| {
+                        ui.checkbox(&mut p.exp_files.inf, "Thread colors (.inf)")
+                            .labelled_by(lid)
+                            .on_hover_text(
+                                "A Bernina, bernette or Melco (EXP+) shows the design in its thread colors; without it, in standard ones",
+                            );
+                        ui.checkbox(&mut p.exp_files.bmp, "Preview (.bmp)")
+                            .on_hover_text("The picture a Bernina or bernette shows of the design");
+                    });
+                } else {
+                    let names = p.exp_files.names();
+                    let text = if names.is_empty() {
+                        "Nothing else".to_string()
+                    } else {
+                        names
+                            .iter()
+                            .map(|n| format!(".{n}"))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    };
+                    value(ui, &text).labelled_by(lid);
+                }
+            });
+        }
         // How a design gets to it: by a file, or straight from ZigZag
         // (which is what puts Send in the toolbar and the File menu).
         let link_name = |l: Option<&'static str>| {

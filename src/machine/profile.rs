@@ -33,6 +33,9 @@ pub struct Profile {
     /// How ZigZag sends a design straight to it (one of [`LINKS`]), if it
     /// does: the rest take a file.
     pub link: Option<&'static str>,
+    /// The files it reads beside an EXP: thread colors (`.inf`) and a
+    /// preview (`.bmp`), as Bernina machines do.
+    pub exp_files: crate::formats::ExpFiles,
     /// Where the values come from.
     pub source: String,
     /// Someone has sewn on this machine from ZigZag with these values.
@@ -104,6 +107,7 @@ impl Profile {
             min_stitch_mm: None,
             lock: None,
             link: None,
+            exp_files: Default::default(),
             source: String::new(),
             tested: false,
         }
@@ -143,6 +147,13 @@ impl Profile {
                 .filter(|m| MIN_STITCH_MM.contains(m)),
             lock: lock_from_json(&v["lock"]),
             link: v["link"].as_str().and_then(machine_link),
+            exp_files: crate::formats::ExpFiles::from_names(
+                v["exp_files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            ),
             source: v["source"].as_str().unwrap_or("").to_string(),
             tested: v["tested"].as_bool().unwrap_or(false),
         })
@@ -167,6 +178,9 @@ impl Profile {
         }
         if let Some(l) = self.link {
             v["link"] = json!(l);
+        }
+        if !self.exp_files.is_empty() {
+            v["exp_files"] = json!(self.exp_files.names());
         }
         if !self.source.is_empty() {
             v["source"] = json!(self.source);
@@ -194,6 +208,7 @@ impl Profile {
         }
         s.min_stitch_mm = self.min_stitch_mm.unwrap_or(DEFAULT_MIN_STITCH_MM);
         s.lock = self.lock.unwrap_or_default();
+        s.exp_files = self.exp_files;
     }
 }
 
@@ -297,6 +312,11 @@ mod tests {
             );
             // A format that's named is one ZigZag writes.
             assert_eq!(v["format"].as_str(), p.format, "{}", p.id);
+            // Files beside the machine file only beside an EXP, and each
+            // one named is read.
+            let extra = v["exp_files"].as_array().map_or(0, Vec::len);
+            assert_eq!(extra, p.exp_files.names().len(), "{}", p.id);
+            assert!(extra == 0 || p.format == Some("exp"), "{}", p.id);
             assert!(
                 !p.source.is_empty(),
                 "{} says where its values come from",
@@ -326,6 +346,22 @@ mod tests {
         assert_eq!(Profile::from_json(&p.to_json()), Some(p.clone()));
         p.lock = Some(Lock::new(LockStyle::None, 0.4, 4));
         assert_eq!(Profile::from_json(&p.to_json()), Some(p.clone()));
+        // The files beside an EXP: listed by name, and only the known ones.
+        p.exp_files = crate::formats::ExpFiles {
+            inf: true,
+            bmp: false,
+        };
+        assert_eq!(p.to_json()["exp_files"], json!(["inf"]));
+        assert_eq!(Profile::from_json(&p.to_json()), Some(p.clone()));
+        let mut v = p.to_json();
+        v["exp_files"] = json!(["inf", "bmp", "pdf"]);
+        assert_eq!(
+            Profile::from_json(&v).unwrap().exp_files,
+            crate::formats::ExpFiles {
+                inf: true,
+                bmp: true
+            }
+        );
         // A shortest stitch out of range is none.
         let mut v = p.to_json();
         v["min_stitch_mm"] = json!(7.0);

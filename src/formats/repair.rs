@@ -238,6 +238,7 @@ impl Checked {
         ExportOptions {
             lock: self.lock,
             min_stitch: 0.0,
+            ..Default::default()
         }
     }
 }

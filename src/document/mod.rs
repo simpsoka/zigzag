@@ -83,6 +83,9 @@ pub struct Settings {
     pub min_stitch_mm: f64,
     /// The lock stitches where sewing starts and before the thread is cut.
     pub lock: Lock,
+    /// The files written beside an EXP for the machine: its thread colors
+    /// (`.inf`) and preview (`.bmp`), as Bernina machines read them.
+    pub exp_files: crate::formats::ExpFiles,
     /// Satins narrower than this on average (mm) get a warning. How narrow
     /// a column still sews cleanly depends on the fabric and the thread.
     pub narrow_satin_mm: f64,
@@ -158,6 +161,7 @@ impl Default for Settings {
             machine: None,
             min_stitch_mm: DEFAULT_MIN_STITCH_MM,
             lock: Lock::default(),
+            exp_files: Default::default(),
             narrow_satin_mm: DEFAULT_NARROW_SATIN_MM,
             chats: None,
         }
@@ -194,6 +198,7 @@ impl Settings {
                     }
                 }
                 "lock" => s.lock = Lock::parse(v).unwrap_or_default(),
+                "expfiles" => s.exp_files = crate::formats::ExpFiles::from_names(v.split('+')),
                 "chats" if is_chats_id(v) => s.chats = Some(v.into()),
                 "narrowsatin" => {
                     if let Some(m) = v.parse::<f64>().ok().filter(|m| m.is_finite()) {
@@ -246,6 +251,9 @@ impl Settings {
         if self.lock != Lock::default() {
             s.push_str(&format!(" lock={}", self.lock.format()));
         }
+        if !self.exp_files.is_empty() {
+            s.push_str(&format!(" expfiles={}", self.exp_files.names().join("+")));
+        }
         if self.narrow_satin_mm != DEFAULT_NARROW_SATIN_MM {
             s.push_str(&format!(
                 " narrowsatin={}",
@@ -263,6 +271,7 @@ impl Settings {
     /// What the machine file is written with.
     pub fn export_options(&self) -> crate::formats::ExportOptions {
         crate::formats::ExportOptions {
+            exp_files: self.exp_files,
             lock: self.lock,
             // (The usual shortest stitch is what a file's whole units give
             // anyway: nothing more to merge.)
@@ -2590,6 +2599,35 @@ mod tests {
         d.sync().unwrap();
         assert_eq!(d.to_svg().unwrap(), before);
         assert!(before.contains(r#"width="100mm" height="100mm" viewBox="-50 -50 100 100""#));
+    }
+
+    #[test]
+    fn a_bernina_design_keeps_the_files_its_exp_needs() {
+        let mut d = Document::empty();
+        assert!(
+            !d.to_svg().unwrap().contains("expfiles"),
+            "nothing written by default"
+        );
+        let bernina = crate::machine::profile::builtin_named("bernina-exp").expect("built in");
+        bernina.apply(&mut d.settings, false);
+        assert_eq!(
+            d.settings.exp_files,
+            crate::formats::ExpFiles {
+                inf: true,
+                bmp: true
+            }
+        );
+        assert_eq!(d.settings.export_options().exp_files, d.settings.exp_files);
+        assert_eq!(d.settings.hoop, (145.0, 255.0), "the Large Oval to start");
+        let saved = d.to_svg().unwrap();
+        assert!(saved.contains("expfiles=inf+bmp"), "{saved}");
+        let again = Document::from_svg(&saved, "t", None).unwrap();
+        assert_eq!(again.settings.exp_files, d.settings.exp_files);
+        // Another machine takes them away again.
+        crate::machine::profile::builtin_named("brother-5x7")
+            .unwrap()
+            .apply(&mut d.settings, false);
+        assert!(d.settings.exp_files.is_empty());
     }
 
     #[test]

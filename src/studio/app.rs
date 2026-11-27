@@ -1283,19 +1283,19 @@ impl Studio {
             .map(Path::to_path_buf)
     }
 
-    pub fn export_to(&mut self, ext: &str, path: &Path) -> anyhow::Result<()> {
+    /// Write the design as a file of format `ext` at `path`, and beside it
+    /// the files the machine reads with it (a Bernina's `.inf` and `.bmp`
+    /// beside an EXP). Returns the paths of those.
+    pub fn export_to(&mut self, ext: &str, path: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
         self.plan_now();
+        let opt = self.doc.settings.export_options();
         let bytes = if ext == "html" {
             self.worksheet_html()?.into_bytes()
         } else {
-            zigzag::formats::write_format_with(
-                &self.design,
-                ext,
-                &self.doc.settings.export_options(),
-            )?
+            zigzag::formats::write_format_with(&self.design, ext, &opt)?
         };
         std::fs::write(path, bytes)?;
-        Ok(())
+        zigzag::formats::write_companion_files(&self.design, ext, path, &opt)
     }
 
     /// File › Print Worksheet: write the worksheet where temporary files go
@@ -4448,6 +4448,10 @@ mod tests {
         for ext in ["pes", "dst", "exp", "jef", "vp3"] {
             let path = dir.join(format!("badge.{ext}"));
             source.export_to(ext, &path).unwrap();
+            assert!(
+                !path.with_extension("inf").exists(),
+                "{ext}: no extra files unless the machine reads them"
+            );
             let file = read_stitch_file(&std::fs::read(&path).unwrap(), ext).unwrap();
             let runs: usize = file.blocks.iter().map(|b| b.runs.len()).sum();
             let pts: Vec<P> = file

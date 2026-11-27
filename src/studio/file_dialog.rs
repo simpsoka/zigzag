@@ -187,7 +187,17 @@ impl Studio {
             }
             Then::Export(ext) => {
                 self.status = match self.export_to(ext, &path) {
-                    Ok(()) => format!("Exported {}", path.display()),
+                    Ok(extra) if extra.is_empty() => format!("Exported {}", path.display()),
+                    Ok(extra) => format!(
+                        "Exported {}, with {}",
+                        path.display(),
+                        extra
+                            .iter()
+                            .filter_map(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
                     Err(e) => format!("Couldn't export {}: {e}", path.display()),
                 };
             }

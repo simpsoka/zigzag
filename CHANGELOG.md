@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A Bernina machine profile, with Bernina's Large Oval, Mega, Maxi and
+  Jumbo hoops. An EXP exported for it comes with the `.inf` thread
+  colors and `.bmp` preview Bernina machines read beside it, so the
+  machine shows the design in its own colors. Machines of your own that
+  read EXP can write either file too (Settings › Machines › With the EXP).
+
 ## 0.1.12 — 2026-11-25
 
 - A machine file placed with File › Place comes in as one group named

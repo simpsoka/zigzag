@@ -1,8 +1,10 @@
 //! Output formats. PES/PEC/DST share a flat command stream (like pyembroidery's);
 //! the Brother Skitch's PEN format is encoded straight from the [`Design`].
 
+pub mod bmp;
 pub mod charts;
 pub mod dst;
+pub mod inf;
 pub mod jef_data;
 pub mod more;
 pub mod pec_data;
@@ -193,9 +195,98 @@ impl Lock {
     }
 }
 
+/// Files some machines read beside an EXP: the thread colors (`.inf`),
+/// which Bernina, bernette and Melco's EXP+ use, and a preview picture
+/// (`.bmp`), which Bernina and bernette show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExpFiles {
+    pub inf: bool,
+    pub bmp: bool,
+}
+
+impl ExpFiles {
+    /// Their names, as files, settings and agents write them.
+    pub const NAMES: [&'static str; 2] = ["inf", "bmp"];
+
+    /// From names (`inf`, `bmp`); unknown ones are left out.
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> ExpFiles {
+        let mut f = ExpFiles::default();
+        for n in names {
+            match n.trim().to_ascii_lowercase().as_str() {
+                "inf" => f.inf = true,
+                "bmp" => f.bmp = true,
+                _ => {}
+            }
+        }
+        f
+    }
+
+    /// The names of the files there are.
+    pub fn names(&self) -> Vec<&'static str> {
+        [(self.inf, "inf"), (self.bmp, "bmp")]
+            .into_iter()
+            .filter(|f| f.0)
+            .map(|f| f.1)
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.inf && !self.bmp
+    }
+}
+
+/// The files written beside a machine file of format `ext`, by extension:
+/// for an EXP, those `opt.exp_files` asks for. (None for any other format.)
+pub fn companion_files(
+    d: &Design,
+    ext: &str,
+    opt: &ExportOptions,
+) -> anyhow::Result<Vec<(&'static str, Vec<u8>)>> {
+    let mut out = Vec::new();
+    if !ext.eq_ignore_ascii_case("exp") {
+        return Ok(out);
+    }
+    if opt.exp_files.inf {
+        out.push(("inf", inf::write_inf(d)));
+    }
+    if opt.exp_files.bmp && d.stitch_count() > 0 {
+        let look = preview::PreviewOptions {
+            background: [255, 255, 255],
+            ..Default::default()
+        };
+        // (Drawn larger, then fitted into the square a Bernina shows: see
+        // `bmp`.)
+        let (w, h, rgba) = preview::render_rgba(d, &look, 2 * bmp::PREVIEW_PX)?;
+        let side = bmp::PREVIEW_PX;
+        let square = bmp::fit_square(w, h, &rgba, side, look.background);
+        out.push(("bmp", bmp::write_bmp(side, side, &square, look.background)));
+    }
+    Ok(out)
+}
+
+/// Write the [`companion_files`] of a machine file of format `ext` written
+/// at `path` beside it (same name, their own extensions). Returns their
+/// paths.
+pub fn write_companion_files(
+    d: &Design,
+    ext: &str,
+    path: &std::path::Path,
+    opt: &ExportOptions,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut written = Vec::new();
+    for (e, bytes) in companion_files(d, ext, opt)? {
+        let to = path.with_extension(e);
+        std::fs::write(&to, bytes)?;
+        written.push(to);
+    }
+    Ok(written)
+}
+
 /// What a document says about the machine file, whatever its format.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ExportOptions {
+    /// The files written beside an EXP (see [`companion_files`]).
+    pub exp_files: ExpFiles,
     pub lock: Lock,
     /// No stitch in the file is shorter than this, units (0: any length).
     /// The plan already keeps to it; rounding to the file's whole units can
@@ -942,5 +1033,115 @@ mod ciede2000_tests {
             })
             .unwrap();
         assert_eq!(*best, [11, 61, 145], "Ultramarine, not Purple");
+    }
+}
+
+#[cfg(test)]
+mod companion_tests {
+    use super::*;
+    use crate::design::{Block, Run};
+    use crate::geom::P;
+
+    fn design() -> Design {
+        let run = |y: f64| Run {
+            pts: (0..20).map(|k| P::new(k as f64 * 20.0, y)).collect(),
+            trim_before: true,
+        };
+        Design {
+            blocks: vec![
+                Block {
+                    color: [245, 236, 30],
+                    runs: vec![run(0.0)],
+                },
+                Block {
+                    color: [31, 111, 209],
+                    runs: vec![run(100.0)],
+                },
+            ],
+            ..Design::default()
+        }
+    }
+
+    #[test]
+    fn an_exp_gets_the_files_its_machine_reads_and_nothing_else_does() {
+        let d = design();
+        let both = ExportOptions {
+            exp_files: ExpFiles {
+                inf: true,
+                bmp: true,
+            },
+            ..Default::default()
+        };
+        let files = companion_files(&d, "exp", &both).unwrap();
+        assert_eq!(
+            files.iter().map(|f| f.0).collect::<Vec<_>>(),
+            ["inf", "bmp"]
+        );
+        assert_eq!(
+            inf::read_inf_colors(&files[0].1).unwrap(),
+            [[245, 236, 30], [31, 111, 209]],
+            "the colors in sewing order"
+        );
+        let bmp = &files[1].1;
+        assert_eq!(&bmp[0..2], b"BM");
+        // 120 × 120, 24-bit, bottom row first: the bitmap a Bernina shows.
+        assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 120);
+        assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), 120);
+        assert_eq!(u16::from_le_bytes([bmp[28], bmp[29]]), 24);
+        // Only what's asked for, and only beside an EXP.
+        let inf_only = ExportOptions {
+            exp_files: ExpFiles {
+                inf: true,
+                bmp: false,
+            },
+            ..Default::default()
+        };
+        assert_eq!(companion_files(&d, "exp", &inf_only).unwrap().len(), 1);
+        assert!(
+            companion_files(&d, "exp", &ExportOptions::default())
+                .unwrap()
+                .is_empty()
+        );
+        for ext in ["pes", "dst", "jef", "vp3"] {
+            assert!(companion_files(&d, ext, &both).unwrap().is_empty(), "{ext}");
+        }
+    }
+
+    #[test]
+    fn they_are_written_beside_the_exp_under_its_name() {
+        let dir = std::env::temp_dir().join(format!("zigzag-companions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rose.exp");
+        let opt = ExportOptions {
+            exp_files: ExpFiles {
+                inf: true,
+                bmp: true,
+            },
+            ..Default::default()
+        };
+        let written = write_companion_files(&design(), "exp", &path, &opt).unwrap();
+        assert_eq!(written, [dir.join("rose.inf"), dir.join("rose.bmp")]);
+        assert!(written.iter().all(|p| p.is_file()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_files_are_named_as_settings_and_machines_write_them() {
+        assert_eq!(
+            ExpFiles::from_names(["bmp", "INF", "pdf"]),
+            ExpFiles {
+                inf: true,
+                bmp: true
+            }
+        );
+        assert_eq!(
+            ExpFiles {
+                inf: true,
+                bmp: true
+            }
+            .names(),
+            ["inf", "bmp"]
+        );
+        assert!(ExpFiles::from_names([]).is_empty());
     }
 }

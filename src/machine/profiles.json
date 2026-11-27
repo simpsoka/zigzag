@@ -66,6 +66,16 @@
       "tested": false
     },
     {
+      "id": "bernina-exp",
+      "name": "Bernina (EXP with thread colors)",
+      "hoops": ["145x255", "150x400", "210x400", "260x400"],
+      "default_hoop": "145x255",
+      "format": "exp",
+      "exp_files": ["inf", "bmp"],
+      "source": "Bernina's embroidery machines read EXP with a .inf file of thread colors and a .bmp preview beside it (without the .inf they show the design in standard colors). Hoops: the sewing fields Bernina lists for its Large Oval (145 × 255 mm), Mega (150 × 400), Maxi (210 × 400) and Jumbo (260 × 400; 7 Series machines sew 210 × 400 of it). Not every hoop fits every model.",
+      "tested": false
+    },
+    {
       "id": "zsk-sprint-8",
       "name": "ZSK Sprint 8",
       "hoops": ["300x400"],

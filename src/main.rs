@@ -382,6 +382,11 @@ fn write_output(doc: &Document, d: &Design, path: &Path, hoop: (f64, f64)) -> Re
     };
     std::fs::write(path, bytes)?;
     eprintln!("wrote {}", path.display());
+    for extra in
+        zigzag::formats::write_companion_files(d, &ext, path, &doc.settings.export_options())?
+    {
+        eprintln!("wrote {}", extra.display());
+    }
     Ok(())
 }
 

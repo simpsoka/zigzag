@@ -176,7 +176,14 @@ pub fn read(bytes: &[u8]) -> Result<(Design, ExportOptions)> {
         blocks,
         ..Design::default()
     };
-    Ok((d, ExportOptions { lock, min_stitch }))
+    Ok((
+        d,
+        ExportOptions {
+            lock,
+            min_stitch,
+            ..Default::default()
+        },
+    ))
 }
 
 #[cfg(test)]

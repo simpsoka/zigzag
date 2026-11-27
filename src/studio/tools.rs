@@ -2362,12 +2362,17 @@ impl Studio {
                     ),
                     Some(p) if p.is_absolute() => self
                         .export_to(fmt.unwrap_or(""), &p)
-                        .and_then(|_| {
+                        .and_then(|extra| {
                             let mut said = format!(
                                 "Wrote {} ({} stitches).",
                                 p.display(),
                                 self.design.stitch_count()
                             );
+                            // (What the machine reads beside it: a Bernina's
+                            // thread colors and preview.)
+                            for e in &extra {
+                                said.push_str(&format!(" Wrote {}.", e.display()));
+                            }
                             // The map of its commands to the objects.
                             if args.get("objects").and_then(Value::as_bool) == Some(true) {
                                 let file = p.file_name().unwrap_or_default().to_string_lossy();
@@ -6255,6 +6260,41 @@ mod tests {
         assert_eq!(s.doc.shapes.len(), n + 2);
         s.run_tool("undo", &json!({}));
         assert_eq!(s.doc.shapes.len(), n, "undo takes it out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exporting_an_exp_for_a_bernina_writes_its_colors_and_preview_too() {
+        let dir = std::env::temp_dir().join(format!("zigzag-bernina-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = Studio::with_file(None, None);
+        ok(s.run_tool("add_svg", &json!({ "svg": BADGE, "replace": true })));
+        ok(s.run_tool("set_document", &json!({ "machine": "bernina-exp" })));
+        let path = dir.join("badge.exp");
+        let r = s.run_tool("export", &json!({ "path": path.to_str().unwrap() }));
+        assert!(!r.is_error, "{}", text(&r));
+        let said = text(&r);
+        for ext in ["exp", "inf", "bmp"] {
+            let f = path.with_extension(ext);
+            assert!(f.is_file(), "{ext} written: {said}");
+            assert!(
+                said.contains(&f.display().to_string()),
+                "{ext} said: {said}"
+            );
+        }
+        // The .inf has a color for each thread change, in sewing order.
+        let inf = std::fs::read(path.with_extension("inf")).unwrap();
+        let colors = zigzag::formats::inf::read_inf_colors(&inf).unwrap();
+        let blocks: Vec<[u8; 3]> = s.design.blocks.iter().map(|b| b.color).collect();
+        assert_eq!(colors, blocks);
+        // Another machine's EXP is the EXP alone.
+        ok(s.run_tool("set_document", &json!({ "machine": "melco-summit" })));
+        let other = dir.join("plain.exp");
+        assert!(
+            !s.run_tool("export", &json!({ "path": other.to_str().unwrap() }))
+                .is_error
+        );
+        assert!(other.is_file() && !other.with_extension("inf").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
